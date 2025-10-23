@@ -1,7 +1,12 @@
+use core::cmp;
 use core::ffi::{c_char, c_int, c_void};
+use core::mem;
 use core::ptr::{self, NonNull};
 
 use crate::kernel::memory::{self, MemoryProtection};
+
+const EINVAL: c_int = 22;
+const ENOMEM: c_int = 12;
 
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
@@ -338,6 +343,147 @@ pub unsafe extern "C" fn strstr(haystack: *const c_char, needle: *const c_char) 
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn strdup(s: *const c_char) -> *mut c_char {
+    if s.is_null() {
+        return ptr::null_mut();
+    }
+
+    let len = strlen(s);
+    let Some(total) = len.checked_add(1) else {
+        return ptr::null_mut();
+    };
+
+    match memory::malloc(total) {
+        Some(block) => {
+            let dest = block.as_ptr() as *mut c_char;
+            ptr::copy_nonoverlapping(s, dest, total);
+            dest
+        }
+        None => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strndup(s: *const c_char, n: usize) -> *mut c_char {
+    if s.is_null() {
+        return ptr::null_mut();
+    }
+
+    let len = cmp::min(strnlen(s, n), n);
+    let Some(total) = len.checked_add(1) else {
+        return ptr::null_mut();
+    };
+
+    match memory::malloc(total) {
+        Some(block) => {
+            let dest = block.as_ptr() as *mut c_char;
+            ptr::copy_nonoverlapping(s, dest, len);
+            *dest.add(len) = 0;
+            dest
+        }
+        None => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
+    let total = match nmemb.checked_mul(size) {
+        Some(total) => total,
+        None => return ptr::null_mut(),
+    };
+
+    if total == 0 {
+        return ptr::null_mut();
+    }
+
+    match memory::malloc(total) {
+        Some(block) => {
+            ptr::write_bytes(block.as_ptr(), 0, total);
+            block.as_ptr() as *mut c_void
+        }
+        None => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+    let option = NonNull::new(ptr as *mut u8);
+    memory::realloc(option, size)
+        .map(|new_ptr| new_ptr.as_ptr() as *mut c_void)
+        .unwrap_or(ptr::null_mut())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn reallocarray(ptr: *mut c_void, nmemb: usize, size: usize) -> *mut c_void {
+    match nmemb.checked_mul(size) {
+        Some(total) => realloc(ptr, total),
+        None => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut c_void {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return ptr::null_mut();
+    }
+    if alignment < mem::size_of::<usize>() {
+        return ptr::null_mut();
+    }
+    if size == 0 || size % alignment != 0 {
+        return ptr::null_mut();
+    }
+    memory::malloc_aligned(size, alignment)
+        .map(|ptr| ptr.as_ptr() as *mut c_void)
+        .unwrap_or(ptr::null_mut())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn posix_memalign(
+    memptr: *mut *mut c_void,
+    alignment: usize,
+    size: usize,
+) -> c_int {
+    if memptr.is_null() {
+        return EINVAL;
+    }
+
+    if alignment == 0 || alignment % mem::size_of::<usize>() != 0 || !alignment.is_power_of_two() {
+        *memptr = ptr::null_mut();
+        return EINVAL;
+    }
+
+    if size == 0 {
+        *memptr = ptr::null_mut();
+        return 0;
+    }
+
+    match memory::malloc_aligned(size, alignment) {
+        Some(block) => {
+            *memptr = block.as_ptr() as *mut c_void;
+            0
+        }
+        None => {
+            *memptr = ptr::null_mut();
+            ENOMEM
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn memalign(alignment: usize, size: usize) -> *mut c_void {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return ptr::null_mut();
+    }
+    let adjusted = alignment.max(mem::size_of::<usize>());
+    if size == 0 {
+        return ptr::null_mut();
+    }
+    memory::malloc_aligned(size, adjusted)
+        .map(|ptr| ptr.as_ptr() as *mut c_void)
+        .unwrap_or(ptr::null_mut())
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
     memory::malloc(size)
         .map(|ptr| ptr.as_ptr() as *mut c_void)
@@ -385,6 +531,7 @@ mod tests {
     use super::*;
     use crate::kernel::memory::{PROT_READ, PROT_WRITE};
     use core::ffi::c_char;
+    use core::ptr;
     use std::vec::Vec;
 
     fn c_str(bytes: &[u8]) -> Vec<c_char> {
@@ -462,6 +609,90 @@ mod tests {
             let region = mmap(ptr::null_mut(), 4096, prot, 0, -1, 0);
             assert!(!region.is_null());
             assert_eq!(munmap(region, 4096), 0);
+        }
+    }
+
+    #[test]
+    fn calloc_zeroes_memory() {
+        unsafe {
+            let ptr = calloc(4, 8) as *mut u8;
+            assert!(!ptr.is_null());
+            for i in 0..32 {
+                assert_eq!(*ptr.add(i), 0);
+            }
+            free(ptr as *mut c_void);
+        }
+    }
+
+    #[test]
+    fn realloc_grows_buffer() {
+        unsafe {
+            let ptr = malloc(16) as *mut u8;
+            assert!(!ptr.is_null());
+            for i in 0..16 {
+                *ptr.add(i) = i as u8;
+            }
+            let new_ptr = realloc(ptr as *mut c_void, 64) as *mut u8;
+            assert!(!new_ptr.is_null());
+            for i in 0..16 {
+                assert_eq!(*new_ptr.add(i), i as u8);
+            }
+            free(new_ptr as *mut c_void);
+        }
+    }
+
+    #[test]
+    fn aligned_alloc_alignment() {
+        unsafe {
+            let ptr = aligned_alloc(64, 128);
+            assert!(!ptr.is_null());
+            assert_eq!((ptr as usize) % 64, 0);
+            free(ptr);
+        }
+    }
+
+    #[test]
+    fn posix_memalign_returns_aligned_pointer() {
+        unsafe {
+            let mut out: *mut c_void = ptr::null_mut();
+            let result = posix_memalign(&mut out as *mut _, 32, 128);
+            assert_eq!(result, 0);
+            assert!(!out.is_null());
+            assert_eq!((out as usize) % 32, 0);
+            free(out);
+        }
+    }
+
+    #[test]
+    fn memalign_allows_non_multiple_size() {
+        unsafe {
+            let ptr = memalign(32, 48);
+            assert!(!ptr.is_null());
+            assert_eq!((ptr as usize) % 32, 0);
+            free(ptr);
+        }
+    }
+
+    #[test]
+    fn strdup_clones_input() {
+        let original = c_str(b"gcc");
+        unsafe {
+            let dup = strdup(original.as_ptr());
+            assert!(!dup.is_null());
+            assert_eq!(strcmp(dup, original.as_ptr()), 0);
+            free(dup as *mut c_void);
+        }
+    }
+
+    #[test]
+    fn strndup_respects_max_length() {
+        let original = c_str(b"compiler");
+        unsafe {
+            let dup = strndup(original.as_ptr(), 4);
+            assert!(!dup.is_null());
+            assert_eq!(strlen(dup), 4);
+            assert_eq!(*dup.add(4), 0);
+            free(dup as *mut c_void);
         }
     }
 }
