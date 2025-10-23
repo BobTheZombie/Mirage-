@@ -2,6 +2,7 @@
 //! multi-core orchestration.
 
 pub mod cpu;
+pub mod device;
 pub mod ipc;
 pub mod memory;
 pub mod process;
@@ -12,6 +13,9 @@ pub mod time;
 
 use crate::arch::x86_64::clock;
 use crate::kernel::cpu::CpuCoreState;
+use crate::kernel::device::{
+    DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceManager,
+};
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::process::{ProcessControlBlock, ProcessId, ProcessPriority, ProcessState};
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
@@ -21,6 +25,7 @@ use crate::subkernel::{Credentials, SecurityKernel};
 
 pub const MAX_PROCESSES: usize = 64;
 pub const MESSAGE_DEPTH: usize = 16;
+pub const MAX_DEVICES: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 pub enum KernelError {
@@ -33,6 +38,8 @@ pub enum KernelError {
     MessageQueueEmpty,
     SecurityViolation,
     IsolationFault,
+    DeviceNotFound,
+    DeviceFault(DriverError),
 }
 
 pub type KernelResult<T> = core::result::Result<T, KernelError>;
@@ -42,6 +49,7 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     ipc_queues: [MessageQueue<MSG_DEPTH>; MAX_PROC],
     scheduler: Scheduler<MAX_THREADS>,
     security: SecurityKernel<MAX_PROC>,
+    devices: DeviceManager<MAX_DEVICES>,
     core_states: [CpuCoreState; cpu::MAX_CORES],
     thread_table: [Option<ThreadControlBlock>; MAX_THREADS],
     next_pid: u64,
@@ -58,6 +66,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             ipc_queues: [MessageQueue::new(); MAX_PROC],
             scheduler: Scheduler::new(),
             security: SecurityKernel::new(),
+            devices: DeviceManager::new(),
             core_states: [CpuCoreState::new(); cpu::MAX_CORES],
             thread_table: [None; MAX_THREADS],
             next_pid: 1,
@@ -69,6 +78,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     pub fn bootstrap(&mut self) {
         self.scheduler.reset();
         self.security.reset();
+        self.devices.reset();
         self.next_pid = 1;
         self.next_thread = 1;
         self.message_sequence = 0;
@@ -95,6 +105,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if cpu::MAX_CORES > 0 {
             self.core_states[0].online();
         }
+
+        self.devices.install_core_devices();
     }
 
     pub fn bring_up_secondary_cores(&mut self, count: usize) {
@@ -257,6 +269,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     pub fn tick(&mut self) {
+        device::system_timer().tick();
         let _timestamp = KERNEL_TIME.tick();
         let mut core_index = 0usize;
         while core_index < cpu::MAX_CORES {
@@ -503,5 +516,48 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let seq = self.message_sequence;
         self.message_sequence = self.message_sequence.wrapping_add(1);
         seq
+    }
+
+    pub fn enumerate_devices(&self, out: &mut [DeviceDescriptor]) -> usize {
+        self.devices.enumerate(out)
+    }
+
+    pub fn device_info(&self, id: DeviceId) -> Option<DeviceDescriptor> {
+        self.devices.descriptor(id)
+    }
+
+    pub fn device_read(
+        &self,
+        pid: ProcessId,
+        id: DeviceId,
+        buffer: &mut [u8],
+    ) -> KernelResult<usize> {
+        let descriptor = self
+            .devices
+            .descriptor(id)
+            .ok_or(KernelError::DeviceNotFound)?;
+
+        self.security
+            .authorize_device_access(pid, descriptor.security)
+            .map_err(|_| KernelError::SecurityViolation)?;
+
+        self.devices
+            .read(id, buffer)
+            .map_err(KernelError::DeviceFault)
+    }
+
+    pub fn device_write(&self, pid: ProcessId, id: DeviceId, data: &[u8]) -> KernelResult<usize> {
+        let descriptor = self
+            .devices
+            .descriptor(id)
+            .ok_or(KernelError::DeviceNotFound)?;
+
+        self.security
+            .authorize_device_access(pid, descriptor.security)
+            .map_err(|_| KernelError::SecurityViolation)?;
+
+        self.devices
+            .write(id, data)
+            .map_err(KernelError::DeviceFault)
     }
 }
