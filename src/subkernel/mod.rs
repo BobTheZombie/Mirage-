@@ -153,15 +153,15 @@ impl Credentials {
         )
     }
 
-    pub fn label(&self) -> SecurityLabel {
+    pub const fn label(&self) -> SecurityLabel {
         self.label
     }
 
-    pub fn capabilities(&self) -> CapabilitySet {
+    pub const fn capabilities(&self) -> CapabilitySet {
         self.capabilities
     }
 
-    pub fn isolation(&self) -> IsolationLevel {
+    pub const fn isolation(&self) -> IsolationLevel {
         self.isolation
     }
 }

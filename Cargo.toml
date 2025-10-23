@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 [lib]
 name = "mirage"
 path = "src/lib.rs"
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 [[bin]]
 name = "mirage-kernel"
