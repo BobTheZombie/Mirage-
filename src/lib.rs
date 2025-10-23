@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 //! Mirage is a conceptual 64-bit, Rust-based kernel split into two cooperative layers.
 //!
@@ -15,4 +15,14 @@
 
 pub mod arch;
 pub mod kernel;
+pub mod librust;
 pub mod subkernel;
+
+#[cfg(not(test))]
+use core::panic::PanicInfo;
+
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    crate::arch::x86_64::panic_halt()
+}

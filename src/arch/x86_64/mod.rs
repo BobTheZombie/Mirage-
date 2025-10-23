@@ -4,7 +4,7 @@
 //! structural placeholders that outline how a Rust kernel would prepare the processor
 //! before handing over control to the higher level subsystems.
 
-use core::sync::atomic::spin_loop_hint;
+use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 static INITIALISED: AtomicBool = AtomicBool::new(false);
@@ -25,7 +25,7 @@ pub fn init_architecture() {
 /// Hint to the CPU that the current core is in a spin loop.
 #[inline(always)]
 pub fn cpu_relax() {
-    spin_loop_hint();
+    spin_loop();
 }
 
 /// Halt the CPU in a panic scenario. In a real system an IPI or watchdog would reset us.

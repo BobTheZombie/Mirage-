@@ -3,7 +3,6 @@
 
 extern crate mirage;
 
-use core::panic::PanicInfo;
 use mirage::arch::x86_64;
 use mirage::kernel::{Kernel, MAX_PROCESSES, MESSAGE_DEPTH};
 use mirage::subkernel::Credentials;
@@ -25,7 +24,3 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    x86_64::panic_halt()
-}
