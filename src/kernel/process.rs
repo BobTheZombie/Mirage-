@@ -52,6 +52,7 @@ pub struct ProcessControlBlock {
     pub address_space_root: u64,
     pub cpu_time: u128,
     pub security_label: SecurityLabel,
+    pub thread_count: u16,
 }
 
 impl ProcessControlBlock {
@@ -70,11 +71,22 @@ impl ProcessControlBlock {
             address_space_root: 0,
             cpu_time: 0,
             security_label: SecurityLabel::public(),
+            thread_count: 0,
         }
     }
 
     pub fn update_security_label(&mut self, label: SecurityLabel) {
         self.security_label = label;
+    }
+
+    pub fn increment_thread_count(&mut self) {
+        self.thread_count = self.thread_count.saturating_add(1);
+    }
+
+    pub fn decrement_thread_count(&mut self) {
+        if self.thread_count > 0 {
+            self.thread_count -= 1;
+        }
     }
 }
 

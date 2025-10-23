@@ -1,5 +1,7 @@
 use core::ffi::{c_char, c_int, c_void};
-use core::ptr;
+use core::ptr::{self, NonNull};
+
+use crate::kernel::memory::{self, MemoryProtection};
 
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
@@ -335,9 +337,53 @@ pub unsafe extern "C" fn strstr(haystack: *const c_char, needle: *const c_char) 
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+    memory::malloc(size)
+        .map(|ptr| ptr.as_ptr() as *mut c_void)
+        .unwrap_or(ptr::null_mut())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn free(ptr: *mut c_void) {
+    if let Some(non_null) = NonNull::new(ptr as *mut u8) {
+        let _ = memory::free(non_null);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mmap(
+    _addr: *mut c_void,
+    length: usize,
+    prot: c_int,
+    _flags: c_int,
+    _fd: c_int,
+    _offset: usize,
+) -> *mut c_void {
+    let protection = MemoryProtection::from_bits(prot as u32);
+    memory::mmap(length, protection)
+        .map(|region| region.as_ptr() as *mut c_void)
+        .unwrap_or(ptr::null_mut())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn munmap(addr: *mut c_void, length: usize) -> c_int {
+    match NonNull::new(addr as *mut u8) {
+        Some(ptr) => {
+            if memory::munmap_ptr(ptr, length) {
+                0
+            } else {
+                -1
+            }
+        }
+        None => -1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::memory::{PROT_READ, PROT_WRITE};
     use core::ffi::c_char;
     use std::vec::Vec;
 
@@ -397,6 +443,25 @@ mod tests {
             let ptr = strstr(hay.as_ptr(), needle.as_ptr());
             assert!(!ptr.is_null());
             assert_eq!(strlen(ptr), 8);
+        }
+    }
+
+    #[test]
+    fn malloc_roundtrip() {
+        unsafe {
+            let ptr = malloc(128);
+            assert!(!ptr.is_null());
+            free(ptr);
+        }
+    }
+
+    #[test]
+    fn mmap_and_munmap_cycle() {
+        unsafe {
+            let prot = (PROT_READ | PROT_WRITE) as c_int;
+            let region = mmap(ptr::null_mut(), 4096, prot, 0, -1, 0);
+            assert!(!region.is_null());
+            assert_eq!(munmap(region, 4096), 0);
         }
     }
 }

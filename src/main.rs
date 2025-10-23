@@ -4,7 +4,7 @@
 extern crate mirage;
 
 use mirage::arch::x86_64;
-use mirage::kernel::{Kernel, MAX_PROCESSES, MESSAGE_DEPTH};
+use mirage::kernel::{cpu, Kernel, MAX_PROCESSES, MESSAGE_DEPTH};
 use mirage::subkernel::Credentials;
 
 #[no_mangle]
@@ -13,6 +13,10 @@ pub extern "C" fn _start() -> ! {
 
     let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
     kernel.bootstrap();
+
+    if cpu::MAX_CORES > 1 {
+        kernel.bring_up_secondary_cores(cpu::MAX_CORES - 1);
+    }
 
     // Create an initial task with system privileges to kick-start the kernel.
     let init_creds = Credentials::system();
@@ -23,4 +27,3 @@ pub extern "C" fn _start() -> ! {
         x86_64::cpu_relax();
     }
 }
-

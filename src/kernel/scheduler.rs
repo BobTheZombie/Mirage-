@@ -1,6 +1,7 @@
 //! A simple multi-level round-robin scheduler for the Mirage kernel.
 
 use crate::kernel::process::{ProcessId, ProcessPriority};
+use crate::kernel::thread::ThreadId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulerError {
@@ -8,16 +9,18 @@ pub enum SchedulerError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ScheduledProcess {
-    pub pid: ProcessId,
+pub struct ScheduledThread {
+    pub thread: ThreadId,
+    pub process: ProcessId,
     pub priority: ProcessPriority,
     remaining_slice: u8,
 }
 
-impl ScheduledProcess {
-    pub const fn new(pid: ProcessId, priority: ProcessPriority) -> Self {
+impl ScheduledThread {
+    pub const fn new(thread: ThreadId, process: ProcessId, priority: ProcessPriority) -> Self {
         Self {
-            pid,
+            thread,
+            process,
             priority,
             remaining_slice: priority.time_slice(),
         }
@@ -37,7 +40,7 @@ impl ScheduledProcess {
 
 #[derive(Clone, Copy)]
 pub struct Scheduler<const MAX: usize> {
-    queue: [Option<ScheduledProcess>; MAX],
+    queue: [Option<ScheduledThread>; MAX],
     head: usize,
     tail: usize,
     len: usize,
@@ -64,21 +67,21 @@ impl<const MAX: usize> Scheduler<MAX> {
         }
     }
 
-    pub fn enqueue(&mut self, process: ScheduledProcess) -> Result<(), SchedulerError> {
+    pub fn enqueue(&mut self, thread: ScheduledThread) -> Result<(), SchedulerError> {
         if self.len == MAX {
             return Err(SchedulerError::QueueFull);
         }
-        self.queue[self.tail] = Some(process);
+        self.queue[self.tail] = Some(thread);
         self.tail = (self.tail + 1) % MAX;
         self.len += 1;
         Ok(())
     }
 
-    pub fn requeue(&mut self, process: ScheduledProcess) -> Result<(), SchedulerError> {
-        self.enqueue(process)
+    pub fn requeue(&mut self, thread: ScheduledThread) -> Result<(), SchedulerError> {
+        self.enqueue(thread)
     }
 
-    pub fn next(&mut self) -> Option<ScheduledProcess> {
+    pub fn next(&mut self) -> Option<ScheduledThread> {
         if self.len == 0 {
             return None;
         }
@@ -86,11 +89,11 @@ impl<const MAX: usize> Scheduler<MAX> {
         let mut steps = 0;
         while steps < MAX {
             let idx = (self.head + steps) % MAX;
-            if let Some(proc) = self.queue[idx] {
+            if let Some(entry) = self.queue[idx] {
                 self.queue[idx] = None;
                 self.len -= 1;
                 self.head = (idx + 1) % MAX;
-                return Some(proc);
+                return Some(entry);
             }
             steps += 1;
         }
@@ -101,11 +104,26 @@ impl<const MAX: usize> Scheduler<MAX> {
         None
     }
 
-    pub fn remove(&mut self, pid: ProcessId) {
+    pub fn remove_thread(&mut self, thread: ThreadId) {
         let mut idx = 0;
         while idx < MAX {
             if let Some(entry) = self.queue[idx] {
-                if entry.pid == pid {
+                if entry.thread == thread {
+                    self.queue[idx] = None;
+                    if self.len > 0 {
+                        self.len -= 1;
+                    }
+                }
+            }
+            idx += 1;
+        }
+    }
+
+    pub fn remove_process(&mut self, process: ProcessId) {
+        let mut idx = 0;
+        while idx < MAX {
+            if let Some(entry) = self.queue[idx] {
+                if entry.process == process {
                     self.queue[idx] = None;
                     if self.len > 0 {
                         self.len -= 1;
