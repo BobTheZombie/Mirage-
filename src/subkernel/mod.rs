@@ -190,6 +190,11 @@ impl TaskDomain {
         }
     }
 
+    #[inline(always)]
+    pub const fn pid(&self) -> ProcessId {
+        self.pid
+    }
+
     pub fn can_transmit(&self, class: SecurityClass) -> bool {
         self.capabilities.allows_ipc() && self.label.dominates(&class.as_label())
     }
@@ -229,15 +234,19 @@ pub enum IsolationError {
     CapabilityMissing,
 }
 
+/// Open-addressed security domain table that acts as the ultra-low latency
+/// bridge between the main kernel and the L2 security core.
 #[derive(Clone, Copy)]
 pub struct SecurityKernel<const MAX: usize> {
     domains: [Option<TaskDomain>; MAX],
+    population: usize,
 }
 
 impl<const MAX: usize> SecurityKernel<MAX> {
     pub const fn new() -> Self {
         Self {
             domains: [None; MAX],
+            population: 0,
         }
     }
 
@@ -247,6 +256,122 @@ impl<const MAX: usize> SecurityKernel<MAX> {
             self.domains[idx] = None;
             idx += 1;
         }
+        self.population = 0;
+    }
+
+    #[inline(always)]
+    fn hash(pid: ProcessId) -> usize {
+        if MAX == 0 {
+            return 0;
+        }
+        let raw = pid.raw();
+        let mix = raw ^ (raw >> 33);
+        (mix as usize) % MAX
+    }
+
+    #[inline(always)]
+    fn next_index(current: usize) -> usize {
+        if MAX == 0 {
+            return 0;
+        }
+        (current + 1) % MAX
+    }
+
+    #[inline(always)]
+    fn insert_domain(&mut self, domain: TaskDomain) -> Result<(), IsolationError> {
+        if MAX == 0 {
+            return Err(IsolationError::PolicyViolation);
+        }
+
+        let mut idx = Self::hash(domain.pid());
+        let mut probes = 0;
+        while probes < MAX {
+            match self.domains[idx] {
+                Some(existing) if existing.pid() == domain.pid() => {
+                    self.domains[idx] = Some(domain);
+                    return Ok(());
+                }
+                Some(_) => {
+                    idx = Self::next_index(idx);
+                }
+                None => {
+                    self.domains[idx] = Some(domain);
+                    self.population += 1;
+                    return Ok(());
+                }
+            }
+            probes += 1;
+        }
+
+        Err(IsolationError::PolicyViolation)
+    }
+
+    #[inline(always)]
+    fn lookup(&self, pid: ProcessId) -> Option<TaskDomain> {
+        if MAX == 0 {
+            return None;
+        }
+
+        let mut idx = Self::hash(pid);
+        let mut probes = 0;
+        while probes < MAX {
+            match self.domains[idx] {
+                Some(domain) if domain.pid() == pid => return Some(domain),
+                Some(_) => {
+                    idx = Self::next_index(idx);
+                }
+                None => return None,
+            }
+            probes += 1;
+        }
+        None
+    }
+
+    #[inline(always)]
+    fn remove(&mut self, pid: ProcessId) {
+        if MAX == 0 || self.population == 0 {
+            return;
+        }
+
+        let mut idx = Self::hash(pid);
+        let mut probes = 0;
+        while probes < MAX {
+            match self.domains[idx] {
+                Some(domain) if domain.pid() == pid => {
+                    self.domains[idx] = None;
+                    self.population = self.population.saturating_sub(1);
+                    self.rehash_from(Self::next_index(idx));
+                    return;
+                }
+                Some(_) => {
+                    idx = Self::next_index(idx);
+                }
+                None => return,
+            }
+            probes += 1;
+        }
+    }
+
+    #[inline(always)]
+    fn rehash_from(&mut self, mut idx: usize) {
+        if MAX == 0 {
+            return;
+        }
+
+        let mut probes = 0;
+        while probes < MAX {
+            match self.domains[idx] {
+                None => return,
+                Some(domain) => {
+                    self.domains[idx] = None;
+                    self.population = self.population.saturating_sub(1);
+                    // reinsertion cannot fail because table has free slots after removal.
+                    let _ = self.insert_domain(domain);
+                    idx = Self::next_index(idx);
+                }
+            }
+            probes += 1;
+        }
     }
 
     pub fn register_task(
@@ -254,29 +379,15 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         pid: ProcessId,
         creds: Credentials,
     ) -> Result<(), IsolationError> {
-        if let Some(idx) = self.find_domain_index(pid) {
-            self.domains[idx] = Some(TaskDomain::from_credentials(pid, creds));
-            return Ok(());
-        }
-
-        let mut idx = 0;
-        while idx < MAX {
-            if self.domains[idx].is_none() {
-                self.domains[idx] = Some(TaskDomain::from_credentials(pid, creds));
-                return Ok(());
-            }
-            idx += 1;
-        }
-
-        Err(IsolationError::PolicyViolation)
+        self.insert_domain(TaskDomain::from_credentials(pid, creds))
     }
 
+    #[inline(always)]
     pub fn revoke_task(&mut self, pid: ProcessId) {
-        if let Some(idx) = self.find_domain_index(pid) {
-            self.domains[idx] = None;
-        }
+        self.remove(pid);
     }
 
+    #[inline(always)]
     pub fn authorize_ipc(
         &self,
         sender: ProcessId,
@@ -303,6 +414,7 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         Ok(())
     }
 
+    #[inline(always)]
     pub fn authorize_device_access(
         &self,
         pid: ProcessId,
@@ -325,6 +437,7 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         Ok(())
     }
 
+    #[inline(always)]
     pub fn enforce_isolation(&self, pid: ProcessId) -> Result<(), IsolationError> {
         let domain = self.domain(pid)?;
         match domain.isolation {
@@ -340,22 +453,8 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         }
     }
 
+    #[inline(always)]
     fn domain(&self, pid: ProcessId) -> Result<TaskDomain, IsolationError> {
-        self.find_domain_index(pid)
-            .and_then(|idx| self.domains[idx])
-            .ok_or(IsolationError::UnknownTask)
-    }
-
-    fn find_domain_index(&self, pid: ProcessId) -> Option<usize> {
-        let mut idx = 0;
-        while idx < MAX {
-            if let Some(domain) = self.domains[idx] {
-                if domain.pid == pid {
-                    return Some(idx);
-                }
-            }
-            idx += 1;
-        }
-        None
+        self.lookup(pid).ok_or(IsolationError::UnknownTask)
     }
 }
