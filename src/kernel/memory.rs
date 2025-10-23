@@ -3,7 +3,10 @@
 //! how `malloc`, `free`, and `mmap` style services could be layered on top of a
 //! statically provisioned heap in a `no_std` kernel.
 
-use core::ptr::NonNull;
+use core::{
+    cmp,
+    ptr::{self, NonNull},
+};
 
 use crate::kernel::sync::SpinLock;
 
@@ -150,6 +153,82 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         Some(unsafe { NonNull::new_unchecked(self.heap.as_mut_ptr().add(offset)) })
     }
 
+    pub fn malloc_aligned(&mut self, size: usize, align: usize) -> Option<NonNull<u8>> {
+        if size == 0 || align == 0 {
+            return None;
+        }
+
+        let actual_align = align.max(core::mem::size_of::<usize>());
+        let actual_size = self.align_up(size, core::mem::size_of::<usize>());
+        if actual_size < size {
+            return None;
+        }
+
+        let offset = self.reserve(actual_size, actual_align)?;
+        let record = AllocationRecord::new(
+            offset,
+            actual_size,
+            AllocationKind::Heap,
+            MemoryProtection::read_write(),
+        );
+        self.record_allocation(record)?;
+        self.update_stats_on_alloc(actual_size);
+        Some(unsafe { NonNull::new_unchecked(self.heap.as_mut_ptr().add(offset)) })
+    }
+
+    pub fn realloc(&mut self, ptr: Option<NonNull<u8>>, new_size: usize) -> Option<NonNull<u8>> {
+        match (ptr, new_size) {
+            (None, 0) => None,
+            (None, size) => self.malloc(size),
+            (Some(p), 0) => {
+                self.free(p);
+                None
+            }
+            (Some(p), size) => {
+                let base = self.heap.as_ptr() as usize;
+                let addr = p.as_ptr() as usize;
+                if addr < base || addr >= base + HEAP_SIZE {
+                    return None;
+                }
+                let offset = addr - base;
+                let idx = self.find_allocation_index(offset)?;
+                let mut record = match self.allocations[idx] {
+                    Some(r) => r,
+                    None => return None,
+                };
+                if record.kind != AllocationKind::Heap {
+                    return None;
+                }
+
+                let align = core::mem::size_of::<usize>();
+                let aligned_new = self.align_up(size, align);
+                if aligned_new < size {
+                    return None;
+                }
+
+                if aligned_new <= record.size {
+                    let leftover = record.size.saturating_sub(aligned_new);
+                    if leftover > 0 {
+                        let free_offset = record.offset + aligned_new;
+                        self.insert_free_region(FreeRegion::new(free_offset, leftover));
+                        self.update_stats_on_free(leftover);
+                    }
+                    record.size = aligned_new;
+                    self.allocations[idx] = Some(record);
+                    return Some(p);
+                }
+
+                let copy_len = cmp::min(record.size, size);
+                let new_ptr = self.malloc(size)?;
+                unsafe {
+                    ptr::copy_nonoverlapping(p.as_ptr(), new_ptr.as_ptr(), copy_len);
+                }
+                self.free(p);
+                Some(new_ptr)
+            }
+        }
+    }
+
     pub fn free(&mut self, ptr: NonNull<u8>) -> bool {
         self.release(ptr, Some(AllocationKind::Heap), None)
     }
@@ -266,6 +345,19 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         }
     }
 
+    fn find_allocation_index(&self, offset: usize) -> Option<usize> {
+        let mut idx = 0;
+        while idx < MAX_AREAS {
+            if let Some(record) = self.allocations[idx] {
+                if record.offset == offset {
+                    return Some(idx);
+                }
+            }
+            idx += 1;
+        }
+        None
+    }
+
     fn remove_allocation(
         &mut self,
         offset: usize,
@@ -369,6 +461,14 @@ pub fn malloc(size: usize) -> Option<NonNull<u8>> {
     MEMORY_MANAGER.lock().malloc(size)
 }
 
+pub fn malloc_aligned(size: usize, align: usize) -> Option<NonNull<u8>> {
+    MEMORY_MANAGER.lock().malloc_aligned(size, align)
+}
+
+pub fn realloc(ptr: Option<NonNull<u8>>, new_size: usize) -> Option<NonNull<u8>> {
+    MEMORY_MANAGER.lock().realloc(ptr, new_size)
+}
+
 pub fn free(ptr: NonNull<u8>) -> bool {
     MEMORY_MANAGER.lock().free(ptr)
 }
@@ -417,5 +517,57 @@ mod tests {
         let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
         let bogus = unsafe { NonNull::new_unchecked(0x1000usize as *mut u8) };
         assert!(!manager.free(bogus));
+    }
+
+    #[test]
+    fn malloc_aligned_respects_alignment() {
+        let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
+        let ptr = manager
+            .malloc_aligned(64, 64)
+            .expect("aligned allocation succeeds");
+        assert_eq!((ptr.as_ptr() as usize) % 64, 0);
+        assert!(manager.free(ptr));
+    }
+
+    #[test]
+    fn realloc_expands_and_preserves_contents() {
+        let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
+        let ptr = manager.malloc(16).expect("allocation succeeds");
+        unsafe {
+            for i in 0..16 {
+                ptr.as_ptr().add(i).write(i as u8);
+            }
+        }
+        let new_ptr = manager
+            .realloc(Some(ptr), 64)
+            .expect("reallocation succeeds");
+        unsafe {
+            for i in 0..16 {
+                assert_eq!(new_ptr.as_ptr().add(i).read(), i as u8);
+            }
+        }
+        assert!(manager.free(new_ptr));
+    }
+
+    #[test]
+    fn realloc_shrinks_in_place() {
+        let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
+        let ptr = manager.malloc(64).expect("allocation succeeds");
+        let stats_before = manager.statistics();
+        let new_ptr = manager
+            .realloc(Some(ptr), 16)
+            .expect("reallocation succeeds");
+        assert_eq!(new_ptr, ptr);
+        let stats_after = manager.statistics();
+        assert!(stats_after.allocated_bytes <= stats_before.allocated_bytes);
+        assert!(manager.free(new_ptr));
+    }
+
+    #[test]
+    fn realloc_zero_size_frees_allocation() {
+        let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
+        let ptr = manager.malloc(32).expect("allocation succeeds");
+        assert!(manager.realloc(Some(ptr), 0).is_none());
+        assert_eq!(manager.statistics().allocated_bytes, 0);
     }
 }
