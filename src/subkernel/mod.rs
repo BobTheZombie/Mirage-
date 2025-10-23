@@ -115,6 +115,10 @@ impl CapabilitySet {
     pub fn allows_kernel_access(&self) -> bool {
         (self.flags & CAP_KERNEL) != 0
     }
+
+    pub fn allows_io(&self) -> bool {
+        (self.flags & CAP_IO) != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -196,6 +200,29 @@ impl TaskDomain {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceSecurity {
+    class: SecurityClass,
+    requires_kernel_mode: bool,
+}
+
+impl DeviceSecurity {
+    pub const fn new(class: SecurityClass, requires_kernel_mode: bool) -> Self {
+        Self {
+            class,
+            requires_kernel_mode,
+        }
+    }
+
+    pub const fn class(&self) -> SecurityClass {
+        self.class
+    }
+
+    pub const fn requires_kernel_mode(&self) -> bool {
+        self.requires_kernel_mode
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IsolationError {
     UnknownTask,
     PolicyViolation,
@@ -270,6 +297,28 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         if sender_domain.isolation == IsolationLevel::VirtualMachine
             && receiver_domain.isolation == IsolationLevel::None
         {
+            return Err(IsolationError::PolicyViolation);
+        }
+
+        Ok(())
+    }
+
+    pub fn authorize_device_access(
+        &self,
+        pid: ProcessId,
+        security: DeviceSecurity,
+    ) -> Result<(), IsolationError> {
+        let domain = self.domain(pid)?;
+
+        if !domain.capabilities.allows_io() {
+            return Err(IsolationError::CapabilityMissing);
+        }
+
+        if security.requires_kernel_mode() && !domain.capabilities.allows_kernel_access() {
+            return Err(IsolationError::CapabilityMissing);
+        }
+
+        if !domain.label.dominates(&security.class().as_label()) {
             return Err(IsolationError::PolicyViolation);
         }
 
