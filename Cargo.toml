@@ -1,0 +1,25 @@
+[package]
+name = "mirage"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "A conceptual 64-bit microkernel-style operating system core written in Rust"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "mirage"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[[bin]]
+name = "mirage-kernel"
+path = "src/main.rs"
+
+[dependencies]
+# The kernel is strictly no_std and does not currently rely on external crates.
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
