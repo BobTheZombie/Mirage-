@@ -7,6 +7,10 @@
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+pub mod clock;
+
+pub use clock::{HardwareClock, HARDWARE_CLOCK};
+
 static INITIALISED: AtomicBool = AtomicBool::new(false);
 
 /// Perform one-time CPU and memory initialisation.
