@@ -7,8 +7,10 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
-use crate::kernel::syscall::SYSCALL_MAX_ARGS;
-use crate::kernel::thread::{ThreadControlBlock, ThreadId};
+use crate::kernel::syscall::{SyscallFrame, SYSCALL_MAX_ARGS};
+use crate::kernel::thread::{
+    ThreadControlBlock, ThreadId, SYSCALL_TRAP_VECTOR, TIMER_INTERRUPT_VECTOR,
+};
 
 pub mod boot;
 pub mod clock;
@@ -31,6 +33,7 @@ pub struct SyscallTrap {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadRunOutcome {
     TimeSliceComplete,
+    TimerPreempted,
     Syscall(SyscallTrap),
 }
 
@@ -49,33 +52,54 @@ pub fn init_architecture(boot_info: &BootInfo) {
     configure_interrupts();
 }
 
-/// Run a scheduled thread until its simulated time slice expires or it traps.
+/// Run a scheduled thread until hardware returns control through a trap.
 ///
-/// A real x86_64 port would restore the saved register frame with `iretq`/`sysret`
-/// and regain control through an interrupt or `syscall` entry stub. Mirage keeps
-/// that machinery explicit in the saved context: tests and libc shims can queue
-/// a syscall in the thread context, this arch layer observes the trap, and the
-/// kernel writes the return register before the thread is requeued.
+/// The x86_64 path restores the thread's saved interrupt frame and returns to
+/// the privilege level captured in [`CpuContext`](crate::kernel::thread::CpuContext).
+/// Control comes back only after an interrupt or syscall entry stub saves a new
+/// frame in the same context. Unit tests use the same register ABI by staging a
+/// trap frame in the thread context before invoking the scheduler.
 pub fn run_thread_slice(thread: &mut ThreadControlBlock) -> ThreadRunOutcome {
+    let timer_epoch = idt::timer_ticks();
+
     switch_to_thread(thread);
 
-    if let Some((number, args)) = thread.context.take_syscall() {
-        ThreadRunOutcome::Syscall(SyscallTrap {
+    match thread.context.trap_vector {
+        SYSCALL_TRAP_VECTOR => ThreadRunOutcome::Syscall(SyscallTrap {
             thread: thread.id,
-            number,
-            args,
-        })
-    } else {
-        ThreadRunOutcome::TimeSliceComplete
+            number: SyscallFrame::from_cpu_context(&thread.context).number,
+            args: SyscallFrame::from_cpu_context(&thread.context).args,
+        }),
+        TIMER_INTERRUPT_VECTOR => {
+            thread.context.clear_trap();
+            ThreadRunOutcome::TimerPreempted
+        }
+        _ if idt::timer_ticks() != timer_epoch => ThreadRunOutcome::TimerPreempted,
+        _ => ThreadRunOutcome::TimeSliceComplete,
     }
+}
+
+#[cfg(not(test))]
+extern "C" {
+    fn __mirage_context_restore(context: *mut crate::kernel::thread::CpuContext) -> !;
 }
 
 /// Restore the saved CPU context for a thread.
 ///
-/// This is intentionally a no-op in the simulator, but it marks the ABI boundary
-/// where an x86_64 implementation would load RIP/RSP/RFLAGS and general-purpose
-/// registers before entering user mode.
-pub fn switch_to_thread(_thread: &mut ThreadControlBlock) {}
+/// On hardware this never returns directly: `__mirage_context_restore` rebuilds
+/// the CPU's interrupt-return frame and executes `iretq`. The interrupt and
+/// syscall stubs save the next frame before re-entering Rust scheduler code.
+pub fn switch_to_thread(thread: &mut ThreadControlBlock) {
+    #[cfg(not(test))]
+    unsafe {
+        __mirage_context_restore(core::ptr::addr_of_mut!(thread.context));
+    }
+
+    #[cfg(test)]
+    {
+        let _ = thread;
+    }
+}
 
 /// Hint to the CPU that the current core is in a spin loop.
 #[inline(always)]

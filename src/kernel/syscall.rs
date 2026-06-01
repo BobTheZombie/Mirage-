@@ -5,9 +5,24 @@
 
 use crate::kernel::memory::{self, MemoryProtection};
 use crate::kernel::process::ProcessId;
-use crate::kernel::thread::ThreadId;
+use crate::kernel::thread::{CpuContext, ThreadId};
 
 pub const SYSCALL_MAX_ARGS: usize = 6;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyscallFrame {
+    pub number: u64,
+    pub args: [u64; SYSCALL_MAX_ARGS],
+}
+
+impl SyscallFrame {
+    pub const fn from_cpu_context(context: &CpuContext) -> Self {
+        Self {
+            number: context.syscall_number(),
+            args: context.syscall_args(),
+        }
+    }
+}
 
 /// High bit set on a trap return value means the low bits carry a
 /// [`SyscallErrorCode`] instead of a successful result.
