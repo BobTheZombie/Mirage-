@@ -7,6 +7,13 @@ pub const THREADS_PER_PROCESS: usize = 4;
 pub const MAX_THREADS: usize = 256;
 
 pub const USER_RFLAGS: u64 = 0x202;
+pub const KERNEL_RFLAGS: u64 = 0x202;
+pub const KERNEL_CODE_SELECTOR: u64 = 0x08;
+pub const KERNEL_DATA_SELECTOR: u64 = 0x10;
+pub const USER_CODE_SELECTOR: u64 = 0x1b;
+pub const USER_DATA_SELECTOR: u64 = 0x23;
+pub const SYSCALL_TRAP_VECTOR: u64 = 0x80;
+pub const TIMER_INTERRUPT_VECTOR: u64 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ThreadId(u64);
@@ -29,22 +36,41 @@ pub enum ThreadState {
     Terminated,
 }
 
+#[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivilegeMode {
-    Kernel,
-    User,
+    Kernel = 0,
+    User = 3,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuContext {
-    pub instruction_pointer: u64,
-    pub stack_pointer: u64,
-    pub flags: u64,
-    pub syscall_number: u64,
-    pub argument_registers: [u64; SYSCALL_MAX_ARGS],
-    pub result_register: u64,
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+    pub fs: u64,
+    pub gs: u64,
+    pub trap_vector: u64,
+    pub error_code: u64,
     pub privilege_mode: PrivilegeMode,
-    pub pending_syscall: bool,
 }
 
 impl CpuContext {
@@ -53,36 +79,68 @@ impl CpuContext {
         stack_pointer: u64,
         privilege_mode: PrivilegeMode,
     ) -> Self {
+        let (cs, ss, rflags) = match privilege_mode {
+            PrivilegeMode::Kernel => (KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR, KERNEL_RFLAGS),
+            PrivilegeMode::User => (USER_CODE_SELECTOR, USER_DATA_SELECTOR, USER_RFLAGS),
+        };
+
         Self {
-            instruction_pointer,
-            stack_pointer,
-            flags: USER_RFLAGS,
-            syscall_number: 0,
-            argument_registers: [0; SYSCALL_MAX_ARGS],
-            result_register: 0,
+            rax: 0,
+            rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            rbp: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: instruction_pointer,
+            cs,
+            rflags,
+            rsp: stack_pointer,
+            ss,
+            fs: 0,
+            gs: 0,
+            trap_vector: 0,
+            error_code: 0,
             privilege_mode,
-            pending_syscall: false,
         }
     }
 
-    pub fn queue_syscall(&mut self, number: u64, args: [u64; SYSCALL_MAX_ARGS]) {
-        self.syscall_number = number;
-        self.argument_registers = args;
-        self.pending_syscall = true;
+    pub const fn syscall_number(&self) -> u64 {
+        self.rax
     }
 
-    pub fn take_syscall(&mut self) -> Option<(u64, [u64; SYSCALL_MAX_ARGS])> {
-        if self.pending_syscall {
-            self.pending_syscall = false;
-            Some((self.syscall_number, self.argument_registers))
-        } else {
-            None
-        }
+    pub const fn syscall_args(&self) -> [u64; SYSCALL_MAX_ARGS] {
+        [self.rdi, self.rsi, self.rdx, self.r10, self.r8, self.r9]
+    }
+
+    pub fn stage_syscall_trap(&mut self, number: u64, args: [u64; SYSCALL_MAX_ARGS]) {
+        self.rax = number;
+        self.rdi = args[0];
+        self.rsi = args[1];
+        self.rdx = args[2];
+        self.r10 = args[3];
+        self.r8 = args[4];
+        self.r9 = args[5];
+        self.trap_vector = SYSCALL_TRAP_VECTOR;
+        self.error_code = 0;
+    }
+
+    pub fn clear_trap(&mut self) {
+        self.trap_vector = 0;
+        self.error_code = 0;
     }
 
     pub fn write_syscall_result(&mut self, result: u64) {
-        self.result_register = result;
-        self.syscall_number = result;
+        self.rax = result;
+        self.clear_trap();
     }
 }
 
@@ -119,7 +177,7 @@ impl ThreadControlBlock {
     }
 
     pub fn prepare_syscall(&mut self, number: u64, args: [u64; SYSCALL_MAX_ARGS]) {
-        self.context.queue_syscall(number, args);
+        self.context.stage_syscall_trap(number, args);
     }
 
     pub fn write_syscall_result(&mut self, result: u64) {

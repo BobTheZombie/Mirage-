@@ -630,12 +630,16 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 pcb.cpu_time = pcb.cpu_time.saturating_add(1);
             }
 
-            if let ThreadRunOutcome::Syscall(trap) = run_outcome {
-                let context = SyscallContext::new(scheduled.process, Some(trap.thread), trap.args);
-                let result = self
-                    .handle_syscall(trap.number, context)
-                    .unwrap_or_else(encode_syscall_error);
-                self.write_thread_syscall_result(trap.thread, result);
+            match run_outcome {
+                ThreadRunOutcome::Syscall(trap) => {
+                    let context =
+                        SyscallContext::new(scheduled.process, Some(trap.thread), trap.args);
+                    let result = self
+                        .handle_syscall(trap.number, context)
+                        .unwrap_or_else(encode_syscall_error);
+                    self.write_thread_syscall_result(trap.thread, result);
+                }
+                ThreadRunOutcome::TimerPreempted | ThreadRunOutcome::TimeSliceComplete => {}
             }
 
             let mut requeue_thread = false;
