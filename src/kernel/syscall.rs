@@ -9,6 +9,58 @@ use crate::kernel::thread::ThreadId;
 
 pub const SYSCALL_MAX_ARGS: usize = 6;
 
+/// High bit set on a trap return value means the low bits carry a
+/// [`SyscallErrorCode`] instead of a successful result.
+pub const MIRAGE_SYSCALL_ERROR_BIT: u64 = 1 << 63;
+
+/// Stable syscall error numbers exposed in encoded trap results.
+///
+/// Libc-style wrappers translate these to negative errno values at the C ABI:
+/// capability-missing and policy-denied security failures become `EACCES`,
+/// unknown tasks/processes become `ESRCH`, and full IPC queues become
+/// `ENOBUFS` so callers can distinguish back-pressure from invalid input.
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyscallErrorCode {
+    ProcessTableFull = 1,
+    SchedulerFull = 2,
+    NoSuchProcess = 3,
+    NoSuchThread = 4,
+    ThreadTableFull = 5,
+    QueueFull = 6,
+    QueueEmpty = 7,
+    PermissionDenied = 8,
+    IsolationFault = 9,
+    NoSuchDevice = 10,
+    DeviceFault = 11,
+    InvalidSyscall = 12,
+    InvalidArgument = 13,
+    BadAddress = 14,
+    OutOfMemory = 15,
+}
+
+impl SyscallErrorCode {
+    pub const fn raw(self) -> u64 {
+        self as u64
+    }
+}
+
+// Minimal errno values used by the exported C-facing libc shims.  They match
+// the Linux errno assignments for the Unix-like errors Mirage currently emits.
+pub const MIRAGE_EPERM: i32 = 1;
+pub const MIRAGE_ENOENT: i32 = 2;
+pub const MIRAGE_ESRCH: i32 = 3;
+pub const MIRAGE_EINTR: i32 = 4;
+pub const MIRAGE_EIO: i32 = 5;
+pub const MIRAGE_EBADF: i32 = 9;
+pub const MIRAGE_EAGAIN: i32 = 11;
+pub const MIRAGE_ENOMEM: i32 = 12;
+pub const MIRAGE_EACCES: i32 = 13;
+pub const MIRAGE_EFAULT: i32 = 14;
+pub const MIRAGE_EINVAL: i32 = 22;
+pub const MIRAGE_ENOSYS: i32 = 38;
+pub const MIRAGE_ENOBUFS: i32 = 105;
+
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyscallNumber {

@@ -22,10 +22,14 @@ use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueErro
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{ProcessControlBlock, ProcessId, ProcessPriority, ProcessState};
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
-use crate::kernel::syscall::{SyscallContext, SyscallNumber};
+use crate::kernel::syscall::{
+    SyscallContext, SyscallErrorCode, SyscallNumber, MIRAGE_SYSCALL_ERROR_BIT,
+};
 use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS};
 use crate::kernel::time::KERNEL_TIME;
-use crate::subkernel::{Credentials, DeviceSecurity, SecurityClass, SecurityKernel};
+use crate::subkernel::{
+    Credentials, DeviceSecurity, IsolationError, SecurityClass, SecurityKernel,
+};
 use core::cmp::min;
 use core::ptr::NonNull;
 
@@ -42,8 +46,8 @@ pub enum KernelError {
     ThreadTableFull,
     MessageQueueFull,
     MessageQueueEmpty,
-    SecurityViolation,
-    IsolationFault,
+    SecurityViolation(IsolationError),
+    IsolationFault(IsolationError),
     DeviceNotFound,
     DeviceFault(DriverError),
     InvalidSyscall,
@@ -162,7 +166,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.ensure_process_exists(parent_pid)?;
         self.security
             .authorize_spawn(parent_pid, requested_creds)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
 
         self.spawn_process(entry_point, priority, Some(parent_pid), requested_creds)
     }
@@ -181,7 +185,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
         self.security
             .register_task(pid, creds)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
 
         self.process_table[slot] = Some(pcb);
 
@@ -261,7 +265,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     ) -> KernelResult<()> {
         self.security
             .authorize_ipc(sender, receiver, payload.security_class)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
 
         let message = Message::new(sender, receiver, self.next_message_sequence(), payload);
         let queue_index = self.locate_process(receiver)?;
@@ -348,7 +352,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             SyscallNumber::BlockForIpc => {
                 self.security
                     .authorize_ipc_receive(context.caller)
-                    .map_err(|_| KernelError::SecurityViolation)?;
+                    .map_err(KernelError::SecurityViolation)?;
                 self.block_for_message(context.caller);
                 Ok(0)
             }
@@ -395,7 +399,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_receive_ipc(&mut self, context: SyscallContext) -> KernelResult<u64> {
         self.security
             .authorize_ipc_receive(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         let out = context.arg(0) as *mut Message;
         if out.is_null() {
             return Err(KernelError::InvalidPointer);
@@ -408,7 +412,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_receive_or_block_ipc(&mut self, context: SyscallContext) -> KernelResult<u64> {
         self.security
             .authorize_ipc_receive(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         let out = context.arg(0) as *mut Message;
         if out.is_null() {
             return Err(KernelError::InvalidPointer);
@@ -425,7 +429,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_enumerate_devices(&self, context: SyscallContext) -> KernelResult<u64> {
         self.security
             .authorize_device_enumeration(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         let out = context.arg(0) as *mut MirageDeviceDescriptor;
         let capacity = context.arg(1) as usize;
         if capacity > 0 && out.is_null() {
@@ -450,7 +454,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_device_info(&self, context: SyscallContext) -> KernelResult<u64> {
         self.security
             .authorize_device_enumeration(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         let id = DeviceId::new(context.arg(0) as u16);
         let out = context.arg(1) as *mut MirageDeviceDescriptor;
         if out.is_null() {
@@ -498,7 +502,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let protection = MemoryProtection::from_bits(context.arg(1) as u32);
         self.security
             .authorize_memory_mapping(context.caller, protection)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         memory::mmap_for(context.caller, length, protection)
             .map(|region| region.as_ptr() as u64)
             .ok_or(KernelError::AllocationFailed)
@@ -507,7 +511,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_munmap(&self, context: SyscallContext) -> KernelResult<u64> {
         self.security
             .authorize_memory_service(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         let ptr = NonNull::new(context.arg(0) as *mut u8).ok_or(KernelError::InvalidPointer)?;
         let length = context.arg(1) as usize;
         if memory::munmap_ptr_for(context.caller, ptr, length) {
@@ -520,7 +524,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_malloc(&self, context: SyscallContext) -> KernelResult<u64> {
         self.security
             .authorize_memory_service(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         memory::malloc_for(context.caller, context.arg(0) as usize)
             .map(|ptr| ptr.as_ptr() as u64)
             .ok_or(KernelError::AllocationFailed)
@@ -529,7 +533,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_free(&self, context: SyscallContext) -> KernelResult<u64> {
         self.security
             .authorize_memory_service(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         let ptr = NonNull::new(context.arg(0) as *mut u8).ok_or(KernelError::InvalidPointer)?;
         if memory::free_for(context.caller, ptr) {
             Ok(0)
@@ -541,7 +545,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_realloc(&self, context: SyscallContext) -> KernelResult<u64> {
         self.security
             .authorize_memory_service(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         let ptr = NonNull::new(context.arg(0) as *mut u8);
         memory::realloc_for(context.caller, ptr, context.arg(1) as usize)
             .map(|ptr| ptr.as_ptr() as u64)
@@ -551,7 +555,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_malloc_aligned(&self, context: SyscallContext) -> KernelResult<u64> {
         self.security
             .authorize_memory_service(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
         let alignment = context.arg(1) as usize;
         if alignment == 0 || !alignment.is_power_of_two() {
             return Err(KernelError::InvalidArgument);
@@ -593,8 +597,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 }
             };
 
-            if self.security.enforce_isolation(scheduled.process).is_err() {
-                self.handle_isolation_fault(scheduled.process);
+            if let Err(reason) = self.security.enforce_isolation(scheduled.process) {
+                self.handle_isolation_fault(scheduled.process, reason);
                 return;
             }
 
@@ -808,7 +812,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.locate_process(pid).map(|_| ())
     }
 
-    fn handle_isolation_fault(&mut self, pid: ProcessId) {
+    fn handle_isolation_fault(&mut self, pid: ProcessId, _reason: IsolationError) {
         self.terminate_process(pid);
     }
 
@@ -899,7 +903,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
         self.security
             .authorize_device_access(pid, descriptor.security)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
 
         self.devices
             .read(id, buffer)
@@ -914,7 +918,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
         self.security
             .authorize_device_access(pid, descriptor.security)
-            .map_err(|_| KernelError::SecurityViolation)?;
+            .map_err(KernelError::SecurityViolation)?;
 
         self.devices
             .write(id, data)
@@ -923,25 +927,36 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 }
 
 fn encode_syscall_error(error: KernelError) -> u64 {
-    const ERROR_BIT: u64 = 1 << 63;
-    let code = match error {
-        KernelError::ProcessTableFull => 1,
-        KernelError::SchedulerFull => 2,
-        KernelError::UnknownProcess => 3,
-        KernelError::UnknownThread => 4,
-        KernelError::ThreadTableFull => 5,
-        KernelError::MessageQueueFull => 6,
-        KernelError::MessageQueueEmpty => 7,
-        KernelError::SecurityViolation => 8,
-        KernelError::IsolationFault => 9,
-        KernelError::DeviceNotFound => 10,
-        KernelError::DeviceFault(_) => 11,
-        KernelError::InvalidSyscall => 12,
-        KernelError::InvalidArgument => 13,
-        KernelError::InvalidPointer => 14,
-        KernelError::AllocationFailed => 15,
-    };
-    ERROR_BIT | code
+    MIRAGE_SYSCALL_ERROR_BIT | syscall_error_code(error).raw()
+}
+
+fn syscall_error_code(error: KernelError) -> SyscallErrorCode {
+    match error {
+        KernelError::ProcessTableFull => SyscallErrorCode::ProcessTableFull,
+        KernelError::SchedulerFull => SyscallErrorCode::SchedulerFull,
+        KernelError::UnknownProcess => SyscallErrorCode::NoSuchProcess,
+        KernelError::UnknownThread => SyscallErrorCode::NoSuchThread,
+        KernelError::ThreadTableFull => SyscallErrorCode::ThreadTableFull,
+        KernelError::MessageQueueFull => SyscallErrorCode::QueueFull,
+        KernelError::MessageQueueEmpty => SyscallErrorCode::QueueEmpty,
+        KernelError::SecurityViolation(reason) => isolation_syscall_error_code(reason),
+        KernelError::IsolationFault(reason) => isolation_syscall_error_code(reason),
+        KernelError::DeviceNotFound => SyscallErrorCode::NoSuchDevice,
+        KernelError::DeviceFault(_) => SyscallErrorCode::DeviceFault,
+        KernelError::InvalidSyscall => SyscallErrorCode::InvalidSyscall,
+        KernelError::InvalidArgument => SyscallErrorCode::InvalidArgument,
+        KernelError::InvalidPointer => SyscallErrorCode::BadAddress,
+        KernelError::AllocationFailed => SyscallErrorCode::OutOfMemory,
+    }
+}
+
+fn isolation_syscall_error_code(reason: IsolationError) -> SyscallErrorCode {
+    match reason {
+        IsolationError::UnknownTask => SyscallErrorCode::NoSuchProcess,
+        IsolationError::PolicyViolation | IsolationError::CapabilityMissing => {
+            SyscallErrorCode::PermissionDenied
+        }
+    }
 }
 
 fn decode_priority(raw: u64) -> KernelResult<ProcessPriority> {
@@ -1067,6 +1082,50 @@ mod tests {
     }
 
     #[test]
+    fn security_errors_preserve_isolation_reason() {
+        let mut kernel = boot_kernel();
+        let init = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let user = kernel
+            .spawn_child_process(init, 0, ProcessPriority::Normal, Credentials::user())
+            .unwrap();
+        let mut buffer = [0u8; 8];
+
+        assert!(matches!(
+            kernel.device_read(user, DeviceId::new(1), &mut buffer),
+            Err(KernelError::SecurityViolation(
+                IsolationError::CapabilityMissing
+            ))
+        ));
+
+        assert!(matches!(
+            kernel.send_message(
+                user,
+                ProcessId::new(999),
+                MessagePayload::empty(SecurityClass::Public)
+            ),
+            Err(KernelError::SecurityViolation(IsolationError::UnknownTask))
+        ));
+    }
+
+    #[test]
+    fn syscall_error_encoding_maps_structured_security_reasons() {
+        assert_eq!(
+            encode_syscall_error(KernelError::SecurityViolation(
+                IsolationError::CapabilityMissing
+            )),
+            MIRAGE_SYSCALL_ERROR_BIT | SyscallErrorCode::PermissionDenied.raw()
+        );
+        assert_eq!(
+            encode_syscall_error(KernelError::SecurityViolation(IsolationError::UnknownTask)),
+            MIRAGE_SYSCALL_ERROR_BIT | SyscallErrorCode::NoSuchProcess.raw()
+        );
+        assert_eq!(
+            encode_syscall_error(KernelError::MessageQueueFull),
+            MIRAGE_SYSCALL_ERROR_BIT | SyscallErrorCode::QueueFull.raw()
+        );
+    }
+
+    #[test]
     fn memory_syscalls_are_process_owned() {
         let mut kernel = boot_kernel();
         let owner = kernel.spawn_initial_process(Credentials::system()).unwrap();
@@ -1090,7 +1149,7 @@ mod tests {
 
         assert!(matches!(
             libc::mmap(&mut kernel, pid, None, 4096, protection),
-            Err(KernelError::SecurityViolation)
+            Err(KernelError::SecurityViolation(_))
         ));
     }
 
@@ -1105,7 +1164,7 @@ mod tests {
 
         assert!(matches!(
             libc::mmap(&mut kernel, user, None, 4096, protection),
-            Err(KernelError::SecurityViolation)
+            Err(KernelError::SecurityViolation(_))
         ));
     }
 }

@@ -11,10 +11,13 @@ use crate::kernel::device::{DeviceId, MirageDeviceDescriptor};
 use crate::kernel::ipc::Message;
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{ProcessId, ProcessPriority};
-use crate::kernel::syscall::{SyscallContext, SyscallNumber, SYSCALL_MAX_ARGS};
+use crate::kernel::syscall::{
+    SyscallContext, SyscallNumber, MIRAGE_EACCES, MIRAGE_EAGAIN, MIRAGE_EFAULT, MIRAGE_EINVAL,
+    MIRAGE_EIO, MIRAGE_ENOBUFS, MIRAGE_ENOMEM, MIRAGE_ENOSYS, MIRAGE_ESRCH, SYSCALL_MAX_ARGS,
+};
 use crate::kernel::thread::ThreadId;
-use crate::kernel::{Kernel, KernelResult};
-use crate::subkernel::SecurityClass;
+use crate::kernel::{Kernel, KernelError, KernelResult};
+use crate::subkernel::{IsolationError, SecurityClass};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpawnCredentialProfile {
@@ -253,7 +256,7 @@ pub unsafe extern "C" fn mirage_device_enumerate(
     capacity: usize,
 ) -> isize {
     if kernel.is_null() || (capacity > 0 && out.is_null()) {
-        return -1;
+        return -(MIRAGE_EFAULT as isize);
     }
     let out_slice = if capacity == 0 {
         &mut []
@@ -262,7 +265,7 @@ pub unsafe extern "C" fn mirage_device_enumerate(
     };
     match enumerate_devices(&mut *kernel, ProcessId::new(caller), None, out_slice) {
         Ok(count) => count as isize,
-        Err(_) => -1,
+        Err(err) => -(libc_errno(err) as isize),
     }
 }
 
@@ -274,7 +277,7 @@ pub unsafe extern "C" fn mirage_device_info(
     out: *mut MirageDeviceDescriptor,
 ) -> isize {
     if kernel.is_null() || out.is_null() {
-        return -1;
+        return -(MIRAGE_EFAULT as isize);
     }
     match device_info(
         &mut *kernel,
@@ -284,7 +287,7 @@ pub unsafe extern "C" fn mirage_device_info(
         &mut *out,
     ) {
         Ok(()) => 0,
-        Err(_) => -1,
+        Err(err) => -(libc_errno(err) as isize),
     }
 }
 
@@ -297,7 +300,7 @@ pub unsafe extern "C" fn mirage_device_read(
     len: usize,
 ) -> isize {
     if kernel.is_null() || (len > 0 && buffer.is_null()) {
-        return -1;
+        return -(MIRAGE_EFAULT as isize);
     }
     let buffer = if len == 0 {
         &mut []
@@ -312,7 +315,7 @@ pub unsafe extern "C" fn mirage_device_read(
         buffer,
     ) {
         Ok(read) => read as isize,
-        Err(_) => -1,
+        Err(err) => -(libc_errno(err) as isize),
     }
 }
 
@@ -325,7 +328,7 @@ pub unsafe extern "C" fn mirage_device_write(
     len: usize,
 ) -> isize {
     if kernel.is_null() || (len > 0 && data.is_null()) {
-        return -1;
+        return -(MIRAGE_EFAULT as isize);
     }
     let data = if len == 0 {
         &[]
@@ -340,7 +343,32 @@ pub unsafe extern "C" fn mirage_device_write(
         data,
     ) {
         Ok(written) => written as isize,
-        Err(_) => -1,
+        Err(err) => -(libc_errno(err) as isize),
+    }
+}
+
+fn libc_errno(error: KernelError) -> i32 {
+    match error {
+        KernelError::ProcessTableFull
+        | KernelError::SchedulerFull
+        | KernelError::ThreadTableFull
+        | KernelError::AllocationFailed => MIRAGE_ENOMEM,
+        KernelError::UnknownProcess | KernelError::UnknownThread => MIRAGE_ESRCH,
+        KernelError::MessageQueueFull => MIRAGE_ENOBUFS,
+        KernelError::MessageQueueEmpty => MIRAGE_EAGAIN,
+        KernelError::SecurityViolation(IsolationError::UnknownTask)
+        | KernelError::IsolationFault(IsolationError::UnknownTask) => MIRAGE_ESRCH,
+        KernelError::SecurityViolation(
+            IsolationError::CapabilityMissing | IsolationError::PolicyViolation,
+        )
+        | KernelError::IsolationFault(
+            IsolationError::CapabilityMissing | IsolationError::PolicyViolation,
+        ) => MIRAGE_EACCES,
+        KernelError::DeviceNotFound => MIRAGE_ESRCH,
+        KernelError::DeviceFault(_) => MIRAGE_EIO,
+        KernelError::InvalidSyscall => MIRAGE_ENOSYS,
+        KernelError::InvalidArgument => MIRAGE_EINVAL,
+        KernelError::InvalidPointer => MIRAGE_EFAULT,
     }
 }
 
@@ -369,5 +397,25 @@ fn encode_security_class(class: SecurityClass) -> u64 {
         SecurityClass::Internal => 1,
         SecurityClass::Confidential => 2,
         SecurityClass::System => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn libc_errno_maps_security_and_queue_failures() {
+        assert_eq!(
+            libc_errno(KernelError::SecurityViolation(
+                IsolationError::CapabilityMissing
+            )),
+            MIRAGE_EACCES
+        );
+        assert_eq!(
+            libc_errno(KernelError::SecurityViolation(IsolationError::UnknownTask)),
+            MIRAGE_ESRCH
+        );
+        assert_eq!(libc_errno(KernelError::MessageQueueFull), MIRAGE_ENOBUFS);
     }
 }
