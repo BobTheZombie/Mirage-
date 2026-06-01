@@ -9,6 +9,8 @@ use mirage::subkernel::Credentials;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    let _boot_info = mirage::boot::snapshot();
+
     x86_64::init_architecture();
 
     let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
