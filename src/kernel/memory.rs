@@ -346,7 +346,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             return Some(offset);
         }
 
-        let aligned_offset = self.align_up(self.bump_offset, align);
+        let aligned_offset = self.aligned_heap_offset(self.bump_offset, align)?;
         let end = aligned_offset.checked_add(size)?;
         if end > HEAP_SIZE {
             return None;
@@ -359,7 +359,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         let mut idx = 0;
         while idx < MAX_AREAS {
             if let Some(region) = self.free_regions[idx] {
-                let aligned_start = self.align_up(region.offset, align);
+                let aligned_start = self.aligned_heap_offset(region.offset, align)?;
                 let end = aligned_start.checked_add(size)?;
                 if end <= region.end() {
                     self.free_regions[idx] = None;
@@ -487,6 +487,24 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         // If we run out of free slots we simply drop the region, effectively leaking it.
     }
 
+    fn aligned_heap_offset(&self, minimum_offset: usize, align: usize) -> Option<usize> {
+        if align == 0 {
+            return Some(minimum_offset);
+        }
+
+        let base_remainder = (self.heap.as_ptr() as usize) % align;
+        let offset_remainder = minimum_offset % align;
+        let current_remainder = if offset_remainder == 0 {
+            base_remainder
+        } else if base_remainder >= align - offset_remainder {
+            base_remainder - (align - offset_remainder)
+        } else {
+            base_remainder + offset_remainder
+        };
+        let padding = (align - current_remainder) % align;
+        minimum_offset.checked_add(padding)
+    }
+
     fn align_up(&self, value: usize, align: usize) -> usize {
         if align == 0 {
             value
@@ -609,13 +627,15 @@ mod tests {
 
     #[test]
     fn mmap_produces_page_aligned_region() {
-        let mut manager: MemoryManager<8192, 32> = MemoryManager::new();
+        let mut manager: MemoryManager<12288, 32> = MemoryManager::new();
+        let heap = manager.malloc(1).expect("heap allocation succeeds");
         let region = manager
             .mmap(4096, MemoryProtection::read_only())
             .expect("mapping succeeds");
         assert_eq!(region.length, 4096);
         assert_eq!((region.ptr.as_ptr() as usize) % PAGE_SIZE, 0);
         assert!(manager.munmap(region));
+        assert!(manager.free(heap));
     }
 
     #[test]
@@ -633,6 +653,19 @@ mod tests {
             .expect("aligned allocation succeeds");
         assert_eq!((ptr.as_ptr() as usize) % 64, 0);
         assert!(manager.free(ptr));
+    }
+
+    #[test]
+    fn malloc_aligned_from_free_list_respects_pointer_alignment() {
+        let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
+        let ptr = manager.malloc(256).expect("allocation succeeds");
+        assert!(manager.free(ptr));
+
+        let aligned = manager
+            .malloc_aligned(32, 128)
+            .expect("aligned allocation succeeds");
+        assert_eq!((aligned.as_ptr() as usize) % 128, 0);
+        assert!(manager.free(aligned));
     }
 
     #[test]
