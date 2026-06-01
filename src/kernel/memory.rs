@@ -158,7 +158,10 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             AllocationKind::Heap,
             MemoryProtection::read_write(),
         );
-        self.record_allocation(record)?;
+        if self.record_allocation(record).is_none() {
+            self.insert_free_region(FreeRegion::new(offset, actual_size));
+            return None;
+        }
         self.update_stats_on_alloc(actual_size);
         Some(unsafe { NonNull::new_unchecked(self.heap.as_mut_ptr().add(offset)) })
     }
@@ -188,7 +191,10 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             AllocationKind::Heap,
             MemoryProtection::read_write(),
         );
-        self.record_allocation(record)?;
+        if self.record_allocation(record).is_none() {
+            self.insert_free_region(FreeRegion::new(offset, actual_size));
+            return None;
+        }
         self.update_stats_on_alloc(actual_size);
         Some(unsafe { NonNull::new_unchecked(self.heap.as_mut_ptr().add(offset)) })
     }
@@ -284,7 +290,10 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             AllocationKind::Mapping,
             protection,
         );
-        self.record_allocation(record)?;
+        if self.record_allocation(record).is_none() {
+            self.insert_free_region(FreeRegion::new(offset, actual_size));
+            return None;
+        }
         self.update_stats_on_alloc(actual_size);
         let ptr = unsafe { NonNull::new_unchecked(self.heap.as_mut_ptr().add(offset)) };
         Some(MappedRegion {
@@ -615,6 +624,75 @@ pub fn stats() -> AllocationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn offset_of<const HEAP_SIZE: usize, const MAX_AREAS: usize>(
+        manager: &MemoryManager<HEAP_SIZE, MAX_AREAS>,
+        ptr: NonNull<u8>,
+    ) -> usize {
+        ptr.as_ptr() as usize - manager.heap.as_ptr() as usize
+    }
+
+    #[test]
+    fn malloc_rolls_back_record_exhaustion_reservation() {
+        let mut manager: MemoryManager<64, 2> = MemoryManager::new();
+        let first = manager.malloc(8).expect("first allocation succeeds");
+        let _second = manager.malloc(8).expect("second allocation succeeds");
+        let stats_before = manager.statistics();
+
+        assert!(manager.malloc(8).is_none());
+        assert_eq!(manager.statistics(), stats_before);
+        let rolled_back = manager.free_regions[0].expect("failed reservation was freed");
+
+        assert!(manager.free(first));
+        let reused = manager
+            .malloc(8)
+            .expect("rolled-back reservation can be reused");
+        assert_eq!(offset_of(&manager, reused), rolled_back.offset);
+    }
+
+    #[test]
+    fn malloc_aligned_rolls_back_record_exhaustion_reservation() {
+        let mut manager: MemoryManager<128, 2> = MemoryManager::new();
+        let first = manager
+            .malloc_aligned(8, 16)
+            .expect("first aligned allocation succeeds");
+        let _second = manager
+            .malloc_aligned(8, 16)
+            .expect("second aligned allocation succeeds");
+        let stats_before = manager.statistics();
+
+        assert!(manager.malloc_aligned(8, 16).is_none());
+        assert_eq!(manager.statistics(), stats_before);
+        let rolled_back = manager.free_regions[0].expect("failed reservation was freed");
+
+        assert!(manager.free(first));
+        let reused = manager
+            .malloc_aligned(8, 16)
+            .expect("rolled-back aligned reservation can be reused");
+        assert_eq!(offset_of(&manager, reused), rolled_back.offset);
+    }
+
+    #[test]
+    fn mmap_rolls_back_record_exhaustion_reservation() {
+        let mut manager: MemoryManager<{ PAGE_SIZE * 4 }, 2> = MemoryManager::new();
+        let first = manager
+            .mmap(1, MemoryProtection::read_only())
+            .expect("first mapping succeeds");
+        let _second = manager
+            .mmap(1, MemoryProtection::read_write())
+            .expect("second mapping succeeds");
+        let stats_before = manager.statistics();
+
+        assert!(manager.mmap(1, MemoryProtection::read_exec()).is_none());
+        assert_eq!(manager.statistics(), stats_before);
+        let rolled_back = manager.free_regions[0].expect("failed reservation was freed");
+
+        assert!(manager.munmap(first));
+        let reused = manager
+            .mmap(1, MemoryProtection::read_exec())
+            .expect("rolled-back mapping reservation can be reused");
+        assert_eq!(offset_of(&manager, reused.ptr), rolled_back.offset);
+    }
 
     #[test]
     fn malloc_and_free_cycle() {
