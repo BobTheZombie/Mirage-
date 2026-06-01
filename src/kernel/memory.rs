@@ -149,7 +149,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         }
 
         let align = core::mem::size_of::<usize>();
-        let actual_size = self.align_up(size, align);
+        let actual_size = self.align_up(size, align)?;
         let offset = self.reserve(actual_size, align)?;
         let record = AllocationRecord::new(
             owner,
@@ -173,15 +173,12 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         size: usize,
         align: usize,
     ) -> Option<NonNull<u8>> {
-        if size == 0 || align == 0 {
+        if size == 0 || !Self::valid_alignment(align) {
             return None;
         }
 
         let actual_align = align.max(core::mem::size_of::<usize>());
-        let actual_size = self.align_up(size, core::mem::size_of::<usize>());
-        if actual_size < size {
-            return None;
-        }
+        let actual_size = self.align_up(size, core::mem::size_of::<usize>())?;
 
         let offset = self.reserve(actual_size, actual_align)?;
         let record = AllocationRecord::new(
@@ -230,10 +227,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
                 }
 
                 let align = core::mem::size_of::<usize>();
-                let aligned_new = self.align_up(size, align);
-                if aligned_new < size {
-                    return None;
-                }
+                let aligned_new = self.align_up(size, align)?;
 
                 if aligned_new <= record.size {
                     let leftover = record.size.saturating_sub(aligned_new);
@@ -281,7 +275,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         }
 
         let align = PAGE_SIZE;
-        let actual_size = self.align_up(length, PAGE_SIZE);
+        let actual_size = self.align_up(length, PAGE_SIZE)?;
         let offset = self.reserve(actual_size, align)?;
         let record = AllocationRecord::new(
             owner,
@@ -488,8 +482,8 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
     }
 
     fn aligned_heap_offset(&self, minimum_offset: usize, align: usize) -> Option<usize> {
-        if align == 0 {
-            return Some(minimum_offset);
+        if !Self::valid_alignment(align) {
+            return None;
         }
 
         let base_remainder = (self.heap.as_ptr() as usize) % align;
@@ -505,12 +499,17 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         minimum_offset.checked_add(padding)
     }
 
-    fn align_up(&self, value: usize, align: usize) -> usize {
-        if align == 0 {
-            value
-        } else {
-            (value + (align - 1)) & !(align - 1)
+    fn align_up(&self, value: usize, align: usize) -> Option<usize> {
+        if !Self::valid_alignment(align) {
+            return None;
         }
+
+        let mask = align - 1;
+        value.checked_add(mask).map(|aligned| aligned & !mask)
+    }
+
+    const fn valid_alignment(align: usize) -> bool {
+        align != 0 && align.is_power_of_two()
     }
 
     fn update_stats_on_alloc(&mut self, size: usize) {
@@ -653,6 +652,31 @@ mod tests {
             .expect("aligned allocation succeeds");
         assert_eq!((ptr.as_ptr() as usize) % 64, 0);
         assert!(manager.free(ptr));
+    }
+
+    #[test]
+    fn malloc_aligned_rejects_non_power_of_two_alignment() {
+        let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
+
+        assert!(manager.malloc_aligned(64, 24).is_none());
+        assert_eq!(manager.statistics().allocated_bytes, 0);
+    }
+
+    #[test]
+    fn malloc_aligned_for_rejects_zero_alignment() {
+        let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
+
+        assert!(manager
+            .malloc_aligned_for(ProcessId::new(7), 64, 0)
+            .is_none());
+        assert_eq!(manager.statistics().allocated_bytes, 0);
+    }
+
+    #[test]
+    fn align_up_returns_none_on_overflow() {
+        let manager: MemoryManager<4096, 16> = MemoryManager::new();
+
+        assert_eq!(manager.align_up(usize::MAX, 8), None);
     }
 
     #[test]
