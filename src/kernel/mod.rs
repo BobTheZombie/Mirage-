@@ -268,7 +268,16 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         }
 
         if wake_threads {
-            self.make_threads_ready(receiver);
+            if let Err(err) = self.make_threads_ready(receiver) {
+                // Sending to a blocked process is transactional: if the wakeup cannot be
+                // scheduled, the receiver stays blocked and the just-enqueued message is
+                // removed so callers can retry without duplicating delivery.
+                if let Some(pcb) = self.process_table[queue_index].as_mut() {
+                    pcb.state = ProcessState::Blocked;
+                }
+                let _ = self.ipc_queues[queue_index].rollback_last_push();
+                return Err(err);
+            }
         }
 
         Ok(())
@@ -586,18 +595,42 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         }
     }
 
-    fn make_threads_ready(&mut self, pid: ProcessId) {
+    fn make_threads_ready(&mut self, pid: ProcessId) -> KernelResult<()> {
         let mut idx = 0usize;
         while idx < Self::THREAD_CAPACITY {
             if let Some(entry) = self.thread_table.get_mut(idx) {
                 if let Some(thread) = entry.as_mut() {
                     if thread.process == pid && thread.state == ThreadState::Blocked {
                         thread.mark_ready();
-                        let _ = self.scheduler.enqueue(ScheduledThread::new(
-                            thread.id,
-                            thread.process,
-                            thread.priority,
-                        ));
+                        if self
+                            .scheduler
+                            .enqueue(ScheduledThread::new(
+                                thread.id,
+                                thread.process,
+                                thread.priority,
+                            ))
+                            .is_err()
+                        {
+                            thread.block();
+                            self.rollback_ready_threads(pid, idx);
+                            return Err(KernelError::SchedulerFull);
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        }
+        Ok(())
+    }
+
+    fn rollback_ready_threads(&mut self, pid: ProcessId, before_index: usize) {
+        let mut idx = 0usize;
+        while idx < before_index {
+            if let Some(entry) = self.thread_table.get_mut(idx) {
+                if let Some(thread) = entry.as_mut() {
+                    if thread.process == pid && thread.state == ThreadState::Ready {
+                        thread.block();
+                        self.scheduler.remove_thread(thread.id);
                     }
                 }
             }

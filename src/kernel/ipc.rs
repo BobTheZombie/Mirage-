@@ -99,6 +99,17 @@ impl<const N: usize> MessageQueue<N> {
         message
     }
 
+    pub fn rollback_last_push(&mut self) -> Option<Message> {
+        if self.len == 0 {
+            return None;
+        }
+        self.tail = (self.tail + N - 1) % N;
+        let message = self.buffer[self.tail];
+        self.buffer[self.tail] = None;
+        self.len -= 1;
+        message
+    }
+
     pub fn clear(&mut self) {
         self.head = 0;
         self.tail = 0;
