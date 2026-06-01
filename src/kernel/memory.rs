@@ -1,19 +1,27 @@
-//! A deliberately small memory manager that powers Mirage's dynamic allocation
-//! routines. The implementation is intentionally conservative but demonstrates
-//! how `malloc`, `free`, and `mmap` style services could be layered on top of a
-//! statically provisioned heap in a `no_std` kernel.
+//! Early kernel memory management.
+//!
+//! Mirage keeps the public `malloc`, `free`, and `mmap` APIs small, but the
+//! backing store can now be promoted from the tiny static bootstrap heap to
+//! page-backed virtual memory once x86_64 boot information has been ingested.
 
 use core::{
     cmp,
     ptr::{self, NonNull},
 };
 
+use crate::arch::x86_64::{
+    boot::{BootInfo, MemoryRegionKind},
+    paging,
+};
 use crate::kernel::process::ProcessId;
 use crate::kernel::sync::SpinLock;
 
 pub const PAGE_SIZE: usize = 4096;
 pub const DEFAULT_HEAP_BYTES: usize = 128 * 1024;
+pub const EARLY_HEAP_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ALLOCATION_RECORDS: usize = 512;
+pub const MAX_PHYSICAL_REGIONS: usize = 128;
+pub const EARLY_HEAP_BASE: usize = 0xffff_9000_0000_0000;
 pub const KERNEL_PROCESS_ID: ProcessId = ProcessId::new(0);
 
 pub const PROT_READ: u32 = 0x1;
@@ -67,6 +75,333 @@ impl MemoryProtection {
             | (self.write as u32 * PROT_WRITE)
             | (self.execute as u32 * PROT_EXECUTE)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhysicalRegionKind {
+    Usable,
+    Reserved,
+    Acpi,
+    Mmio,
+    Kernel,
+}
+
+impl PhysicalRegionKind {
+    const fn allocatable(self) -> bool {
+        matches!(self, Self::Usable)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicalRegion {
+    pub start: u64,
+    pub length: u64,
+    pub kind: PhysicalRegionKind,
+}
+
+impl PhysicalRegion {
+    pub const fn new(start: u64, length: u64, kind: PhysicalRegionKind) -> Self {
+        Self {
+            start,
+            length,
+            kind,
+        }
+    }
+
+    pub const fn end(self) -> u64 {
+        self.start.saturating_add(self.length)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicalMemoryStats {
+    pub total_bytes: u64,
+    pub usable_bytes: u64,
+    pub reserved_bytes: u64,
+    pub acpi_bytes: u64,
+    pub mmio_bytes: u64,
+    pub kernel_bytes: u64,
+    pub allocated_frames: usize,
+}
+
+pub struct PhysicalFrameAllocator<const MAX_REGIONS: usize> {
+    regions: [Option<PhysicalRegion>; MAX_REGIONS],
+    allocated_frames: usize,
+    initialized: bool,
+}
+
+impl<const MAX_REGIONS: usize> PhysicalFrameAllocator<MAX_REGIONS> {
+    pub const fn new() -> Self {
+        Self {
+            regions: [None; MAX_REGIONS],
+            allocated_frames: 0,
+            initialized: false,
+        }
+    }
+
+    pub fn ingest_boot_info(&mut self, boot_info: &BootInfo) {
+        self.regions = [None; MAX_REGIONS];
+        self.allocated_frames = 0;
+        self.initialized = true;
+
+        if let Some(map) = boot_info.memory_map {
+            for index in 0..map.len() {
+                if let Some(entry) = map.entry(index) {
+                    let kind = Self::kind_from_boot(entry.kind);
+                    self.add_region(PhysicalRegion::new(
+                        align_down_u64(entry.base.0),
+                        align_up_u64(entry.base.0.saturating_add(entry.length))
+                            .saturating_sub(align_down_u64(entry.base.0)),
+                        kind,
+                    ));
+                }
+            }
+        }
+
+        if let Some(load) = boot_info.kernel.load_range {
+            self.reserve_range(
+                load.physical_start.0,
+                load.length,
+                PhysicalRegionKind::Kernel,
+            );
+        } else {
+            let translator = paging::AddressTranslator::new(boot_info);
+            let sections = boot_info.kernel.sections;
+            self.reserve_range(
+                translator.physical_for_virtual(sections.kernel.start.0),
+                sections.kernel.length(),
+                PhysicalRegionKind::Kernel,
+            );
+        }
+
+        if let Some(framebuffer) = boot_info.framebuffer {
+            let translator = paging::AddressTranslator::new(boot_info);
+            self.reserve_range(
+                translator.physical_for_virtual(framebuffer.address.0),
+                framebuffer.pitch.saturating_mul(framebuffer.height),
+                PhysicalRegionKind::Mmio,
+            );
+        }
+
+        if let Some(rsdp) = boot_info.rsdp {
+            self.reserve_range(rsdp.0, PAGE_SIZE as u64, PhysicalRegionKind::Acpi);
+        }
+
+        let (tables_start, tables_len) = paging::page_table_pool_range();
+        let translator = paging::AddressTranslator::new(boot_info);
+        self.reserve_range(
+            translator.physical_for_virtual(tables_start as u64),
+            tables_len as u64,
+            PhysicalRegionKind::Kernel,
+        );
+
+        let stack_probe = 0u8;
+        let stack_virtual = core::ptr::addr_of!(stack_probe) as u64;
+        let stack_physical = translator.physical_for_virtual(stack_virtual);
+        self.reserve_range(
+            stack_physical.saturating_sub(64 * 1024),
+            64 * 1024,
+            PhysicalRegionKind::Kernel,
+        );
+    }
+
+    const fn kind_from_boot(kind: MemoryRegionKind) -> PhysicalRegionKind {
+        match kind {
+            MemoryRegionKind::Usable => PhysicalRegionKind::Usable,
+            MemoryRegionKind::AcpiReclaimable | MemoryRegionKind::AcpiNvs => {
+                PhysicalRegionKind::Acpi
+            }
+            MemoryRegionKind::Framebuffer => PhysicalRegionKind::Mmio,
+            MemoryRegionKind::KernelAndModules => PhysicalRegionKind::Kernel,
+            _ => PhysicalRegionKind::Reserved,
+        }
+    }
+
+    pub fn allocate_frame(&mut self) -> Option<u64> {
+        let mut idx = 0;
+        while idx < MAX_REGIONS {
+            if let Some(mut region) = self.regions[idx] {
+                if region.kind.allocatable() {
+                    let frame = align_up_u64(region.start);
+                    let end = region.end();
+                    if frame.saturating_add(PAGE_SIZE as u64) <= end {
+                        region.start = frame.saturating_add(PAGE_SIZE as u64);
+                        region.length = end.saturating_sub(region.start);
+                        if region.length == 0 {
+                            self.regions[idx] = None;
+                        } else {
+                            self.regions[idx] = Some(region);
+                        }
+                        self.allocated_frames = self.allocated_frames.saturating_add(1);
+                        return Some(frame);
+                    }
+                }
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    pub fn deallocate_frame(&mut self, frame: u64) {
+        self.allocated_frames = self.allocated_frames.saturating_sub(1);
+        self.add_region(PhysicalRegion::new(
+            align_down_u64(frame),
+            PAGE_SIZE as u64,
+            PhysicalRegionKind::Usable,
+        ));
+    }
+
+    pub fn reserve_range(&mut self, start: u64, length: u64, kind: PhysicalRegionKind) {
+        if length == 0 {
+            return;
+        }
+        let reserve_start = align_down_u64(start);
+        let reserve_end = align_up_u64(start.saturating_add(length));
+        let mut idx = 0;
+        while idx < MAX_REGIONS {
+            if let Some(region) = self.regions[idx] {
+                if ranges_overlap(region.start, region.end(), reserve_start, reserve_end) {
+                    self.regions[idx] = None;
+                    if region.start < reserve_start {
+                        self.add_region(PhysicalRegion::new(
+                            region.start,
+                            reserve_start.saturating_sub(region.start),
+                            region.kind,
+                        ));
+                    }
+                    if reserve_end < region.end() {
+                        self.add_region(PhysicalRegion::new(
+                            reserve_end,
+                            region.end().saturating_sub(reserve_end),
+                            region.kind,
+                        ));
+                    }
+                }
+            }
+            idx += 1;
+        }
+        self.add_region(PhysicalRegion::new(
+            reserve_start,
+            reserve_end.saturating_sub(reserve_start),
+            kind,
+        ));
+    }
+
+    pub fn initialized(&self) -> bool {
+        self.initialized
+    }
+
+    pub fn statistics(&self) -> PhysicalMemoryStats {
+        let mut stats = PhysicalMemoryStats {
+            total_bytes: 0,
+            usable_bytes: 0,
+            reserved_bytes: 0,
+            acpi_bytes: 0,
+            mmio_bytes: 0,
+            kernel_bytes: 0,
+            allocated_frames: self.allocated_frames,
+        };
+        let mut idx = 0;
+        while idx < MAX_REGIONS {
+            if let Some(region) = self.regions[idx] {
+                stats.total_bytes = stats.total_bytes.saturating_add(region.length);
+                match region.kind {
+                    PhysicalRegionKind::Usable => {
+                        stats.usable_bytes = stats.usable_bytes.saturating_add(region.length)
+                    }
+                    PhysicalRegionKind::Reserved => {
+                        stats.reserved_bytes = stats.reserved_bytes.saturating_add(region.length)
+                    }
+                    PhysicalRegionKind::Acpi => {
+                        stats.acpi_bytes = stats.acpi_bytes.saturating_add(region.length)
+                    }
+                    PhysicalRegionKind::Mmio => {
+                        stats.mmio_bytes = stats.mmio_bytes.saturating_add(region.length)
+                    }
+                    PhysicalRegionKind::Kernel => {
+                        stats.kernel_bytes = stats.kernel_bytes.saturating_add(region.length)
+                    }
+                }
+            }
+            idx += 1;
+        }
+        stats
+    }
+
+    fn add_region(&mut self, region: PhysicalRegion) -> bool {
+        if region.length == 0 {
+            return true;
+        }
+        let mut idx = 0;
+        while idx < MAX_REGIONS {
+            if let Some(existing) = self.regions[idx] {
+                if existing.kind == region.kind && existing.end() == region.start {
+                    self.regions[idx] = Some(PhysicalRegion::new(
+                        existing.start,
+                        existing.length.saturating_add(region.length),
+                        existing.kind,
+                    ));
+                    return true;
+                }
+                if existing.kind == region.kind && region.end() == existing.start {
+                    self.regions[idx] = Some(PhysicalRegion::new(
+                        region.start,
+                        existing.length.saturating_add(region.length),
+                        existing.kind,
+                    ));
+                    return true;
+                }
+            }
+            idx += 1;
+        }
+        idx = 0;
+        while idx < MAX_REGIONS {
+            if self.regions[idx].is_none() {
+                self.regions[idx] = Some(region);
+                return true;
+            }
+            idx += 1;
+        }
+        false
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackingStore {
+    Static,
+    Virtual {
+        base: usize,
+        capacity: usize,
+        committed: usize,
+    },
+}
+
+impl BackingStore {
+    fn capacity<const HEAP_SIZE: usize>(self) -> usize {
+        match self {
+            BackingStore::Static => HEAP_SIZE,
+            BackingStore::Virtual { capacity, .. } => capacity,
+        }
+    }
+
+    fn base<const HEAP_SIZE: usize>(self, static_heap: *const u8) -> usize {
+        match self {
+            BackingStore::Static => static_heap as usize,
+            BackingStore::Virtual { base, .. } => base,
+        }
+    }
+}
+
+fn ranges_overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> bool {
+    a_start < b_end && b_start < a_end
+}
+
+const fn align_down_u64(address: u64) -> u64 {
+    address & !((PAGE_SIZE as u64) - 1)
+}
+
+const fn align_up_u64(address: u64) -> u64 {
+    address.saturating_add((PAGE_SIZE as u64) - 1) & !((PAGE_SIZE as u64) - 1)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +460,7 @@ pub struct MemoryManager<const HEAP_SIZE: usize, const MAX_AREAS: usize> {
     free_regions: [Option<FreeRegion>; MAX_AREAS],
     allocated_bytes: usize,
     peak_bytes: usize,
+    backing: BackingStore,
 }
 
 impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MAX_AREAS> {
@@ -136,6 +472,55 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             free_regions: [None; MAX_AREAS],
             allocated_bytes: 0,
             peak_bytes: 0,
+            backing: BackingStore::Static,
+        }
+    }
+
+    pub fn promote_to_virtual_heap(&mut self, base: usize, capacity: usize) {
+        if self.allocated_bytes != 0 || self.bump_offset != 0 || capacity == 0 {
+            return;
+        }
+        self.backing = BackingStore::Virtual {
+            base,
+            capacity,
+            committed: 0,
+        };
+    }
+
+    fn ensure_backing(
+        &mut self,
+        offset: usize,
+        size: usize,
+        protection: MemoryProtection,
+    ) -> Option<()> {
+        match self.backing {
+            BackingStore::Static => Some(()),
+            BackingStore::Virtual {
+                base,
+                capacity,
+                committed,
+            } => {
+                let required = offset.checked_add(size)?;
+                if required > capacity {
+                    return None;
+                }
+                let target = self.align_up(required, PAGE_SIZE)?;
+                let mut next = committed;
+                while next < target {
+                    let frame = allocate_physical_frame()?;
+                    if paging::map_kernel_page(frame, (base + next) as u64, protection).is_none() {
+                        deallocate_physical_frame(frame);
+                        return None;
+                    }
+                    next += PAGE_SIZE;
+                }
+                self.backing = BackingStore::Virtual {
+                    base,
+                    capacity,
+                    committed: target,
+                };
+                Some(())
+            }
         }
     }
 
@@ -151,6 +536,13 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         let align = core::mem::size_of::<usize>();
         let actual_size = self.align_up(size, align)?;
         let offset = self.reserve(actual_size, align)?;
+        if self
+            .ensure_backing(offset, actual_size, MemoryProtection::read_write())
+            .is_none()
+        {
+            self.insert_free_region(FreeRegion::new(offset, actual_size));
+            return None;
+        }
         let record = AllocationRecord::new(
             owner,
             offset,
@@ -163,7 +555,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             return None;
         }
         self.update_stats_on_alloc(actual_size);
-        Some(unsafe { NonNull::new_unchecked(self.heap.as_mut_ptr().add(offset)) })
+        Some(self.ptr_for_offset(offset))
     }
 
     pub fn malloc_aligned(&mut self, size: usize, align: usize) -> Option<NonNull<u8>> {
@@ -184,6 +576,13 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         let actual_size = self.align_up(size, core::mem::size_of::<usize>())?;
 
         let offset = self.reserve(actual_size, actual_align)?;
+        if self
+            .ensure_backing(offset, actual_size, MemoryProtection::read_write())
+            .is_none()
+        {
+            self.insert_free_region(FreeRegion::new(offset, actual_size));
+            return None;
+        }
         let record = AllocationRecord::new(
             owner,
             offset,
@@ -196,7 +595,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             return None;
         }
         self.update_stats_on_alloc(actual_size);
-        Some(unsafe { NonNull::new_unchecked(self.heap.as_mut_ptr().add(offset)) })
+        Some(self.ptr_for_offset(offset))
     }
 
     pub fn realloc(&mut self, ptr: Option<NonNull<u8>>, new_size: usize) -> Option<NonNull<u8>> {
@@ -217,12 +616,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
                 None
             }
             (Some(p), size) => {
-                let base = self.heap.as_ptr() as usize;
-                let addr = p.as_ptr() as usize;
-                if addr < base || addr >= base + HEAP_SIZE {
-                    return None;
-                }
-                let offset = addr - base;
+                let offset = self.offset_for_ptr(p)?;
                 let idx = self.find_allocation_index(owner, offset)?;
                 let mut record = match self.allocations[idx] {
                     Some(r) => r,
@@ -283,6 +677,13 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         let align = PAGE_SIZE;
         let actual_size = self.align_up(length, PAGE_SIZE)?;
         let offset = self.reserve(actual_size, align)?;
+        if self
+            .ensure_backing(offset, actual_size, protection)
+            .is_none()
+        {
+            self.insert_free_region(FreeRegion::new(offset, actual_size));
+            return None;
+        }
         let record = AllocationRecord::new(
             owner,
             offset,
@@ -295,7 +696,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             return None;
         }
         self.update_stats_on_alloc(actual_size);
-        let ptr = unsafe { NonNull::new_unchecked(self.heap.as_mut_ptr().add(offset)) };
+        let ptr = self.ptr_for_offset(offset);
         Some(MappedRegion {
             owner,
             ptr,
@@ -344,6 +745,27 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         }
     }
 
+    fn base_address(&self) -> usize {
+        self.backing.base::<HEAP_SIZE>(self.heap.as_ptr())
+    }
+
+    fn capacity(&self) -> usize {
+        self.backing.capacity::<HEAP_SIZE>()
+    }
+
+    fn ptr_for_offset(&mut self, offset: usize) -> NonNull<u8> {
+        unsafe { NonNull::new_unchecked((self.base_address() + offset) as *mut u8) }
+    }
+
+    fn offset_for_ptr(&self, ptr: NonNull<u8>) -> Option<usize> {
+        let base = self.base_address();
+        let addr = ptr.as_ptr() as usize;
+        if addr < base || addr >= base.saturating_add(self.capacity()) {
+            return None;
+        }
+        Some(addr - base)
+    }
+
     fn reserve(&mut self, size: usize, align: usize) -> Option<usize> {
         if let Some(offset) = self.reserve_from_free_list(size, align) {
             return Some(offset);
@@ -351,7 +773,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
 
         let aligned_offset = self.aligned_heap_offset(self.bump_offset, align)?;
         let end = aligned_offset.checked_add(size)?;
-        if end > HEAP_SIZE {
+        if end > self.capacity() {
             return None;
         }
         self.bump_offset = end;
@@ -401,12 +823,9 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         expected_kind: Option<AllocationKind>,
         minimum_length: Option<usize>,
     ) -> bool {
-        let base = self.heap.as_ptr() as usize;
-        let addr = ptr.as_ptr() as usize;
-        if addr < base || addr >= base + HEAP_SIZE {
+        let Some(offset) = self.offset_for_ptr(ptr) else {
             return false;
-        }
-        let offset = addr - base;
+        };
         if let Some(record) = self.remove_allocation(owner, offset, expected_kind, minimum_length) {
             self.insert_free_region(FreeRegion::new(record.offset, record.size));
             self.update_stats_on_free(record.size);
@@ -495,7 +914,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             return None;
         }
 
-        let base_remainder = (self.heap.as_ptr() as usize) % align;
+        let base_remainder = self.base_address() % align;
         let offset_remainder = minimum_offset % align;
         let current_remainder = if offset_remainder == 0 {
             base_remainder
@@ -552,6 +971,31 @@ impl MappedRegion {
 type KernelMemory = MemoryManager<DEFAULT_HEAP_BYTES, MAX_ALLOCATION_RECORDS>;
 
 static MEMORY_MANAGER: SpinLock<KernelMemory> = SpinLock::new(MemoryManager::new());
+static PHYSICAL_ALLOCATOR: SpinLock<PhysicalFrameAllocator<MAX_PHYSICAL_REGIONS>> =
+    SpinLock::new(PhysicalFrameAllocator::new());
+
+pub fn initialize_from_boot_info(boot_info: &BootInfo) {
+    PHYSICAL_ALLOCATOR.lock().ingest_boot_info(boot_info);
+    MEMORY_MANAGER
+        .lock()
+        .promote_to_virtual_heap(EARLY_HEAP_BASE, EARLY_HEAP_BYTES);
+}
+
+pub fn allocate_physical_frame() -> Option<u64> {
+    PHYSICAL_ALLOCATOR.lock().allocate_frame()
+}
+
+pub fn deallocate_physical_frame(frame: u64) {
+    PHYSICAL_ALLOCATOR.lock().deallocate_frame(frame);
+}
+
+pub fn reserve_physical_range(start: u64, length: u64, kind: PhysicalRegionKind) {
+    PHYSICAL_ALLOCATOR.lock().reserve_range(start, length, kind);
+}
+
+pub fn physical_stats() -> PhysicalMemoryStats {
+    PHYSICAL_ALLOCATOR.lock().statistics()
+}
 
 pub fn malloc(size: usize) -> Option<NonNull<u8>> {
     malloc_for(KERNEL_PROCESS_ID, size)
