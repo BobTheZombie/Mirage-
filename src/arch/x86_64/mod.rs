@@ -7,9 +7,11 @@
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::arch::x86_64::boot::BootInfo;
 use crate::kernel::syscall::SYSCALL_MAX_ARGS;
 use crate::kernel::thread::{ThreadControlBlock, ThreadId};
 
+pub mod boot;
 pub mod clock;
 
 pub use clock::{HardwareClock, HARDWARE_CLOCK};
@@ -32,13 +34,13 @@ static INITIALISED: AtomicBool = AtomicBool::new(false);
 /// Perform one-time CPU and memory initialisation.
 ///
 /// In a full kernel this would configure control registers, descriptor tables, and paging.
-pub fn init_architecture() {
+pub fn init_architecture(boot_info: &BootInfo) {
     if INITIALISED.swap(true, Ordering::SeqCst) {
         return;
     }
 
     configure_cpu_modes();
-    setup_memory_layout();
+    setup_memory_layout(boot_info);
     configure_interrupts();
 }
 
@@ -87,9 +89,10 @@ fn configure_cpu_modes() {
     // Placeholder for enabling long mode, installing the GDT/IDT, and switching privilege levels.
 }
 
-fn setup_memory_layout() {
-    // A real kernel would enable paging here and identity-map the critical regions. For Mirage we
-    // simply model the presence of such logic to keep the example self-contained.
+fn setup_memory_layout(_boot_info: &BootInfo) {
+    // A real kernel would use the parsed memory map, direct-map offset, and kernel section ranges
+    // to establish page ownership and protect text/rodata. Mirage keeps this as a structural hook
+    // until the physical memory manager and page tables grow real hardware implementations.
 }
 
 fn configure_interrupts() {
