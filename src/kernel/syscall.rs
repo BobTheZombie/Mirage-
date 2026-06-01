@@ -3,6 +3,7 @@
 //! The table in [`SyscallNumber`] is append-only: existing numeric assignments
 //! are treated as ABI and must not be reused for a different operation.
 
+use crate::kernel::memory::{self, MemoryProtection};
 use crate::kernel::process::ProcessId;
 use crate::kernel::thread::ThreadId;
 
@@ -24,6 +25,8 @@ pub enum SyscallNumber {
     Malloc = 10,
     Free = 11,
     ReceiveOrBlockIpc = 12,
+    Realloc = 13,
+    MallocAligned = 14,
 }
 
 impl SyscallNumber {
@@ -46,6 +49,8 @@ impl SyscallNumber {
             10 => Some(Self::Malloc),
             11 => Some(Self::Free),
             12 => Some(Self::ReceiveOrBlockIpc),
+            13 => Some(Self::Realloc),
+            14 => Some(Self::MallocAligned),
             _ => None,
         }
     }
@@ -73,5 +78,58 @@ impl SyscallContext {
 
     pub const fn arg(&self, index: usize) -> u64 {
         self.args[index]
+    }
+}
+
+/// Dispatches kernel-internal memory requests through the same syscall ABI shape
+/// used by user traps. This is used by runtime shims that cannot carry a full
+/// [`Kernel`](crate::kernel::Kernel) reference but still need allocations to be
+/// attributed to a caller instead of bypassing process-aware memory accounting.
+pub fn dispatch_kernel_memory_syscall(number: SyscallNumber, context: SyscallContext) -> u64 {
+    match number {
+        SyscallNumber::Mmap => {
+            let length = context.arg(0) as usize;
+            let protection = MemoryProtection::from_bits(context.arg(1) as u32);
+            memory::mmap_for(context.caller, length, protection)
+                .map(|region| region.as_ptr() as u64)
+                .unwrap_or(0)
+        }
+        SyscallNumber::Munmap => {
+            let Some(ptr) = core::ptr::NonNull::new(context.arg(0) as *mut u8) else {
+                return u64::MAX;
+            };
+            if memory::munmap_ptr_for(context.caller, ptr, context.arg(1) as usize) {
+                0
+            } else {
+                u64::MAX
+            }
+        }
+        SyscallNumber::Malloc => memory::malloc_for(context.caller, context.arg(0) as usize)
+            .map(|ptr| ptr.as_ptr() as u64)
+            .unwrap_or(0),
+        SyscallNumber::Free => {
+            let Some(ptr) = core::ptr::NonNull::new(context.arg(0) as *mut u8) else {
+                return 0;
+            };
+            if memory::free_for(context.caller, ptr) {
+                0
+            } else {
+                u64::MAX
+            }
+        }
+        SyscallNumber::Realloc => {
+            let ptr = core::ptr::NonNull::new(context.arg(0) as *mut u8);
+            memory::realloc_for(context.caller, ptr, context.arg(1) as usize)
+                .map(|ptr| ptr.as_ptr() as u64)
+                .unwrap_or(0)
+        }
+        SyscallNumber::MallocAligned => memory::malloc_aligned_for(
+            context.caller,
+            context.arg(0) as usize,
+            context.arg(1) as usize,
+        )
+        .map(|ptr| ptr.as_ptr() as u64)
+        .unwrap_or(0),
+        _ => u64::MAX,
     }
 }
