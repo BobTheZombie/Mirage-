@@ -14,6 +14,7 @@
 //! written in Rust.
 
 pub mod arch;
+pub mod boot;
 pub mod kernel;
 pub mod libc;
 pub mod librust;
