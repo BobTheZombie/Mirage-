@@ -520,13 +520,14 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.security
             .authorize_memory_service(context.caller)
             .map_err(|_| KernelError::SecurityViolation)?;
-        memory::malloc_aligned_for(
-            context.caller,
-            context.arg(0) as usize,
-            context.arg(1) as usize,
-        )
-        .map(|ptr| ptr.as_ptr() as u64)
-        .ok_or(KernelError::AllocationFailed)
+        let alignment = context.arg(1) as usize;
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        memory::malloc_aligned_for(context.caller, context.arg(0) as usize, alignment)
+            .map(|ptr| ptr.as_ptr() as u64)
+            .ok_or(KernelError::AllocationFailed)
     }
 
     pub fn tick(&mut self) {
