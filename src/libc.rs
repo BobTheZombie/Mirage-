@@ -7,7 +7,7 @@
 
 use core::ffi::c_void;
 
-use crate::kernel::device::{DeviceDescriptor, DeviceId};
+use crate::kernel::device::{DeviceId, MirageDeviceDescriptor};
 use crate::kernel::ipc::Message;
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{ProcessId, ProcessPriority};
@@ -135,7 +135,7 @@ pub fn enumerate_devices<const MAX_PROC: usize, const MSG_DEPTH: usize>(
     kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
     caller: ProcessId,
     thread: Option<ThreadId>,
-    out: &mut [DeviceDescriptor],
+    out: &mut [MirageDeviceDescriptor],
 ) -> KernelResult<usize> {
     let args = [out.as_mut_ptr() as u64, out.len() as u64, 0, 0, 0, 0];
     syscall(
@@ -146,6 +146,24 @@ pub fn enumerate_devices<const MAX_PROC: usize, const MSG_DEPTH: usize>(
         args,
     )
     .map(|count| count as usize)
+}
+
+pub fn device_info<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
+    caller: ProcessId,
+    thread: Option<ThreadId>,
+    id: DeviceId,
+    out: &mut MirageDeviceDescriptor,
+) -> KernelResult<()> {
+    let args = [
+        id.raw() as u64,
+        out as *mut MirageDeviceDescriptor as u64,
+        0,
+        0,
+        0,
+        0,
+    ];
+    syscall(kernel, caller, thread, SyscallNumber::DeviceInfo, args).map(|_| ())
 }
 
 pub fn device_read<const MAX_PROC: usize, const MSG_DEPTH: usize>(
@@ -225,6 +243,105 @@ pub fn free<const MAX_PROC: usize, const MSG_DEPTH: usize>(
 ) -> KernelResult<()> {
     let args = [ptr as u64, 0, 0, 0, 0, 0];
     syscall(kernel, caller, thread, SyscallNumber::Free, args).map(|_| ())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_device_enumerate(
+    kernel: *mut Kernel<{ crate::kernel::MAX_PROCESSES }, { crate::kernel::MESSAGE_DEPTH }>,
+    caller: u64,
+    out: *mut MirageDeviceDescriptor,
+    capacity: usize,
+) -> isize {
+    if kernel.is_null() || (capacity > 0 && out.is_null()) {
+        return -1;
+    }
+    let out_slice = if capacity == 0 {
+        &mut []
+    } else {
+        core::slice::from_raw_parts_mut(out, capacity)
+    };
+    match enumerate_devices(&mut *kernel, ProcessId::new(caller), None, out_slice) {
+        Ok(count) => count as isize,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_device_info(
+    kernel: *mut Kernel<{ crate::kernel::MAX_PROCESSES }, { crate::kernel::MESSAGE_DEPTH }>,
+    caller: u64,
+    id: u16,
+    out: *mut MirageDeviceDescriptor,
+) -> isize {
+    if kernel.is_null() || out.is_null() {
+        return -1;
+    }
+    match device_info(
+        &mut *kernel,
+        ProcessId::new(caller),
+        None,
+        DeviceId::new(id),
+        &mut *out,
+    ) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_device_read(
+    kernel: *mut Kernel<{ crate::kernel::MAX_PROCESSES }, { crate::kernel::MESSAGE_DEPTH }>,
+    caller: u64,
+    id: u16,
+    buffer: *mut u8,
+    len: usize,
+) -> isize {
+    if kernel.is_null() || (len > 0 && buffer.is_null()) {
+        return -1;
+    }
+    let buffer = if len == 0 {
+        &mut []
+    } else {
+        core::slice::from_raw_parts_mut(buffer, len)
+    };
+    match device_read(
+        &mut *kernel,
+        ProcessId::new(caller),
+        None,
+        DeviceId::new(id),
+        buffer,
+    ) {
+        Ok(read) => read as isize,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_device_write(
+    kernel: *mut Kernel<{ crate::kernel::MAX_PROCESSES }, { crate::kernel::MESSAGE_DEPTH }>,
+    caller: u64,
+    id: u16,
+    data: *const u8,
+    len: usize,
+) -> isize {
+    if kernel.is_null() || (len > 0 && data.is_null()) {
+        return -1;
+    }
+    let data = if len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(data, len)
+    };
+    match device_write(
+        &mut *kernel,
+        ProcessId::new(caller),
+        None,
+        DeviceId::new(id),
+        data,
+    ) {
+        Ok(written) => written as isize,
+        Err(_) => -1,
+    }
 }
 
 fn syscall<const MAX_PROC: usize, const MSG_DEPTH: usize>(

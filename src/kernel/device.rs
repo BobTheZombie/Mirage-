@@ -17,6 +17,90 @@ impl DeviceId {
     }
 }
 
+/// Maximum number of bytes copied into a C-compatible device name.
+pub const DEVICE_DESCRIPTOR_NAME_CAPACITY: usize = 32;
+
+pub const MIRAGE_DEVICE_KIND_SERIAL_CONSOLE: u32 = 1;
+pub const MIRAGE_DEVICE_KIND_SYSTEM_TIMER: u32 = 2;
+pub const MIRAGE_DEVICE_KIND_BLOCK_STORAGE: u32 = 3;
+
+pub const MIRAGE_SECURITY_CLASS_PUBLIC: u32 = 0;
+pub const MIRAGE_SECURITY_CLASS_INTERNAL: u32 = 1;
+pub const MIRAGE_SECURITY_CLASS_CONFIDENTIAL: u32 = 2;
+pub const MIRAGE_SECURITY_CLASS_SYSTEM: u32 = 3;
+
+pub const MIRAGE_DEVICE_FLAG_REQUIRES_KERNEL_MODE: u32 = 0b0001;
+
+/// Stable C ABI representation of a device descriptor.
+///
+/// This intentionally uses only fixed-width integer fields and an inline,
+/// NUL-padded UTF-8 name buffer so user-facing syscall and C wrapper ABIs do
+/// not depend on Rust enum layouts or Rust string references.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MirageDeviceDescriptor {
+    pub id: u16,
+    pub kind: u32,
+    pub security_class: u32,
+    pub flags: u32,
+    pub name_len: u16,
+    pub reserved: [u8; 6],
+    pub name: [u8; DEVICE_DESCRIPTOR_NAME_CAPACITY],
+}
+
+impl MirageDeviceDescriptor {
+    pub const fn empty() -> Self {
+        Self {
+            id: 0,
+            kind: 0,
+            security_class: MIRAGE_SECURITY_CLASS_PUBLIC,
+            flags: 0,
+            name_len: 0,
+            reserved: [0; 6],
+            name: [0; DEVICE_DESCRIPTOR_NAME_CAPACITY],
+        }
+    }
+
+    pub fn from_descriptor(descriptor: DeviceDescriptor) -> Self {
+        let mut out = Self::empty();
+        out.id = descriptor.id.raw();
+        out.kind = encode_device_kind(descriptor.kind);
+        out.security_class = encode_security_class(descriptor.class());
+        if descriptor.requires_kernel_mode() {
+            out.flags |= MIRAGE_DEVICE_FLAG_REQUIRES_KERNEL_MODE;
+        }
+
+        let bytes = descriptor.name.as_bytes();
+        let copy_len = min(bytes.len(), DEVICE_DESCRIPTOR_NAME_CAPACITY);
+        out.name[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        out.name_len = copy_len as u16;
+        out
+    }
+}
+
+impl Default for MirageDeviceDescriptor {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+fn encode_device_kind(kind: DeviceKind) -> u32 {
+    match kind {
+        DeviceKind::SerialConsole => MIRAGE_DEVICE_KIND_SERIAL_CONSOLE,
+        DeviceKind::SystemTimer => MIRAGE_DEVICE_KIND_SYSTEM_TIMER,
+        DeviceKind::BlockStorage => MIRAGE_DEVICE_KIND_BLOCK_STORAGE,
+    }
+}
+
+fn encode_security_class(class: SecurityClass) -> u32 {
+    match class {
+        SecurityClass::Public => MIRAGE_SECURITY_CLASS_PUBLIC,
+        SecurityClass::Internal => MIRAGE_SECURITY_CLASS_INTERNAL,
+        SecurityClass::Confidential => MIRAGE_SECURITY_CLASS_CONFIDENTIAL,
+        SecurityClass::System => MIRAGE_SECURITY_CLASS_SYSTEM,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceKind {
     SerialConsole,
