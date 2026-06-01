@@ -119,6 +119,10 @@ impl CapabilitySet {
     pub fn allows_io(&self) -> bool {
         (self.flags & CAP_IO) != 0
     }
+
+    pub fn contains(&self, requested: CapabilitySet) -> bool {
+        (self.flags & requested.flags) == requested.flags
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -196,6 +200,15 @@ impl TaskDomain {
 
     pub fn can_receive(&self, class: SecurityClass) -> bool {
         self.label.dominates(&class.as_label())
+    }
+
+    fn has_system_privilege(&self) -> bool {
+        self.label.level() == SecurityLevel::System || self.capabilities.allows_kernel_access()
+    }
+
+    fn can_delegate(&self, requested: Credentials) -> bool {
+        self.label.dominates(&requested.label())
+            && self.capabilities.contains(requested.capabilities())
     }
 }
 
@@ -334,13 +347,22 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         }
     }
 
-    pub fn authorize_spawn(&self, pid: ProcessId) -> Result<(), IsolationError> {
-        let domain = self.domain(pid)?;
-        if domain.capabilities.allows_spawn() {
-            Ok(())
-        } else {
-            Err(IsolationError::CapabilityMissing)
+    pub fn authorize_spawn(
+        &self,
+        parent: ProcessId,
+        requested: Credentials,
+    ) -> Result<(), IsolationError> {
+        let parent_domain = self.domain(parent)?;
+
+        if !parent_domain.capabilities.allows_spawn() {
+            return Err(IsolationError::CapabilityMissing);
         }
+
+        if !parent_domain.has_system_privilege() && !parent_domain.can_delegate(requested) {
+            return Err(IsolationError::PolicyViolation);
+        }
+
+        Ok(())
     }
 
     pub fn authorize_device_enumeration(&self, pid: ProcessId) -> Result<(), IsolationError> {
@@ -388,5 +410,85 @@ impl<const MAX: usize> SecurityKernel<MAX> {
             idx += 1;
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pid(raw: u64) -> ProcessId {
+        ProcessId::new(raw)
+    }
+
+    #[test]
+    fn authorize_spawn_requires_spawn_capability() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        security.register_task(pid(1), Credentials::user()).unwrap();
+
+        assert_eq!(
+            security.authorize_spawn(pid(1), Credentials::user()),
+            Err(IsolationError::CapabilityMissing)
+        );
+    }
+
+    #[test]
+    fn authorize_spawn_allows_delegated_subset() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        let parent_creds = Credentials::new(
+            SecurityLabel::internal(),
+            CapabilitySet::new(CAP_IPC | CAP_SPAWN),
+            IsolationLevel::Process,
+        );
+        security.register_task(pid(1), parent_creds).unwrap();
+
+        assert_eq!(
+            security.authorize_spawn(pid(1), Credentials::user()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn authorize_spawn_rejects_label_or_capability_escalation() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        let parent_creds = Credentials::new(
+            SecurityLabel::internal(),
+            CapabilitySet::new(CAP_IPC | CAP_SPAWN),
+            IsolationLevel::Process,
+        );
+        security.register_task(pid(1), parent_creds).unwrap();
+
+        let confidential_child = Credentials::new(
+            SecurityLabel::confidential(),
+            CapabilitySet::ipc(),
+            IsolationLevel::Process,
+        );
+        assert_eq!(
+            security.authorize_spawn(pid(1), confidential_child),
+            Err(IsolationError::PolicyViolation)
+        );
+
+        let io_child = Credentials::new(
+            SecurityLabel::internal(),
+            CapabilitySet::new(CAP_IPC | CAP_IO),
+            IsolationLevel::Process,
+        );
+        assert_eq!(
+            security.authorize_spawn(pid(1), io_child),
+            Err(IsolationError::PolicyViolation)
+        );
+    }
+
+    #[test]
+    fn authorize_spawn_allows_privileged_parent_to_delegate_elevated_credentials() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        security
+            .register_task(pid(1), Credentials::system())
+            .unwrap();
+
+        assert_eq!(
+            security.authorize_spawn(pid(1), Credentials::system()),
+            Ok(())
+        );
     }
 }

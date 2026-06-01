@@ -143,7 +143,22 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.spawn_process(0, ProcessPriority::Critical, None, creds)
     }
 
-    pub fn spawn_process(
+    pub fn spawn_child_process(
+        &mut self,
+        parent_pid: ProcessId,
+        entry_point: u64,
+        priority: ProcessPriority,
+        requested_creds: Credentials,
+    ) -> KernelResult<ProcessId> {
+        self.ensure_process_exists(parent_pid)?;
+        self.security
+            .authorize_spawn(parent_pid, requested_creds)
+            .map_err(|_| KernelError::SecurityViolation)?;
+
+        self.spawn_process(entry_point, priority, Some(parent_pid), requested_creds)
+    }
+
+    fn spawn_process(
         &mut self,
         entry_point: u64,
         priority: ProcessPriority,
@@ -300,14 +315,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_spawn(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        self.security
-            .authorize_spawn(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
-
         let entry_point = context.arg(0);
         let priority = decode_priority(context.arg(1))?;
         let credentials = decode_credentials(context.arg(2))?;
-        self.spawn_process(entry_point, priority, Some(context.caller), credentials)
+        self.spawn_child_process(context.caller, entry_point, priority, credentials)
             .map(|pid| pid.raw())
     }
 
