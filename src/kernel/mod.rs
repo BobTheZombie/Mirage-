@@ -15,7 +15,8 @@ pub mod time;
 use crate::arch::x86_64::{self, clock, ThreadRunOutcome};
 use crate::kernel::cpu::CpuCoreState;
 use crate::kernel::device::{
-    DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceManager,
+    DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceKind, DeviceManager,
+    MirageDeviceDescriptor,
 };
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
@@ -24,7 +25,8 @@ use crate::kernel::scheduler::{ScheduledThread, Scheduler};
 use crate::kernel::syscall::{SyscallContext, SyscallNumber};
 use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS};
 use crate::kernel::time::KERNEL_TIME;
-use crate::subkernel::{Credentials, SecurityClass, SecurityKernel};
+use crate::subkernel::{Credentials, DeviceSecurity, SecurityClass, SecurityKernel};
+use core::cmp::min;
 use core::ptr::NonNull;
 
 pub const MAX_PROCESSES: usize = 64;
@@ -51,6 +53,13 @@ pub enum KernelError {
 }
 
 pub type KernelResult<T> = core::result::Result<T, KernelError>;
+
+const EMPTY_DEVICE_DESCRIPTOR: DeviceDescriptor = DeviceDescriptor::new(
+    DeviceId::new(0),
+    DeviceKind::SerialConsole,
+    "",
+    DeviceSecurity::new(SecurityClass::Public, false),
+);
 
 pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     process_table: [Option<ProcessControlBlock>; MAX_PROC],
@@ -344,6 +353,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 Ok(0)
             }
             SyscallNumber::EnumerateDevices => self.syscall_enumerate_devices(context),
+            SyscallNumber::DeviceInfo => self.syscall_device_info(context),
             SyscallNumber::DeviceRead => self.syscall_device_read(context),
             SyscallNumber::DeviceWrite => self.syscall_device_write(context),
             SyscallNumber::Mmap => self.syscall_mmap(context),
@@ -416,7 +426,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.security
             .authorize_device_enumeration(context.caller)
             .map_err(|_| KernelError::SecurityViolation)?;
-        let out = context.arg(0) as *mut DeviceDescriptor;
+        let out = context.arg(0) as *mut MirageDeviceDescriptor;
         let capacity = context.arg(1) as usize;
         if capacity > 0 && out.is_null() {
             return Err(KernelError::InvalidPointer);
@@ -426,7 +436,29 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         } else {
             unsafe { core::slice::from_raw_parts_mut(out, capacity) }
         };
-        Ok(self.enumerate_devices(out_slice) as u64)
+
+        let mut descriptors = [EMPTY_DEVICE_DESCRIPTOR; MAX_DEVICES];
+        let count = self.enumerate_devices(&mut descriptors[..min(capacity, MAX_DEVICES)]);
+        let mut idx = 0usize;
+        while idx < count {
+            out_slice[idx] = MirageDeviceDescriptor::from_descriptor(descriptors[idx]);
+            idx += 1;
+        }
+        Ok(count as u64)
+    }
+
+    fn syscall_device_info(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_device_enumeration(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        let id = DeviceId::new(context.arg(0) as u16);
+        let out = context.arg(1) as *mut MirageDeviceDescriptor;
+        if out.is_null() {
+            return Err(KernelError::InvalidPointer);
+        }
+        let descriptor = self.device_info(id).ok_or(KernelError::DeviceNotFound)?;
+        unsafe { out.write(MirageDeviceDescriptor::from_descriptor(descriptor)) };
+        Ok(1)
     }
 
     fn syscall_device_read(&self, context: SyscallContext) -> KernelResult<u64> {

@@ -27,6 +27,7 @@ pub enum SyscallNumber {
     ReceiveOrBlockIpc = 12,
     Realloc = 13,
     MallocAligned = 14,
+    DeviceInfo = 15,
 }
 
 impl SyscallNumber {
@@ -51,10 +52,21 @@ impl SyscallNumber {
             12 => Some(Self::ReceiveOrBlockIpc),
             13 => Some(Self::Realloc),
             14 => Some(Self::MallocAligned),
+            15 => Some(Self::DeviceInfo),
             _ => None,
         }
     }
 }
+
+pub const MIRAGE_SYSCALL_GETPID: u64 = SyscallNumber::GetPid.raw();
+pub const MIRAGE_SYSCALL_SPAWN: u64 = SyscallNumber::Spawn.raw();
+pub const MIRAGE_SYSCALL_SEND_IPC: u64 = SyscallNumber::SendIpc.raw();
+pub const MIRAGE_SYSCALL_RECEIVE_IPC: u64 = SyscallNumber::ReceiveIpc.raw();
+pub const MIRAGE_SYSCALL_BLOCK_FOR_IPC: u64 = SyscallNumber::BlockForIpc.raw();
+pub const MIRAGE_SYSCALL_ENUMERATE_DEVICES: u64 = SyscallNumber::EnumerateDevices.raw();
+pub const MIRAGE_SYSCALL_DEVICE_READ: u64 = SyscallNumber::DeviceRead.raw();
+pub const MIRAGE_SYSCALL_DEVICE_WRITE: u64 = SyscallNumber::DeviceWrite.raw();
+pub const MIRAGE_SYSCALL_DEVICE_INFO: u64 = SyscallNumber::DeviceInfo.raw();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SyscallContext {
