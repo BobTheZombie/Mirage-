@@ -1,8 +1,9 @@
 //! User-facing syscall wrappers.
 //!
 //! These helpers keep libc-style services on the public syscall ABI instead of
-//! reaching into kernel internals directly. A real architecture port would swap
-//! the direct `Kernel::handle_syscall` call for the CPU trap instruction.
+//! reaching into kernel internals directly. Synchronous wrappers still call the
+//! kernel entry point directly, while [`queue_syscall_trap`] models the register
+//! handoff a running thread would perform with the CPU syscall instruction.
 
 use core::ffi::c_void;
 
@@ -19,6 +20,15 @@ use crate::subkernel::SecurityClass;
 pub enum SpawnCredentialProfile {
     User = 0,
     System = 1,
+}
+
+pub fn queue_syscall_trap<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
+    thread: ThreadId,
+    number: SyscallNumber,
+    args: [u64; SYSCALL_MAX_ARGS],
+) -> KernelResult<()> {
+    kernel.queue_thread_syscall(thread, number.raw(), args)
 }
 
 pub fn getpid<const MAX_PROC: usize, const MSG_DEPTH: usize>(

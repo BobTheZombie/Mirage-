@@ -12,7 +12,7 @@ pub mod syscall;
 pub mod thread;
 pub mod time;
 
-use crate::arch::x86_64::clock;
+use crate::arch::x86_64::{self, clock, ThreadRunOutcome};
 use crate::kernel::cpu::CpuCoreState;
 use crate::kernel::device::{
     DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceManager,
@@ -22,7 +22,7 @@ use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{ProcessControlBlock, ProcessId, ProcessPriority, ProcessState};
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
 use crate::kernel::syscall::{SyscallContext, SyscallNumber};
-use crate::kernel::thread::{ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS};
+use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS};
 use crate::kernel::time::KERNEL_TIME;
 use crate::subkernel::{Credentials, SecurityClass, SecurityKernel};
 use core::ptr::NonNull;
@@ -291,6 +291,28 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         }
     }
 
+    pub fn queue_thread_syscall(
+        &mut self,
+        thread: ThreadId,
+        number: u64,
+        args: [u64; syscall::SYSCALL_MAX_ARGS],
+    ) -> KernelResult<()> {
+        let index = self.locate_thread(thread)?;
+        if let Some(tcb) = self.thread_table[index].as_mut() {
+            tcb.prepare_syscall(number, args);
+            Ok(())
+        } else {
+            Err(KernelError::UnknownThread)
+        }
+    }
+
+    pub fn thread_context(&self, thread: ThreadId) -> KernelResult<CpuContext> {
+        let index = self.locate_thread(thread)?;
+        self.thread_table[index]
+            .map(|tcb| tcb.context)
+            .ok_or(KernelError::UnknownThread)
+    }
+
     pub fn handle_syscall(&mut self, number: u64, context: SyscallContext) -> KernelResult<u64> {
         match SyscallNumber::from_raw(number).ok_or(KernelError::InvalidSyscall)? {
             SyscallNumber::GetPid => Ok(context.caller.raw()),
@@ -487,6 +509,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.core_states[core_index].start_thread(scheduled.thread);
 
             let mut terminated = false;
+            let mut run_outcome = ThreadRunOutcome::TimeSliceComplete;
             if let Some(entry) = self.thread_table.get_mut(thread_index) {
                 if let Some(thread) = entry.as_mut() {
                     if thread.state == ThreadState::Terminated {
@@ -494,6 +517,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                         terminated = true;
                     } else {
                         thread.mark_running();
+                        run_outcome = x86_64::run_thread_slice(thread);
                         thread.accumulate_cpu_time(1);
                     }
                 }
@@ -510,23 +534,39 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 pcb.cpu_time = pcb.cpu_time.saturating_add(1);
             }
 
+            if let ThreadRunOutcome::Syscall(trap) = run_outcome {
+                let context = SyscallContext::new(scheduled.process, Some(trap.thread), trap.args);
+                let result = self
+                    .handle_syscall(trap.number, context)
+                    .unwrap_or_else(encode_syscall_error);
+                self.write_thread_syscall_result(trap.thread, result);
+            }
+
+            let mut requeue_thread = false;
             if let Some(entry) = self.thread_table.get_mut(thread_index) {
                 if let Some(thread) = entry.as_mut() {
-                    thread.mark_ready();
+                    if thread.state == ThreadState::Running {
+                        thread.mark_ready();
+                    }
+                    requeue_thread = thread.state == ThreadState::Ready;
                 }
             }
 
             if let Some(pcb) = self.process_table[process_index].as_mut() {
-                pcb.state = ProcessState::Ready;
+                if pcb.state == ProcessState::Running {
+                    pcb.state = ProcessState::Ready;
+                }
             }
 
             self.core_states[core_index].finish_cycle();
 
-            if scheduled.consume_time_slice() {
-                scheduled.reset_time_slice();
-            }
+            if requeue_thread {
+                if scheduled.consume_time_slice() {
+                    scheduled.reset_time_slice();
+                }
 
-            let _ = self.scheduler.requeue(scheduled);
+                let _ = self.scheduler.requeue(scheduled);
+            }
         } else {
             self.core_states[core_index].idle_cycle();
         }
@@ -597,7 +637,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .find_free_thread_slot()
             .ok_or(KernelError::ThreadTableFull)?;
         let id = self.allocate_thread_id();
-        let tcb = ThreadControlBlock::new(id, pid, entry_point, priority);
+        let stack_pointer = self.allocate_stack_pointer(slot, id);
+        let tcb = ThreadControlBlock::new(id, pid, entry_point, priority, stack_pointer);
         self.thread_table[slot] = Some(tcb);
         self.update_process_thread_count(pid, true);
         Ok(id)
@@ -610,6 +651,21 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 self.update_process_thread_count(tcb.process, false);
             }
         }
+    }
+
+    fn write_thread_syscall_result(&mut self, thread: ThreadId, result: u64) {
+        if let Ok(index) = self.locate_thread(thread) {
+            if let Some(tcb) = self.thread_table[index].as_mut() {
+                tcb.write_syscall_result(result);
+            }
+        }
+    }
+
+    fn allocate_stack_pointer(&self, slot: usize, thread: ThreadId) -> u64 {
+        const USER_STACK_BASE: u64 = 0x0000_7000_0000_0000;
+        const USER_STACK_SIZE: u64 = 0x20_000;
+        let stack_slot = (slot as u64).saturating_add(thread.raw());
+        USER_STACK_BASE.saturating_add(stack_slot.saturating_mul(USER_STACK_SIZE))
     }
 
     fn update_process_thread_count(&mut self, pid: ProcessId, increment: bool) {
@@ -740,6 +796,28 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .write(id, data)
             .map_err(KernelError::DeviceFault)
     }
+}
+
+fn encode_syscall_error(error: KernelError) -> u64 {
+    const ERROR_BIT: u64 = 1 << 63;
+    let code = match error {
+        KernelError::ProcessTableFull => 1,
+        KernelError::SchedulerFull => 2,
+        KernelError::UnknownProcess => 3,
+        KernelError::UnknownThread => 4,
+        KernelError::ThreadTableFull => 5,
+        KernelError::MessageQueueFull => 6,
+        KernelError::MessageQueueEmpty => 7,
+        KernelError::SecurityViolation => 8,
+        KernelError::IsolationFault => 9,
+        KernelError::DeviceNotFound => 10,
+        KernelError::DeviceFault(_) => 11,
+        KernelError::InvalidSyscall => 12,
+        KernelError::InvalidArgument => 13,
+        KernelError::InvalidPointer => 14,
+        KernelError::AllocationFailed => 15,
+    };
+    ERROR_BIT | code
 }
 
 fn decode_priority(raw: u64) -> KernelResult<ProcessPriority> {
