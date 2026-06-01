@@ -90,8 +90,30 @@ pub fn receive_ipc<const MAX_PROC: usize, const MSG_DEPTH: usize>(
     thread: Option<ThreadId>,
     out: &mut Message,
 ) -> KernelResult<usize> {
+    receive_ipc_or_block(kernel, caller, thread, out).map(|read| read.unwrap_or(0))
+}
+
+pub fn receive_ipc_or_block<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
+    caller: ProcessId,
+    thread: Option<ThreadId>,
+    out: &mut Message,
+) -> KernelResult<Option<usize>> {
     let args = [out as *mut Message as u64, 0, 0, 0, 0, 0];
-    syscall(kernel, caller, thread, SyscallNumber::ReceiveIpc, args).map(|read| read as usize)
+    syscall(
+        kernel,
+        caller,
+        thread,
+        SyscallNumber::ReceiveOrBlockIpc,
+        args,
+    )
+    .map(|received| {
+        if received == 0 {
+            None
+        } else {
+            Some(out.payload.length)
+        }
+    })
 }
 
 pub fn block_for_ipc<const MAX_PROC: usize, const MSG_DEPTH: usize>(

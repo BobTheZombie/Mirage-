@@ -290,13 +290,19 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .ok_or(KernelError::MessageQueueEmpty)
     }
 
+    pub fn receive_or_block(&mut self, pid: ProcessId) -> KernelResult<Option<Message>> {
+        let queue_index = self.locate_process(pid)?;
+        if let Some(message) = self.ipc_queues[queue_index].pop() {
+            return Ok(Some(message));
+        }
+
+        self.block_process_at_index(pid, queue_index);
+        Ok(None)
+    }
+
     pub fn block_for_message(&mut self, pid: ProcessId) {
         if let Ok(index) = self.locate_process(pid) {
-            if let Some(pcb) = self.process_table[index].as_mut() {
-                pcb.state = ProcessState::Blocked;
-            }
-            self.scheduler.remove_process(pid);
-            self.block_threads_for_process(pid);
+            self.block_process_at_index(pid, index);
         }
     }
 
@@ -328,6 +334,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             SyscallNumber::Spawn => self.syscall_spawn(context),
             SyscallNumber::SendIpc => self.syscall_send_ipc(context),
             SyscallNumber::ReceiveIpc => self.syscall_receive_ipc(context),
+            SyscallNumber::ReceiveOrBlockIpc => self.syscall_receive_or_block_ipc(context),
             SyscallNumber::BlockForIpc => {
                 self.security
                     .authorize_ipc_receive(context.caller)
@@ -383,6 +390,23 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let message = self.receive_message(context.caller)?;
         unsafe { out.write(message) };
         Ok(message.payload.length as u64)
+    }
+
+    fn syscall_receive_or_block_ipc(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_ipc_receive(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        let out = context.arg(0) as *mut Message;
+        if out.is_null() {
+            return Err(KernelError::InvalidPointer);
+        }
+
+        if let Some(message) = self.receive_or_block(context.caller)? {
+            unsafe { out.write(message) };
+            Ok(1)
+        } else {
+            Ok(0)
+        }
     }
 
     fn syscall_enumerate_devices(&self, context: SyscallContext) -> KernelResult<u64> {
@@ -579,6 +603,14 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         } else {
             self.core_states[core_index].idle_cycle();
         }
+    }
+
+    fn block_process_at_index(&mut self, pid: ProcessId, index: usize) {
+        if let Some(pcb) = self.process_table[index].as_mut() {
+            pcb.state = ProcessState::Blocked;
+        }
+        self.scheduler.remove_process(pid);
+        self.block_threads_for_process(pid);
     }
 
     fn block_threads_for_process(&mut self, pid: ProcessId) {
@@ -878,5 +910,99 @@ fn decode_security_class(raw: u64) -> KernelResult<SecurityClass> {
         2 => Ok(SecurityClass::Confidential),
         3 => Ok(SecurityClass::System),
         _ => Err(KernelError::InvalidArgument),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::libc;
+
+    fn boot_kernel() -> Kernel<4, 4> {
+        let mut kernel = Kernel::<4, 4>::new();
+        kernel.bootstrap();
+        kernel
+    }
+
+    fn process_state(kernel: &Kernel<4, 4>, pid: ProcessId) -> ProcessState {
+        let index = kernel.locate_process(pid).unwrap();
+        kernel.process_table[index].unwrap().state
+    }
+
+    fn first_thread(kernel: &Kernel<4, 4>, pid: ProcessId) -> ThreadId {
+        let mut idx = 0usize;
+        while idx < Kernel::<4, 4>::THREAD_CAPACITY {
+            if let Some(thread) = kernel.thread_table[idx] {
+                if thread.process == pid {
+                    return thread.id;
+                }
+            }
+            idx += 1;
+        }
+        panic!("process has no thread")
+    }
+
+    fn process_threads_blocked(kernel: &Kernel<4, 4>, pid: ProcessId) -> bool {
+        let mut saw_thread = false;
+        let mut idx = 0usize;
+        while idx < Kernel::<4, 4>::THREAD_CAPACITY {
+            if let Some(thread) = kernel.thread_table[idx] {
+                if thread.process == pid {
+                    saw_thread = true;
+                    if thread.state != ThreadState::Blocked {
+                        return false;
+                    }
+                }
+            }
+            idx += 1;
+        }
+        saw_thread
+    }
+
+    #[test]
+    fn receive_or_block_returns_queued_message_without_blocking() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let payload = MessagePayload::from_slice(SecurityClass::Public, b"ping");
+
+        kernel.send_message(pid, pid, payload).unwrap();
+
+        let message = kernel.receive_or_block(pid).unwrap().unwrap();
+        assert_eq!(message.sender, pid);
+        assert_eq!(message.receiver, pid);
+        assert_eq!(&message.payload.data[..message.payload.length], b"ping");
+        assert_eq!(process_state(&kernel, pid), ProcessState::Ready);
+    }
+
+    #[test]
+    fn receive_or_block_atomically_blocks_empty_receiver() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+
+        let message = kernel.receive_or_block(pid).unwrap();
+
+        assert!(message.is_none());
+        assert_eq!(process_state(&kernel, pid), ProcessState::Blocked);
+        assert!(process_threads_blocked(&kernel, pid));
+    }
+
+    #[test]
+    fn libc_receive_uses_blocking_receive_syscall() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let thread = first_thread(&kernel, pid);
+        let mut out = Message::new(
+            ProcessId::new(0),
+            ProcessId::new(0),
+            0,
+            MessagePayload::empty(SecurityClass::Public),
+        );
+
+        let received =
+            libc::receive_ipc_or_block(&mut kernel, pid, Some(thread), &mut out).unwrap();
+
+        assert_eq!(received, None);
+        assert_eq!(process_state(&kernel, pid), ProcessState::Blocked);
+        assert!(process_threads_blocked(&kernel, pid));
     }
 }
