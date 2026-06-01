@@ -325,6 +325,37 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         Ok(())
     }
 
+    pub fn authorize_ipc_receive(&self, pid: ProcessId) -> Result<(), IsolationError> {
+        let domain = self.domain(pid)?;
+        if domain.capabilities.allows_ipc() {
+            Ok(())
+        } else {
+            Err(IsolationError::CapabilityMissing)
+        }
+    }
+
+    pub fn authorize_spawn(&self, pid: ProcessId) -> Result<(), IsolationError> {
+        let domain = self.domain(pid)?;
+        if domain.capabilities.allows_spawn() {
+            Ok(())
+        } else {
+            Err(IsolationError::CapabilityMissing)
+        }
+    }
+
+    pub fn authorize_device_enumeration(&self, pid: ProcessId) -> Result<(), IsolationError> {
+        let domain = self.domain(pid)?;
+        if domain.capabilities.allows_io() {
+            Ok(())
+        } else {
+            Err(IsolationError::CapabilityMissing)
+        }
+    }
+
+    pub fn authorize_memory_service(&self, pid: ProcessId) -> Result<(), IsolationError> {
+        self.enforce_isolation(pid)
+    }
+
     pub fn enforce_isolation(&self, pid: ProcessId) -> Result<(), IsolationError> {
         let domain = self.domain(pid)?;
         match domain.isolation {

@@ -15,6 +15,7 @@
 
 pub mod arch;
 pub mod kernel;
+pub mod libc;
 pub mod librust;
 pub mod subkernel;
 
