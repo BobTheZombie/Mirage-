@@ -228,6 +228,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.ipc_queues[index].clear();
             self.scheduler.remove_process(pid);
             self.remove_threads_for_process(pid);
+            memory::release_process(pid);
             self.security.revoke_task(pid);
         }
     }
@@ -349,6 +350,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             SyscallNumber::Munmap => self.syscall_munmap(context),
             SyscallNumber::Malloc => self.syscall_malloc(context),
             SyscallNumber::Free => self.syscall_free(context),
+            SyscallNumber::Realloc => self.syscall_realloc(context),
+            SyscallNumber::MallocAligned => self.syscall_malloc_aligned(context),
         }
     }
 
@@ -459,12 +462,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_mmap(&self, context: SyscallContext) -> KernelResult<u64> {
-        self.security
-            .authorize_memory_service(context.caller)
-            .map_err(|_| KernelError::SecurityViolation)?;
         let length = context.arg(0) as usize;
         let protection = MemoryProtection::from_bits(context.arg(1) as u32);
-        memory::mmap(length, protection)
+        self.security
+            .authorize_memory_mapping(context.caller, protection)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        memory::mmap_for(context.caller, length, protection)
             .map(|region| region.as_ptr() as u64)
             .ok_or(KernelError::AllocationFailed)
     }
@@ -475,7 +478,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .map_err(|_| KernelError::SecurityViolation)?;
         let ptr = NonNull::new(context.arg(0) as *mut u8).ok_or(KernelError::InvalidPointer)?;
         let length = context.arg(1) as usize;
-        if memory::munmap_ptr(ptr, length) {
+        if memory::munmap_ptr_for(context.caller, ptr, length) {
             Ok(0)
         } else {
             Err(KernelError::InvalidArgument)
@@ -486,7 +489,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.security
             .authorize_memory_service(context.caller)
             .map_err(|_| KernelError::SecurityViolation)?;
-        memory::malloc(context.arg(0) as usize)
+        memory::malloc_for(context.caller, context.arg(0) as usize)
             .map(|ptr| ptr.as_ptr() as u64)
             .ok_or(KernelError::AllocationFailed)
     }
@@ -496,11 +499,34 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .authorize_memory_service(context.caller)
             .map_err(|_| KernelError::SecurityViolation)?;
         let ptr = NonNull::new(context.arg(0) as *mut u8).ok_or(KernelError::InvalidPointer)?;
-        if memory::free(ptr) {
+        if memory::free_for(context.caller, ptr) {
             Ok(0)
         } else {
             Err(KernelError::InvalidArgument)
         }
+    }
+
+    fn syscall_realloc(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_memory_service(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        let ptr = NonNull::new(context.arg(0) as *mut u8);
+        memory::realloc_for(context.caller, ptr, context.arg(1) as usize)
+            .map(|ptr| ptr.as_ptr() as u64)
+            .ok_or(KernelError::AllocationFailed)
+    }
+
+    fn syscall_malloc_aligned(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_memory_service(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        memory::malloc_aligned_for(
+            context.caller,
+            context.arg(0) as usize,
+            context.arg(1) as usize,
+        )
+        .map(|ptr| ptr.as_ptr() as u64)
+        .ok_or(KernelError::AllocationFailed)
     }
 
     pub fn tick(&mut self) {
@@ -916,6 +942,7 @@ fn decode_security_class(raw: u64) -> KernelResult<SecurityClass> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::memory::{PROT_EXECUTE, PROT_READ, PROT_WRITE};
     use crate::libc;
 
     fn boot_kernel() -> Kernel<4, 4> {
@@ -1004,5 +1031,48 @@ mod tests {
         assert_eq!(received, None);
         assert_eq!(process_state(&kernel, pid), ProcessState::Blocked);
         assert!(process_threads_blocked(&kernel, pid));
+    }
+
+    #[test]
+    fn memory_syscalls_are_process_owned() {
+        let mut kernel = boot_kernel();
+        let owner = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let other = kernel
+            .spawn_child_process(owner, 0, ProcessPriority::Normal, Credentials::user())
+            .unwrap();
+        let ptr = libc::malloc(&mut kernel, owner, None, 64).unwrap();
+
+        assert!(matches!(
+            libc::free(&mut kernel, other, None, ptr),
+            Err(KernelError::InvalidArgument)
+        ));
+        assert!(libc::free(&mut kernel, owner, None, ptr).is_ok());
+    }
+
+    #[test]
+    fn mmap_rejects_writable_executable_mapping() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let protection = MemoryProtection::from_bits(PROT_READ | PROT_WRITE | PROT_EXECUTE);
+
+        assert!(matches!(
+            libc::mmap(&mut kernel, pid, None, 4096, protection),
+            Err(KernelError::SecurityViolation)
+        ));
+    }
+
+    #[test]
+    fn mmap_rejects_executable_mapping_for_unprivileged_process() {
+        let mut kernel = boot_kernel();
+        let init = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let user = kernel
+            .spawn_child_process(init, 0, ProcessPriority::Normal, Credentials::user())
+            .unwrap();
+        let protection = MemoryProtection::from_bits(PROT_READ | PROT_EXECUTE);
+
+        assert!(matches!(
+            libc::mmap(&mut kernel, user, None, 4096, protection),
+            Err(KernelError::SecurityViolation)
+        ));
     }
 }

@@ -8,11 +8,13 @@ use core::{
     ptr::{self, NonNull},
 };
 
+use crate::kernel::process::ProcessId;
 use crate::kernel::sync::SpinLock;
 
 pub const PAGE_SIZE: usize = 4096;
 pub const DEFAULT_HEAP_BYTES: usize = 128 * 1024;
 pub const MAX_ALLOCATION_RECORDS: usize = 512;
+pub const KERNEL_PROCESS_ID: ProcessId = ProcessId::new(0);
 
 pub const PROT_READ: u32 = 0x1;
 pub const PROT_WRITE: u32 = 0x2;
@@ -69,6 +71,7 @@ impl MemoryProtection {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AllocationRecord {
+    owner: ProcessId,
     offset: usize,
     size: usize,
     kind: AllocationKind,
@@ -77,12 +80,14 @@ struct AllocationRecord {
 
 impl AllocationRecord {
     const fn new(
+        owner: ProcessId,
         offset: usize,
         size: usize,
         kind: AllocationKind,
         protection: MemoryProtection,
     ) -> Self {
         Self {
+            owner,
             offset,
             size,
             kind,
@@ -135,6 +140,10 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
     }
 
     pub fn malloc(&mut self, size: usize) -> Option<NonNull<u8>> {
+        self.malloc_for(KERNEL_PROCESS_ID, size)
+    }
+
+    pub fn malloc_for(&mut self, owner: ProcessId, size: usize) -> Option<NonNull<u8>> {
         if size == 0 {
             return None;
         }
@@ -143,6 +152,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         let actual_size = self.align_up(size, align);
         let offset = self.reserve(actual_size, align)?;
         let record = AllocationRecord::new(
+            owner,
             offset,
             actual_size,
             AllocationKind::Heap,
@@ -154,6 +164,15 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
     }
 
     pub fn malloc_aligned(&mut self, size: usize, align: usize) -> Option<NonNull<u8>> {
+        self.malloc_aligned_for(KERNEL_PROCESS_ID, size, align)
+    }
+
+    pub fn malloc_aligned_for(
+        &mut self,
+        owner: ProcessId,
+        size: usize,
+        align: usize,
+    ) -> Option<NonNull<u8>> {
         if size == 0 || align == 0 {
             return None;
         }
@@ -166,6 +185,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
 
         let offset = self.reserve(actual_size, actual_align)?;
         let record = AllocationRecord::new(
+            owner,
             offset,
             actual_size,
             AllocationKind::Heap,
@@ -177,11 +197,20 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
     }
 
     pub fn realloc(&mut self, ptr: Option<NonNull<u8>>, new_size: usize) -> Option<NonNull<u8>> {
+        self.realloc_for(KERNEL_PROCESS_ID, ptr, new_size)
+    }
+
+    pub fn realloc_for(
+        &mut self,
+        owner: ProcessId,
+        ptr: Option<NonNull<u8>>,
+        new_size: usize,
+    ) -> Option<NonNull<u8>> {
         match (ptr, new_size) {
             (None, 0) => None,
-            (None, size) => self.malloc(size),
+            (None, size) => self.malloc_for(owner, size),
             (Some(p), 0) => {
-                self.free(p);
+                self.free_for(owner, p);
                 None
             }
             (Some(p), size) => {
@@ -191,7 +220,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
                     return None;
                 }
                 let offset = addr - base;
-                let idx = self.find_allocation_index(offset)?;
+                let idx = self.find_allocation_index(owner, offset)?;
                 let mut record = match self.allocations[idx] {
                     Some(r) => r,
                     None => return None,
@@ -219,21 +248,34 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
                 }
 
                 let copy_len = cmp::min(record.size, size);
-                let new_ptr = self.malloc(size)?;
+                let new_ptr = self.malloc_for(owner, size)?;
                 unsafe {
                     ptr::copy_nonoverlapping(p.as_ptr(), new_ptr.as_ptr(), copy_len);
                 }
-                self.free(p);
+                self.free_for(owner, p);
                 Some(new_ptr)
             }
         }
     }
 
     pub fn free(&mut self, ptr: NonNull<u8>) -> bool {
-        self.release(ptr, Some(AllocationKind::Heap), None)
+        self.free_for(KERNEL_PROCESS_ID, ptr)
+    }
+
+    pub fn free_for(&mut self, owner: ProcessId, ptr: NonNull<u8>) -> bool {
+        self.release(owner, ptr, Some(AllocationKind::Heap), None)
     }
 
     pub fn mmap(&mut self, length: usize, protection: MemoryProtection) -> Option<MappedRegion> {
+        self.mmap_for(KERNEL_PROCESS_ID, length, protection)
+    }
+
+    pub fn mmap_for(
+        &mut self,
+        owner: ProcessId,
+        length: usize,
+        protection: MemoryProtection,
+    ) -> Option<MappedRegion> {
         if length == 0 {
             return None;
         }
@@ -241,12 +283,18 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         let align = PAGE_SIZE;
         let actual_size = self.align_up(length, PAGE_SIZE);
         let offset = self.reserve(actual_size, align)?;
-        let record =
-            AllocationRecord::new(offset, actual_size, AllocationKind::Mapping, protection);
+        let record = AllocationRecord::new(
+            owner,
+            offset,
+            actual_size,
+            AllocationKind::Mapping,
+            protection,
+        );
         self.record_allocation(record)?;
         self.update_stats_on_alloc(actual_size);
         let ptr = unsafe { NonNull::new_unchecked(self.heap.as_mut_ptr().add(offset)) };
         Some(MappedRegion {
+            owner,
             ptr,
             length: actual_size,
             requested: length,
@@ -257,6 +305,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
 
     pub fn munmap(&mut self, region: MappedRegion) -> bool {
         self.release(
+            region.owner,
             region.ptr,
             Some(AllocationKind::Mapping),
             Some(region.length),
@@ -264,7 +313,25 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
     }
 
     pub fn munmap_ptr(&mut self, ptr: NonNull<u8>, length: usize) -> bool {
-        self.release(ptr, Some(AllocationKind::Mapping), Some(length))
+        self.munmap_ptr_for(KERNEL_PROCESS_ID, ptr, length)
+    }
+
+    pub fn munmap_ptr_for(&mut self, owner: ProcessId, ptr: NonNull<u8>, length: usize) -> bool {
+        self.release(owner, ptr, Some(AllocationKind::Mapping), Some(length))
+    }
+
+    pub fn release_process(&mut self, owner: ProcessId) {
+        let mut idx = 0;
+        while idx < MAX_AREAS {
+            if let Some(record) = self.allocations[idx] {
+                if record.owner == owner {
+                    self.allocations[idx] = None;
+                    self.insert_free_region(FreeRegion::new(record.offset, record.size));
+                    self.update_stats_on_free(record.size);
+                }
+            }
+            idx += 1;
+        }
     }
 
     pub fn statistics(&self) -> AllocationStats {
@@ -326,6 +393,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
 
     fn release(
         &mut self,
+        owner: ProcessId,
         ptr: NonNull<u8>,
         expected_kind: Option<AllocationKind>,
         minimum_length: Option<usize>,
@@ -336,7 +404,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
             return false;
         }
         let offset = addr - base;
-        if let Some(record) = self.remove_allocation(offset, expected_kind, minimum_length) {
+        if let Some(record) = self.remove_allocation(owner, offset, expected_kind, minimum_length) {
             self.insert_free_region(FreeRegion::new(record.offset, record.size));
             self.update_stats_on_free(record.size);
             true
@@ -345,11 +413,11 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         }
     }
 
-    fn find_allocation_index(&self, offset: usize) -> Option<usize> {
+    fn find_allocation_index(&self, owner: ProcessId, offset: usize) -> Option<usize> {
         let mut idx = 0;
         while idx < MAX_AREAS {
             if let Some(record) = self.allocations[idx] {
-                if record.offset == offset {
+                if record.owner == owner && record.offset == offset {
                     return Some(idx);
                 }
             }
@@ -360,6 +428,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
 
     fn remove_allocation(
         &mut self,
+        owner: ProcessId,
         offset: usize,
         expected_kind: Option<AllocationKind>,
         minimum_length: Option<usize>,
@@ -367,7 +436,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         let mut idx = 0;
         while idx < MAX_AREAS {
             if let Some(record) = self.allocations[idx] {
-                if record.offset == offset {
+                if record.owner == owner && record.offset == offset {
                     if let Some(kind) = expected_kind {
                         if record.kind != kind {
                             return None;
@@ -440,6 +509,7 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MappedRegion {
+    pub owner: ProcessId,
     pub ptr: NonNull<u8>,
     pub length: usize,
     pub requested: usize,
@@ -458,31 +528,67 @@ type KernelMemory = MemoryManager<DEFAULT_HEAP_BYTES, MAX_ALLOCATION_RECORDS>;
 static MEMORY_MANAGER: SpinLock<KernelMemory> = SpinLock::new(MemoryManager::new());
 
 pub fn malloc(size: usize) -> Option<NonNull<u8>> {
-    MEMORY_MANAGER.lock().malloc(size)
+    malloc_for(KERNEL_PROCESS_ID, size)
+}
+
+pub fn malloc_for(owner: ProcessId, size: usize) -> Option<NonNull<u8>> {
+    MEMORY_MANAGER.lock().malloc_for(owner, size)
 }
 
 pub fn malloc_aligned(size: usize, align: usize) -> Option<NonNull<u8>> {
-    MEMORY_MANAGER.lock().malloc_aligned(size, align)
+    malloc_aligned_for(KERNEL_PROCESS_ID, size, align)
+}
+
+pub fn malloc_aligned_for(owner: ProcessId, size: usize, align: usize) -> Option<NonNull<u8>> {
+    MEMORY_MANAGER.lock().malloc_aligned_for(owner, size, align)
 }
 
 pub fn realloc(ptr: Option<NonNull<u8>>, new_size: usize) -> Option<NonNull<u8>> {
-    MEMORY_MANAGER.lock().realloc(ptr, new_size)
+    realloc_for(KERNEL_PROCESS_ID, ptr, new_size)
+}
+
+pub fn realloc_for(
+    owner: ProcessId,
+    ptr: Option<NonNull<u8>>,
+    new_size: usize,
+) -> Option<NonNull<u8>> {
+    MEMORY_MANAGER.lock().realloc_for(owner, ptr, new_size)
 }
 
 pub fn free(ptr: NonNull<u8>) -> bool {
-    MEMORY_MANAGER.lock().free(ptr)
+    free_for(KERNEL_PROCESS_ID, ptr)
+}
+
+pub fn free_for(owner: ProcessId, ptr: NonNull<u8>) -> bool {
+    MEMORY_MANAGER.lock().free_for(owner, ptr)
 }
 
 pub fn mmap(length: usize, protection: MemoryProtection) -> Option<MappedRegion> {
-    MEMORY_MANAGER.lock().mmap(length, protection)
+    mmap_for(KERNEL_PROCESS_ID, length, protection)
+}
+
+pub fn mmap_for(
+    owner: ProcessId,
+    length: usize,
+    protection: MemoryProtection,
+) -> Option<MappedRegion> {
+    MEMORY_MANAGER.lock().mmap_for(owner, length, protection)
 }
 
 pub fn munmap(region: MappedRegion) -> bool {
-    MEMORY_MANAGER.lock().munmap(region)
+    munmap_ptr_for(region.owner, region.ptr, region.length)
 }
 
 pub fn munmap_ptr(ptr: NonNull<u8>, length: usize) -> bool {
-    MEMORY_MANAGER.lock().munmap_ptr(ptr, length)
+    munmap_ptr_for(KERNEL_PROCESS_ID, ptr, length)
+}
+
+pub fn munmap_ptr_for(owner: ProcessId, ptr: NonNull<u8>, length: usize) -> bool {
+    MEMORY_MANAGER.lock().munmap_ptr_for(owner, ptr, length)
+}
+
+pub fn release_process(owner: ProcessId) {
+    MEMORY_MANAGER.lock().release_process(owner);
 }
 
 pub fn stats() -> AllocationStats {
@@ -568,6 +674,35 @@ mod tests {
         let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
         let ptr = manager.malloc(32).expect("allocation succeeds");
         assert!(manager.realloc(Some(ptr), 0).is_none());
+        assert_eq!(manager.statistics().allocated_bytes, 0);
+    }
+
+    #[test]
+    fn allocations_are_owned_by_process() {
+        let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
+        let owner = ProcessId::new(7);
+        let other = ProcessId::new(8);
+        let ptr = manager
+            .malloc_for(owner, 32)
+            .expect("process allocation succeeds");
+
+        assert!(!manager.free_for(other, ptr));
+        assert!(manager.free_for(owner, ptr));
+    }
+
+    #[test]
+    fn release_process_reclaims_owned_records() {
+        let mut manager: MemoryManager<8192, 16> = MemoryManager::new();
+        let owner = ProcessId::new(7);
+        let _heap = manager
+            .malloc_for(owner, 32)
+            .expect("process allocation succeeds");
+        let _mapping = manager
+            .mmap_for(owner, 4096, MemoryProtection::read_only())
+            .expect("process mapping succeeds");
+
+        manager.release_process(owner);
+
         assert_eq!(manager.statistics().allocated_bytes, 0);
     }
 }

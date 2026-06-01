@@ -1,12 +1,61 @@
 use core::cmp;
 use core::ffi::{c_char, c_int, c_void};
 use core::mem;
-use core::ptr::{self, NonNull};
+use core::ptr;
 
-use crate::kernel::memory::{self, MemoryProtection};
+use crate::kernel::memory::{MemoryProtection, KERNEL_PROCESS_ID};
+use crate::kernel::syscall::{
+    dispatch_kernel_memory_syscall, SyscallContext, SyscallNumber, SYSCALL_MAX_ARGS,
+};
 
 const EINVAL: c_int = 22;
 const ENOMEM: c_int = 12;
+
+fn memory_syscall(number: SyscallNumber, args: [u64; SYSCALL_MAX_ARGS]) -> u64 {
+    let context = SyscallContext::new(KERNEL_PROCESS_ID, None, args);
+    dispatch_kernel_memory_syscall(number, context)
+}
+
+fn syscall_malloc(size: usize) -> *mut c_void {
+    memory_syscall(SyscallNumber::Malloc, [size as u64, 0, 0, 0, 0, 0]) as *mut c_void
+}
+
+fn syscall_free(ptr: *mut c_void) {
+    let _ = memory_syscall(SyscallNumber::Free, [ptr as u64, 0, 0, 0, 0, 0]);
+}
+
+fn syscall_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+    memory_syscall(
+        SyscallNumber::Realloc,
+        [ptr as u64, size as u64, 0, 0, 0, 0],
+    ) as *mut c_void
+}
+
+fn syscall_malloc_aligned(size: usize, alignment: usize) -> *mut c_void {
+    memory_syscall(
+        SyscallNumber::MallocAligned,
+        [size as u64, alignment as u64, 0, 0, 0, 0],
+    ) as *mut c_void
+}
+
+fn syscall_mmap(length: usize, protection: MemoryProtection) -> *mut c_void {
+    memory_syscall(
+        SyscallNumber::Mmap,
+        [length as u64, protection.bits() as u64, 0, 0, 0, 0],
+    ) as *mut c_void
+}
+
+fn syscall_munmap(addr: *mut c_void, length: usize) -> c_int {
+    let result = memory_syscall(
+        SyscallNumber::Munmap,
+        [addr as u64, length as u64, 0, 0, 0, 0],
+    );
+    if result == 0 {
+        0
+    } else {
+        -1
+    }
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
@@ -353,14 +402,12 @@ pub unsafe extern "C" fn strdup(s: *const c_char) -> *mut c_char {
         return ptr::null_mut();
     };
 
-    match memory::malloc(total) {
-        Some(block) => {
-            let dest = block.as_ptr() as *mut c_char;
-            ptr::copy_nonoverlapping(s, dest, total);
-            dest
-        }
-        None => ptr::null_mut(),
+    let dest = malloc(total) as *mut c_char;
+    if dest.is_null() {
+        return ptr::null_mut();
     }
+    ptr::copy_nonoverlapping(s, dest, total);
+    dest
 }
 
 #[no_mangle]
@@ -374,15 +421,13 @@ pub unsafe extern "C" fn strndup(s: *const c_char, n: usize) -> *mut c_char {
         return ptr::null_mut();
     };
 
-    match memory::malloc(total) {
-        Some(block) => {
-            let dest = block.as_ptr() as *mut c_char;
-            ptr::copy_nonoverlapping(s, dest, len);
-            *dest.add(len) = 0;
-            dest
-        }
-        None => ptr::null_mut(),
+    let dest = malloc(total) as *mut c_char;
+    if dest.is_null() {
+        return ptr::null_mut();
     }
+    ptr::copy_nonoverlapping(s, dest, len);
+    *dest.add(len) = 0;
+    dest
 }
 
 #[no_mangle]
@@ -396,21 +441,16 @@ pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
         return ptr::null_mut();
     }
 
-    match memory::malloc(total) {
-        Some(block) => {
-            ptr::write_bytes(block.as_ptr(), 0, total);
-            block.as_ptr() as *mut c_void
-        }
-        None => ptr::null_mut(),
+    let block = malloc(total);
+    if !block.is_null() {
+        ptr::write_bytes(block as *mut u8, 0, total);
     }
+    block
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
-    let option = NonNull::new(ptr as *mut u8);
-    memory::realloc(option, size)
-        .map(|new_ptr| new_ptr.as_ptr() as *mut c_void)
-        .unwrap_or(ptr::null_mut())
+    syscall_realloc(ptr, size)
 }
 
 #[no_mangle]
@@ -432,9 +472,7 @@ pub unsafe extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut c_
     if size == 0 || size % alignment != 0 {
         return ptr::null_mut();
     }
-    memory::malloc_aligned(size, alignment)
-        .map(|ptr| ptr.as_ptr() as *mut c_void)
-        .unwrap_or(ptr::null_mut())
+    syscall_malloc_aligned(size, alignment)
 }
 
 #[no_mangle]
@@ -457,15 +495,13 @@ pub unsafe extern "C" fn posix_memalign(
         return 0;
     }
 
-    match memory::malloc_aligned(size, alignment) {
-        Some(block) => {
-            *memptr = block.as_ptr() as *mut c_void;
-            0
-        }
-        None => {
-            *memptr = ptr::null_mut();
-            ENOMEM
-        }
+    let block = syscall_malloc_aligned(size, alignment);
+    if block.is_null() {
+        *memptr = ptr::null_mut();
+        ENOMEM
+    } else {
+        *memptr = block;
+        0
     }
 }
 
@@ -478,22 +514,18 @@ pub unsafe extern "C" fn memalign(alignment: usize, size: usize) -> *mut c_void 
     if size == 0 {
         return ptr::null_mut();
     }
-    memory::malloc_aligned(size, adjusted)
-        .map(|ptr| ptr.as_ptr() as *mut c_void)
-        .unwrap_or(ptr::null_mut())
+    syscall_malloc_aligned(size, adjusted)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
-    memory::malloc(size)
-        .map(|ptr| ptr.as_ptr() as *mut c_void)
-        .unwrap_or(ptr::null_mut())
+    syscall_malloc(size)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn free(ptr: *mut c_void) {
-    if let Some(non_null) = NonNull::new(ptr as *mut u8) {
-        let _ = memory::free(non_null);
+    if !ptr.is_null() {
+        syscall_free(ptr);
     }
 }
 
@@ -507,22 +539,15 @@ pub unsafe extern "C" fn mmap(
     _offset: usize,
 ) -> *mut c_void {
     let protection = MemoryProtection::from_bits(prot as u32);
-    memory::mmap(length, protection)
-        .map(|region| region.as_ptr() as *mut c_void)
-        .unwrap_or(ptr::null_mut())
+    syscall_mmap(length, protection)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn munmap(addr: *mut c_void, length: usize) -> c_int {
-    match NonNull::new(addr as *mut u8) {
-        Some(ptr) => {
-            if memory::munmap_ptr(ptr, length) {
-                0
-            } else {
-                -1
-            }
-        }
-        None => -1,
+    if addr.is_null() {
+        -1
+    } else {
+        syscall_munmap(addr, length)
     }
 }
 

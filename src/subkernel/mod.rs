@@ -1,5 +1,6 @@
 //! The Mirage L2 security kernel responsible for authentication and isolation.
 
+use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::ProcessId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,6 +376,24 @@ impl<const MAX: usize> SecurityKernel<MAX> {
     }
 
     pub fn authorize_memory_service(&self, pid: ProcessId) -> Result<(), IsolationError> {
+        self.enforce_isolation(pid)
+    }
+
+    pub fn authorize_memory_mapping(
+        &self,
+        pid: ProcessId,
+        protection: MemoryProtection,
+    ) -> Result<(), IsolationError> {
+        let domain = self.domain(pid)?;
+
+        if protection.write && protection.execute {
+            return Err(IsolationError::PolicyViolation);
+        }
+
+        if protection.execute && !domain.has_system_privilege() {
+            return Err(IsolationError::CapabilityMissing);
+        }
+
         self.enforce_isolation(pid)
     }
 
