@@ -8,6 +8,7 @@ pub mod memory;
 pub mod process;
 pub mod scheduler;
 pub mod sync;
+pub mod syscall;
 pub mod thread;
 pub mod time;
 
@@ -17,11 +18,14 @@ use crate::kernel::device::{
     DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceManager,
 };
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
+use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{ProcessControlBlock, ProcessId, ProcessPriority, ProcessState};
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
+use crate::kernel::syscall::{SyscallContext, SyscallNumber};
 use crate::kernel::thread::{ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS};
 use crate::kernel::time::KERNEL_TIME;
-use crate::subkernel::{Credentials, SecurityKernel};
+use crate::subkernel::{Credentials, SecurityClass, SecurityKernel};
+use core::ptr::NonNull;
 
 pub const MAX_PROCESSES: usize = 64;
 pub const MESSAGE_DEPTH: usize = 16;
@@ -40,6 +44,10 @@ pub enum KernelError {
     IsolationFault,
     DeviceNotFound,
     DeviceFault(DriverError),
+    InvalidSyscall,
+    InvalidArgument,
+    InvalidPointer,
+    AllocationFailed,
 }
 
 pub type KernelResult<T> = core::result::Result<T, KernelError>;
@@ -265,6 +273,167 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             }
             self.scheduler.remove_process(pid);
             self.block_threads_for_process(pid);
+        }
+    }
+
+    pub fn handle_syscall(&mut self, number: u64, context: SyscallContext) -> KernelResult<u64> {
+        match SyscallNumber::from_raw(number).ok_or(KernelError::InvalidSyscall)? {
+            SyscallNumber::GetPid => Ok(context.caller.raw()),
+            SyscallNumber::Spawn => self.syscall_spawn(context),
+            SyscallNumber::SendIpc => self.syscall_send_ipc(context),
+            SyscallNumber::ReceiveIpc => self.syscall_receive_ipc(context),
+            SyscallNumber::BlockForIpc => {
+                self.security
+                    .authorize_ipc_receive(context.caller)
+                    .map_err(|_| KernelError::SecurityViolation)?;
+                self.block_for_message(context.caller);
+                Ok(0)
+            }
+            SyscallNumber::EnumerateDevices => self.syscall_enumerate_devices(context),
+            SyscallNumber::DeviceRead => self.syscall_device_read(context),
+            SyscallNumber::DeviceWrite => self.syscall_device_write(context),
+            SyscallNumber::Mmap => self.syscall_mmap(context),
+            SyscallNumber::Munmap => self.syscall_munmap(context),
+            SyscallNumber::Malloc => self.syscall_malloc(context),
+            SyscallNumber::Free => self.syscall_free(context),
+        }
+    }
+
+    fn syscall_spawn(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_spawn(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+
+        let entry_point = context.arg(0);
+        let priority = decode_priority(context.arg(1))?;
+        let credentials = decode_credentials(context.arg(2))?;
+        self.spawn_process(entry_point, priority, Some(context.caller), credentials)
+            .map(|pid| pid.raw())
+    }
+
+    fn syscall_send_ipc(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let receiver = ProcessId::new(context.arg(0));
+        let data_ptr = context.arg(1) as *const u8;
+        let data_len = context.arg(2) as usize;
+        let security_class = decode_security_class(context.arg(3))?;
+        if data_len > 0 && data_ptr.is_null() {
+            return Err(KernelError::InvalidPointer);
+        }
+
+        let data = if data_len == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+        };
+        let payload = MessagePayload::from_slice(security_class, data);
+        self.send_message(context.caller, receiver, payload)?;
+        Ok(payload.length as u64)
+    }
+
+    fn syscall_receive_ipc(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_ipc_receive(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        let out = context.arg(0) as *mut Message;
+        if out.is_null() {
+            return Err(KernelError::InvalidPointer);
+        }
+        let message = self.receive_message(context.caller)?;
+        unsafe { out.write(message) };
+        Ok(message.payload.length as u64)
+    }
+
+    fn syscall_enumerate_devices(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_device_enumeration(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        let out = context.arg(0) as *mut DeviceDescriptor;
+        let capacity = context.arg(1) as usize;
+        if capacity > 0 && out.is_null() {
+            return Err(KernelError::InvalidPointer);
+        }
+        let out_slice = if capacity == 0 {
+            &mut []
+        } else {
+            unsafe { core::slice::from_raw_parts_mut(out, capacity) }
+        };
+        Ok(self.enumerate_devices(out_slice) as u64)
+    }
+
+    fn syscall_device_read(&self, context: SyscallContext) -> KernelResult<u64> {
+        let id = DeviceId::new(context.arg(0) as u16);
+        let buffer = context.arg(1) as *mut u8;
+        let len = context.arg(2) as usize;
+        if len > 0 && buffer.is_null() {
+            return Err(KernelError::InvalidPointer);
+        }
+        let buffer = if len == 0 {
+            &mut []
+        } else {
+            unsafe { core::slice::from_raw_parts_mut(buffer, len) }
+        };
+        self.device_read(context.caller, id, buffer)
+            .map(|read| read as u64)
+    }
+
+    fn syscall_device_write(&self, context: SyscallContext) -> KernelResult<u64> {
+        let id = DeviceId::new(context.arg(0) as u16);
+        let data = context.arg(1) as *const u8;
+        let len = context.arg(2) as usize;
+        if len > 0 && data.is_null() {
+            return Err(KernelError::InvalidPointer);
+        }
+        let data = if len == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(data, len) }
+        };
+        self.device_write(context.caller, id, data)
+            .map(|written| written as u64)
+    }
+
+    fn syscall_mmap(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_memory_service(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        let length = context.arg(0) as usize;
+        let protection = MemoryProtection::from_bits(context.arg(1) as u32);
+        memory::mmap(length, protection)
+            .map(|region| region.as_ptr() as u64)
+            .ok_or(KernelError::AllocationFailed)
+    }
+
+    fn syscall_munmap(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_memory_service(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        let ptr = NonNull::new(context.arg(0) as *mut u8).ok_or(KernelError::InvalidPointer)?;
+        let length = context.arg(1) as usize;
+        if memory::munmap_ptr(ptr, length) {
+            Ok(0)
+        } else {
+            Err(KernelError::InvalidArgument)
+        }
+    }
+
+    fn syscall_malloc(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_memory_service(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        memory::malloc(context.arg(0) as usize)
+            .map(|ptr| ptr.as_ptr() as u64)
+            .ok_or(KernelError::AllocationFailed)
+    }
+
+    fn syscall_free(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_memory_service(context.caller)
+            .map_err(|_| KernelError::SecurityViolation)?;
+        let ptr = NonNull::new(context.arg(0) as *mut u8).ok_or(KernelError::InvalidPointer)?;
+        if memory::free(ptr) {
+            Ok(0)
+        } else {
+            Err(KernelError::InvalidArgument)
         }
     }
 
@@ -559,5 +728,33 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.devices
             .write(id, data)
             .map_err(KernelError::DeviceFault)
+    }
+}
+
+fn decode_priority(raw: u64) -> KernelResult<ProcessPriority> {
+    match raw {
+        0 => Ok(ProcessPriority::Critical),
+        1 => Ok(ProcessPriority::High),
+        2 => Ok(ProcessPriority::Normal),
+        3 => Ok(ProcessPriority::Low),
+        _ => Err(KernelError::InvalidArgument),
+    }
+}
+
+fn decode_credentials(raw: u64) -> KernelResult<Credentials> {
+    match raw {
+        0 => Ok(Credentials::user()),
+        1 => Ok(Credentials::system()),
+        _ => Err(KernelError::InvalidArgument),
+    }
+}
+
+fn decode_security_class(raw: u64) -> KernelResult<SecurityClass> {
+    match raw {
+        0 => Ok(SecurityClass::Public),
+        1 => Ok(SecurityClass::Internal),
+        2 => Ok(SecurityClass::Confidential),
+        3 => Ok(SecurityClass::System),
+        _ => Err(KernelError::InvalidArgument),
     }
 }
