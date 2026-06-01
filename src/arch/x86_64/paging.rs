@@ -3,6 +3,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::boot::{BootInfo, MemoryRegionKind};
+use crate::kernel::memory::MemoryProtection;
 
 const PAGE_SIZE: u64 = 4096;
 const ENTRY_COUNT: usize = 512;
@@ -15,6 +16,8 @@ const DEFAULT_IDENTITY_LIMIT: u64 = 16 * 1024 * 1024;
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 static mut TABLES: PageTablePool = PageTablePool::new();
+static mut ACTIVE_TRANSLATOR: AddressTranslator = AddressTranslator::identity();
+static mut ACTIVE_PML4: *mut PageTable = core::ptr::null_mut();
 
 #[repr(C, align(4096))]
 #[derive(Clone, Copy)]
@@ -70,7 +73,7 @@ impl PageTablePool {
 }
 
 #[derive(Clone, Copy)]
-struct AddressTranslator {
+pub struct AddressTranslator {
     hhdm_offset: Option<u64>,
     kernel_physical_start: u64,
     kernel_virtual_start: u64,
@@ -78,7 +81,16 @@ struct AddressTranslator {
 }
 
 impl AddressTranslator {
-    fn new(boot_info: &BootInfo) -> Self {
+    pub const fn identity() -> Self {
+        Self {
+            hhdm_offset: None,
+            kernel_physical_start: 0,
+            kernel_virtual_start: 0,
+            kernel_length: 0,
+        }
+    }
+
+    pub fn new(boot_info: &BootInfo) -> Self {
         let load = boot_info.kernel.load_range;
         Self {
             hhdm_offset: boot_info.hhdm_offset,
@@ -88,7 +100,7 @@ impl AddressTranslator {
         }
     }
 
-    fn physical_for_virtual(self, virtual_address: u64) -> u64 {
+    pub fn physical_for_virtual(self, virtual_address: u64) -> u64 {
         if self.kernel_length != 0
             && virtual_address >= self.kernel_virtual_start
             && virtual_address < self.kernel_virtual_start.saturating_add(self.kernel_length)
@@ -107,7 +119,7 @@ impl AddressTranslator {
         virtual_address
     }
 
-    fn virtual_for_physical(self, physical_address: u64) -> u64 {
+    pub fn virtual_for_physical(self, physical_address: u64) -> u64 {
         if self.kernel_length != 0
             && physical_address >= self.kernel_physical_start
             && physical_address
@@ -150,6 +162,8 @@ pub fn initialize(boot_info: &BootInfo) {
         map_kernel_image(pool, pml4, &translator, boot_info);
         map_framebuffer(pool, pml4, &translator, boot_info);
 
+        ACTIVE_TRANSLATOR = translator;
+        ACTIVE_PML4 = pml4;
         load_cr3(translator.physical_for_virtual(pml4 as u64));
         INSTALLED.store(true, Ordering::SeqCst);
     }
@@ -388,6 +402,45 @@ unsafe fn load_cr3(pml4_physical: u64) {
 
     #[cfg(test)]
     let _ = pml4_physical;
+}
+
+pub fn map_kernel_page(
+    physical: u64,
+    virtual_address: u64,
+    protection: MemoryProtection,
+) -> Option<()> {
+    unsafe {
+        if ACTIVE_PML4.is_null() {
+            return None;
+        }
+        let flags = flags_from_protection(protection);
+        let translator = ACTIVE_TRANSLATOR;
+        map_page(
+            core::ptr::addr_of_mut!(TABLES),
+            ACTIVE_PML4,
+            &translator,
+            physical,
+            virtual_address,
+            flags,
+        );
+        Some(())
+    }
+}
+
+pub fn page_table_pool_range() -> (usize, usize) {
+    let start = core::ptr::addr_of!(TABLES) as usize;
+    (start, core::mem::size_of::<PageTablePool>())
+}
+
+fn flags_from_protection(protection: MemoryProtection) -> MappingFlags {
+    let mut flags = PRESENT;
+    if protection.write {
+        flags |= WRITABLE;
+    }
+    if !protection.execute {
+        flags |= NO_EXECUTE;
+    }
+    MappingFlags(flags)
 }
 
 pub fn installed() -> bool {

@@ -7,6 +7,7 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
+use crate::kernel::memory;
 use crate::kernel::syscall::{SyscallFrame, SYSCALL_MAX_ARGS};
 use crate::kernel::thread::{
     ThreadControlBlock, ThreadId, SYSCALL_TRAP_VECTOR, TIMER_INTERRUPT_VECTOR,
@@ -119,6 +120,7 @@ fn configure_cpu_modes() {
 
 fn setup_memory_layout(boot_info: &BootInfo) {
     paging::initialize(boot_info);
+    memory::initialize_from_boot_info(boot_info);
 }
 
 fn configure_interrupts() {
