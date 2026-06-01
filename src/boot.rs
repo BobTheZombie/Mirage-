@@ -220,8 +220,8 @@ pub fn base_revision_supported() -> bool {
 }
 
 /// Capture the firmware-provided data that the early kernel can consume without allocation.
-pub fn snapshot() -> BootInfo {
-    BootInfo {
+pub fn snapshot() -> LimineBootSnapshot {
+    LimineBootSnapshot {
         base_revision_supported: base_revision_supported(),
         bootloader: BOOTLOADER_INFO.response(),
         hhdm: HHDM.response(),
@@ -233,7 +233,7 @@ pub fn snapshot() -> BootInfo {
 }
 
 #[derive(Clone, Copy)]
-pub struct BootInfo {
+pub struct LimineBootSnapshot {
     pub base_revision_supported: bool,
     pub bootloader: Option<&'static BootloaderInfoResponse>,
     pub hhdm: Option<&'static HhdmResponse>,
