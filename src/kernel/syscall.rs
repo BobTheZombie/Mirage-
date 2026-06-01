@@ -23,6 +23,7 @@ pub enum SyscallNumber {
     Munmap = 9,
     Malloc = 10,
     Free = 11,
+    ReceiveOrBlockIpc = 12,
 }
 
 impl SyscallNumber {
@@ -44,6 +45,7 @@ impl SyscallNumber {
             9 => Some(Self::Munmap),
             10 => Some(Self::Malloc),
             11 => Some(Self::Free),
+            12 => Some(Self::ReceiveOrBlockIpc),
             _ => None,
         }
     }
