@@ -3,29 +3,43 @@
 //! This module keeps a stable Rust-facing namespace over the focused libc ABI
 //! modules. Exported C symbols remain single definitions in [`crate::libc`].
 
+#[cfg(not(feature = "qfs-std"))]
 pub use crate::libc::stdlib as alloc;
+#[cfg(not(feature = "qfs-std"))]
 pub use crate::libc::{dirent, errno, fcntl, pthread, socket, string, sys_stat, time, unistd};
 
+#[cfg(not(feature = "qfs-std"))]
 pub use crate::libc::dirent::getdents64;
+#[cfg(not(feature = "qfs-std"))]
 pub use crate::libc::fcntl::{open, openat};
+#[cfg(not(feature = "qfs-std"))]
 pub use crate::libc::stdlib::{
     aligned_alloc, calloc, free, malloc, memalign, mmap, munmap, posix_memalign, realloc,
     reallocarray,
 };
+#[cfg(not(feature = "qfs-std"))]
 pub use crate::libc::string::{
     bcmp, bcopy, bzero, memchr, memcmp, memcpy, memmove, memset, strcat, strchr, strcmp, strcpy,
     strdup, strlen, strncat, strncmp, strncpy, strndup, strnlen, strrchr, strstr,
 };
+#[cfg(not(feature = "qfs-std"))]
 pub use crate::libc::sys_stat::{
     fstat, fsync, ftruncate, mkdir, mkdirat, rename, renameat, renameat2, stat, statx, unlink,
     unlinkat,
 };
+#[cfg(not(feature = "qfs-std"))]
 pub use crate::libc::time::clock_gettime;
+#[cfg(not(feature = "qfs-std"))]
 pub use crate::libc::unistd::{
     close, getegid, geteuid, getgid, getpid, getppid, getuid, lseek, read, write,
 };
 
+/// Host-backed QFS image operations for userspace tooling.
+#[cfg(feature = "qfs-std")]
+pub mod qfs;
+
 /// Filesystem ABI constants and C-compatible payloads shared with libc wrappers.
+#[cfg(not(feature = "qfs-std"))]
 pub mod fs {
     pub use crate::kernel::fs::{
         CDirEntry, CStat, DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN,

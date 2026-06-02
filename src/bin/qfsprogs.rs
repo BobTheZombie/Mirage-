@@ -1,7 +1,7 @@
 use std::env;
 use std::process::ExitCode;
 
-use mirage::kernel::fs::{
+use mirage::stdlib::qfs::{
     dump_superblock, fsck_image, mkfs_image, stat_image, QfsImageReport, QfsSuperblock,
     QFS_BOOK_PAGES, QFS_PAGE_SECTORS,
 };
