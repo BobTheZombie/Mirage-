@@ -118,7 +118,7 @@ pub trait FileSystem {
         if !metadata.permissions.allows(credentials, access) {
             return Err(VfsError::PermissionDenied);
         }
-        Ok(File::with_flags(metadata.id, flags))
+        Ok(File::with_flags(metadata.id, flags).with_path(path))
     }
 
     fn close(&self, _file: File) -> Result<(), VfsError> {
@@ -188,7 +188,7 @@ pub trait FileSystem {
 
     fn symlink(
         &self,
-        _target: Path<'_>,
+        _target: &str,
         _link_path: Path<'_>,
         _credentials: Credentials,
     ) -> Result<(), VfsError> {

@@ -20,14 +20,15 @@ use crate::kernel::device::{
     MirageDeviceDescriptor,
 };
 use crate::kernel::fs::{
-    open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, CDirEntry,
-    CStat, DescriptorFlags, DirEntry, FileDescriptionId, FileSystem, FileTable, FileTableError,
-    FsCredentials, Path, PathError, QfsFileSystem, VfsError, MAX_PATH_BYTES,
+    open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, AccessMode,
+    CDirEntry, CStat, DescriptorFlags, DirEntry, FileDescriptionId, FileSystem, FileTable,
+    FileTableError, FsCredentials, Path, PathError, QfsFileSystem, VfsError, MAX_PATH_BYTES,
 };
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{
-    ProcessControlBlock, ProcessFileTableError, ProcessId, ProcessPriority, ProcessState,
+    ProcessControlBlock, ProcessFileTableError, ProcessId, ProcessPath, ProcessPriority,
+    ProcessState,
 };
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
 use crate::kernel::syscall::{
@@ -50,8 +51,89 @@ const AT_FDCWD: i32 = -100;
 const SEEK_SET: u64 = 0;
 const SEEK_CUR: u64 = 1;
 const SEEK_END: u64 = 2;
+const AT_REMOVEDIR: u64 = 0x200;
+const AT_SYMLINK_FOLLOW: u64 = 0x400;
+const RENAME_NOREPLACE: u64 = 1;
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const F_GETFL: u64 = 3;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+const FD_CLOEXEC: u64 = 1;
+const O_CLOEXEC_RAW: u64 = 0o02000000;
 
 const DEFAULT_ROOT_FILESYSTEM: &[u8] = b"qfs";
+
+struct KernelPathBuf {
+    bytes: [u8; MAX_PATH_BYTES],
+    len: usize,
+}
+
+impl KernelPathBuf {
+    fn from_str(raw: &str) -> KernelResult<Self> {
+        let mut bytes = [0u8; MAX_PATH_BYTES];
+        if raw.is_empty() || raw.len() > MAX_PATH_BYTES {
+            return Err(KernelError::Filesystem(VfsError::InvalidPath(
+                PathError::TooLong,
+            )));
+        }
+        bytes[..raw.len()].copy_from_slice(raw.as_bytes());
+        Ok(Self {
+            bytes,
+            len: raw.len(),
+        })
+    }
+
+    fn as_str(&self) -> &str {
+        unsafe { core::str::from_utf8_unchecked(&self.bytes[..self.len]) }
+    }
+
+    fn as_path(&self) -> KernelResult<Path<'_>> {
+        Path::new(self.as_str()).map_err(map_path_error)
+    }
+
+    fn truncate_to_root(&mut self, root_len: usize) {
+        self.len = root_len.max(1);
+    }
+
+    fn push_component(&mut self, component: &str) -> KernelResult<()> {
+        if component.is_empty() || component == "." {
+            return Ok(());
+        }
+        if component == ".." {
+            while self.len > 1 && self.bytes[self.len - 1] == b'/' {
+                self.len -= 1;
+            }
+            while self.len > 1 && self.bytes[self.len - 1] != b'/' {
+                self.len -= 1;
+            }
+            if self.len > 1 {
+                self.len -= 1;
+            }
+            return Ok(());
+        }
+        if component.len() > crate::kernel::fs::MAX_COMPONENT_BYTES {
+            return Err(KernelError::Filesystem(VfsError::NameTooLong));
+        }
+        let extra = if self.len == 1 {
+            component.len()
+        } else {
+            component.len() + 1
+        };
+        if self.len + extra > MAX_PATH_BYTES {
+            return Err(KernelError::Filesystem(VfsError::InvalidPath(
+                PathError::TooLong,
+            )));
+        }
+        if self.len != 1 {
+            self.bytes[self.len] = b'/';
+            self.len += 1;
+        }
+        self.bytes[self.len..self.len + component.len()].copy_from_slice(component.as_bytes());
+        self.len += component.len();
+        Ok(())
+    }
+}
 
 fn is_supported_root_filesystem(filesystem_type: &[u8]) -> bool {
     matches!(filesystem_type, b"qfs" | b"ext4" | b"ssd_usb" | b"ssd-usb")
@@ -429,6 +511,15 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             SyscallNumber::Ftruncate => self.syscall_ftruncate(context),
             SyscallNumber::Fsync => self.syscall_fsync(context),
             SyscallNumber::Mount => self.syscall_mount(context),
+            SyscallNumber::Chdir => self.syscall_chdir(context),
+            SyscallNumber::Fchdir => self.syscall_fchdir(context),
+            SyscallNumber::Getcwd => self.syscall_getcwd(context),
+            SyscallNumber::Faccessat => self.syscall_faccessat(context),
+            SyscallNumber::Fchmodat => self.syscall_fchmodat(context),
+            SyscallNumber::Fchownat => self.syscall_fchownat(context),
+            SyscallNumber::Symlinkat => self.syscall_symlinkat(context),
+            SyscallNumber::Readlinkat => self.syscall_readlinkat(context),
+            SyscallNumber::Linkat => self.syscall_linkat(context),
             SyscallNumber::Fork => self.syscall_fork(context),
             SyscallNumber::Execve => self.syscall_execve(context),
             SyscallNumber::Exit => self.syscall_exit(context),
@@ -480,8 +571,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.syscall_spawn(context)
     }
 
-    fn syscall_execve(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_execve(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let closed = self.process_files_mut(context.caller)?.close_on_exec();
+        self.release_description_ids(&closed);
+        Ok(0)
     }
 
     fn syscall_exit(&mut self, context: SyscallContext) -> KernelResult<u64> {
@@ -583,20 +676,88 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Err(KernelError::InvalidSyscall)
     }
 
-    fn syscall_dup(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_dup(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.duplicate_fd(
+            context.caller,
+            context.arg(0) as usize,
+            0,
+            DescriptorFlags::EMPTY,
+        )
     }
 
-    fn syscall_dup2(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_dup2(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.duplicate_fd_to(
+            context.caller,
+            context.arg(0) as usize,
+            context.arg(1) as usize,
+            DescriptorFlags::EMPTY,
+            false,
+        )
     }
 
-    fn syscall_dup3(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_dup3(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let flags = context.arg(2);
+        if flags & !O_CLOEXEC_RAW != 0 || context.arg(0) == context.arg(1) {
+            return Err(KernelError::InvalidArgument);
+        }
+        let descriptor_flags = if flags & O_CLOEXEC_RAW != 0 {
+            DescriptorFlags::CLOSE_ON_EXEC
+        } else {
+            DescriptorFlags::EMPTY
+        };
+        self.duplicate_fd_to(
+            context.caller,
+            context.arg(0) as usize,
+            context.arg(1) as usize,
+            descriptor_flags,
+            true,
+        )
     }
 
-    fn syscall_fcntl(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_fcntl(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let fd = context.arg(0) as usize;
+        match context.arg(1) {
+            F_DUPFD => self.duplicate_fd(
+                context.caller,
+                fd,
+                context.arg(2) as usize,
+                DescriptorFlags::EMPTY,
+            ),
+            F_DUPFD_CLOEXEC => self.duplicate_fd(
+                context.caller,
+                fd,
+                context.arg(2) as usize,
+                DescriptorFlags::CLOSE_ON_EXEC,
+            ),
+            F_GETFD => Ok(self
+                .process_files(context.caller)?
+                .get(fd)
+                .map_err(map_process_file_table_error)?
+                .flags()
+                .bits() as u64),
+            F_SETFD => {
+                let flags = if context.arg(2) & FD_CLOEXEC != 0 {
+                    DescriptorFlags::CLOSE_ON_EXEC
+                } else {
+                    DescriptorFlags::EMPTY
+                };
+                self.process_files_mut(context.caller)?
+                    .get_mut(fd)
+                    .map_err(map_process_file_table_error)?
+                    .set_flags(flags);
+                Ok(0)
+            }
+            F_GETFL => {
+                let description = self.fd_description(context.caller, fd)?;
+                Ok(self
+                    .open_files
+                    .get(description)
+                    .map_err(map_file_table_error)?
+                    .flags()
+                    .bits() as u64)
+            }
+            _ => Err(KernelError::InvalidArgument),
+        }
     }
 
     fn syscall_ioctl(&mut self, _context: SyscallContext) -> KernelResult<u64> {
@@ -864,7 +1025,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_openat(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        let path = self.absolute_user_path(context.arg(0), context.arg(1))?;
+        let path_buf = self.resolve_user_path(context.caller, context.arg(0), context.arg(1))?;
+        let path = path_buf.as_path()?;
         let raw_flags = open_flags_from_libc(context.arg(2) as u32);
         let descriptor_flags = DescriptorFlags::from_open_flags(raw_flags);
         let credentials = fs_credentials_for(context.caller);
@@ -995,8 +1157,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 .map_err(map_file_table_error)?;
             self.root_fs.fstat(&file)
         } else {
-            let path = self.absolute_user_path(context.arg(0), path_ptr)?;
-            self.root_fs.stat(path)
+            let path_buf = self.resolve_user_path(context.caller, context.arg(0), path_ptr)?;
+            self.root_fs.stat(path_buf.as_path()?)
         }
         .map_err(KernelError::Filesystem)?;
         unsafe { out.write(CStat::from_kernel(stat)) };
@@ -1034,7 +1196,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_mkdirat(&self, context: SyscallContext) -> KernelResult<u64> {
-        let path = self.absolute_user_path(context.arg(0), context.arg(1))?;
+        let path_buf = self.resolve_user_path(context.caller, context.arg(0), context.arg(1))?;
+        let path = path_buf.as_path()?;
         let requested = context.arg(2) as u32;
         let umask = self.process_files(context.caller)?.umask().bits() as u32;
         let mode = permissions_from_libc_mode(requested & !umask, context.caller.raw() as u16, 0);
@@ -1045,9 +1208,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_unlinkat(&self, context: SyscallContext) -> KernelResult<u64> {
-        let path = self.absolute_user_path(context.arg(0), context.arg(1))?;
+        let path_buf = self.resolve_user_path(context.caller, context.arg(0), context.arg(1))?;
+        let path = path_buf.as_path()?;
         let flags = context.arg(2);
-        let result = if (flags & 0x200) != 0 {
+        let result = if (flags & AT_REMOVEDIR) != 0 {
             self.root_fs.rmdir(path, fs_credentials_for(context.caller))
         } else {
             self.root_fs
@@ -1057,10 +1221,23 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_renameat2(&self, context: SyscallContext) -> KernelResult<u64> {
-        let old_path = self.absolute_user_path(context.arg(0), context.arg(1))?;
-        let new_path = self.absolute_user_path(context.arg(2), context.arg(3))?;
+        let old_path_buf =
+            self.resolve_user_path(context.caller, context.arg(0), context.arg(1))?;
+        let new_path_buf =
+            self.resolve_user_path(context.caller, context.arg(2), context.arg(3))?;
+        let flags = context.arg(4);
+        if flags & !RENAME_NOREPLACE != 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        if flags & RENAME_NOREPLACE != 0 && self.root_fs.stat(new_path_buf.as_path()?).is_ok() {
+            return Err(KernelError::Filesystem(VfsError::AlreadyExists));
+        }
         self.root_fs
-            .rename(old_path, new_path, fs_credentials_for(context.caller))
+            .rename(
+                old_path_buf.as_path()?,
+                new_path_buf.as_path()?,
+                fs_credentials_for(context.caller),
+            )
             .map(|_| 0)
             .map_err(KernelError::Filesystem)
     }
@@ -1105,18 +1282,227 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Ok(0)
     }
 
-    fn absolute_user_path(&self, dirfd: u64, path_ptr: u64) -> KernelResult<Path<'_>> {
-        let path = self.user_path(path_ptr)?;
-        if !path.as_str().starts_with('/') && dirfd as i32 != AT_FDCWD {
+    fn syscall_chdir(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let path_buf = self.resolve_user_path(context.caller, AT_FDCWD as u64, context.arg(0))?;
+        let stat = self
+            .root_fs
+            .stat(path_buf.as_path()?)
+            .map_err(KernelError::Filesystem)?;
+        if stat.kind != crate::kernel::fs::inode::InodeKind::Directory {
+            return Err(KernelError::Filesystem(VfsError::NotDirectory));
+        }
+        self.process_files_mut(context.caller)?
+            .set_cwd(ProcessPath::from_path(path_buf.as_path()?));
+        Ok(0)
+    }
+
+    fn syscall_fchdir(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let description = self.fd_description(context.caller, context.arg(0) as usize)?;
+        let file = self
+            .open_files
+            .get(description)
+            .map_err(map_file_table_error)?;
+        let stat = self.root_fs.fstat(&file).map_err(KernelError::Filesystem)?;
+        if stat.kind != crate::kernel::fs::inode::InodeKind::Directory {
+            return Err(KernelError::Filesystem(VfsError::NotDirectory));
+        }
+        let path = Path::new(file.path()).map_err(map_path_error)?;
+        self.process_files_mut(context.caller)?
+            .set_cwd(ProcessPath::from_path(path));
+        Ok(0)
+    }
+
+    fn syscall_getcwd(&self, context: SyscallContext) -> KernelResult<u64> {
+        let buffer = user_slice_mut(context.arg(0), context.arg(1) as usize)?;
+        let cwd = self.process_files(context.caller)?.cwd();
+        let raw = cwd.as_str().as_bytes();
+        if buffer.len() < raw.len() + 1 {
             return Err(KernelError::InvalidArgument);
         }
-        Ok(path)
+        buffer[..raw.len()].copy_from_slice(raw);
+        buffer[raw.len()] = 0;
+        Ok(context.arg(0))
+    }
+
+    fn syscall_faccessat(&self, context: SyscallContext) -> KernelResult<u64> {
+        let path_buf = self.resolve_user_path(context.caller, context.arg(0), context.arg(1))?;
+        let mode = context.arg(2) as u32;
+        if mode
+            & !(crate::kernel::fs::stdlib::R_OK
+                | crate::kernel::fs::stdlib::W_OK
+                | crate::kernel::fs::stdlib::X_OK)
+            != 0
+        {
+            return Err(KernelError::InvalidArgument);
+        }
+        let stat = self
+            .root_fs
+            .stat(path_buf.as_path()?)
+            .map_err(KernelError::Filesystem)?;
+        if mode == crate::kernel::fs::stdlib::F_OK {
+            return Ok(0);
+        }
+        let permissions = crate::kernel::fs::Permissions::new(stat.mode, stat.uid, stat.gid);
+        let credentials = fs_credentials_for(context.caller);
+        let allowed = match (
+            mode & crate::kernel::fs::stdlib::R_OK != 0,
+            mode & crate::kernel::fs::stdlib::W_OK != 0,
+            mode & crate::kernel::fs::stdlib::X_OK != 0,
+        ) {
+            (true, true, true) => {
+                permissions.allows(credentials, AccessMode::ReadWrite)
+                    && permissions.allows(credentials, AccessMode::Execute)
+            }
+            (true, true, false) => permissions.allows(credentials, AccessMode::ReadWrite),
+            (true, false, false) => permissions.allows(credentials, AccessMode::Read),
+            (false, true, false) => permissions.allows(credentials, AccessMode::Write),
+            (false, false, true) => permissions.allows(credentials, AccessMode::Execute),
+            (true, false, true) => {
+                permissions.allows(credentials, AccessMode::Read)
+                    && permissions.allows(credentials, AccessMode::Execute)
+            }
+            (false, true, true) => {
+                permissions.allows(credentials, AccessMode::Write)
+                    && permissions.allows(credentials, AccessMode::Execute)
+            }
+            _ => true,
+        };
+        if allowed {
+            Ok(0)
+        } else {
+            Err(KernelError::Filesystem(VfsError::PermissionDenied))
+        }
+    }
+
+    fn syscall_fchmodat(&self, context: SyscallContext) -> KernelResult<u64> {
+        let path_buf = self.resolve_user_path(context.caller, context.arg(0), context.arg(1))?;
+        self.root_fs
+            .chmod(
+                path_buf.as_path()?,
+                context.arg(2) as u16,
+                fs_credentials_for(context.caller),
+            )
+            .map(|_| 0)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_fchownat(&self, context: SyscallContext) -> KernelResult<u64> {
+        let path_buf = self.resolve_user_path(context.caller, context.arg(0), context.arg(1))?;
+        self.root_fs
+            .chown(
+                path_buf.as_path()?,
+                context.arg(2) as u16,
+                context.arg(3) as u16,
+                fs_credentials_for(context.caller),
+            )
+            .map(|_| 0)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_symlinkat(&self, context: SyscallContext) -> KernelResult<u64> {
+        let target = self.user_path_str(context.arg(0))?;
+        Path::new_unchecked_rooted(target).map_err(map_path_error)?;
+        let link_path_buf =
+            self.resolve_user_path(context.caller, context.arg(1), context.arg(2))?;
+        self.root_fs
+            .symlink(
+                target,
+                link_path_buf.as_path()?,
+                fs_credentials_for(context.caller),
+            )
+            .map(|_| 0)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_readlinkat(&self, context: SyscallContext) -> KernelResult<u64> {
+        let path_buf = self.resolve_user_path(context.caller, context.arg(0), context.arg(1))?;
+        let buffer = user_slice_mut(context.arg(2), context.arg(3) as usize)?;
+        self.root_fs
+            .readlink(path_buf.as_path()?, buffer)
+            .map(|n| n as u64)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_linkat(&self, context: SyscallContext) -> KernelResult<u64> {
+        let old_path_buf =
+            self.resolve_user_path(context.caller, context.arg(0), context.arg(1))?;
+        let new_path_buf =
+            self.resolve_user_path(context.caller, context.arg(2), context.arg(3))?;
+        let flags = context.arg(4);
+        if flags & !AT_SYMLINK_FOLLOW != 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        self.root_fs
+            .link(
+                old_path_buf.as_path()?,
+                new_path_buf.as_path()?,
+                fs_credentials_for(context.caller),
+            )
+            .map(|_| 0)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn resolve_user_path(
+        &self,
+        pid: ProcessId,
+        dirfd: u64,
+        path_ptr: u64,
+    ) -> KernelResult<KernelPathBuf> {
+        let raw = self.user_path_str(path_ptr)?;
+        self.resolve_path_str(pid, dirfd, raw)
+    }
+
+    fn resolve_path_str(
+        &self,
+        pid: ProcessId,
+        dirfd: u64,
+        raw: &str,
+    ) -> KernelResult<KernelPathBuf> {
+        Path::new_unchecked_rooted(raw).map_err(map_path_error)?;
+        let files = self.process_files(pid)?;
+        let root = files.root();
+        let root_str = root.as_str();
+        let root_len = root.len();
+        let mut resolved = if raw.starts_with('/') {
+            KernelPathBuf::from_str(root_str)?
+        } else if dirfd as i32 == AT_FDCWD {
+            KernelPathBuf::from_str(files.cwd().as_str())?
+        } else {
+            let description = files
+                .get(dirfd as usize)
+                .map_err(map_process_file_table_error)?
+                .description();
+            let file = self
+                .open_files
+                .get(description)
+                .map_err(map_file_table_error)?;
+            let metadata = self.root_fs.fstat(&file).map_err(KernelError::Filesystem)?;
+            if metadata.kind != crate::kernel::fs::inode::InodeKind::Directory {
+                return Err(KernelError::Filesystem(VfsError::NotDirectory));
+            }
+            KernelPathBuf::from_str(file.path())?
+        };
+        for component in raw.split('/') {
+            let before = resolved.len;
+            resolved.push_component(component)?;
+            if component == ".." && resolved.len < root_len {
+                resolved.truncate_to_root(root_len);
+            } else if before < root_len {
+                resolved.truncate_to_root(root_len);
+            }
+        }
+        resolved.as_path()?;
+        Ok(resolved)
     }
 
     fn user_path(&self, path_ptr: u64) -> KernelResult<Path<'_>> {
-        let bytes = user_cstr(path_ptr)?;
-        let raw = core::str::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)?;
+        let raw = self.user_path_str(path_ptr)?;
         Path::new(raw).map_err(map_path_error)
+    }
+
+    fn user_path_str(&self, path_ptr: u64) -> KernelResult<&'_ str> {
+        let bytes = user_cstr(path_ptr)?;
+        core::str::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
     }
 
     fn process_files(
@@ -1139,6 +1525,63 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .as_mut()
             .ok_or(KernelError::UnknownProcess)?
             .files)
+    }
+
+    fn duplicate_fd(
+        &mut self,
+        pid: ProcessId,
+        old_fd: usize,
+        min_fd: usize,
+        flags: DescriptorFlags,
+    ) -> KernelResult<u64> {
+        let description = self.fd_description(pid, old_fd)?;
+        self.open_files
+            .increment_ref_count(description)
+            .map_err(map_file_table_error)?;
+        match self
+            .process_files_mut(pid)?
+            .open_at_or_above(description, flags, min_fd)
+        {
+            Ok(fd) => Ok(fd as u64),
+            Err(error) => {
+                let _ = self.close_open_description(description);
+                Err(map_process_file_table_error(error))
+            }
+        }
+    }
+
+    fn duplicate_fd_to(
+        &mut self,
+        pid: ProcessId,
+        old_fd: usize,
+        new_fd: usize,
+        flags: DescriptorFlags,
+        reject_same: bool,
+    ) -> KernelResult<u64> {
+        let description = self.fd_description(pid, old_fd)?;
+        if old_fd == new_fd {
+            if reject_same {
+                return Err(KernelError::InvalidArgument);
+            }
+            return Ok(new_fd as u64);
+        }
+        self.open_files
+            .increment_ref_count(description)
+            .map_err(map_file_table_error)?;
+        let replaced = match self
+            .process_files_mut(pid)?
+            .duplicate_to(new_fd, description, flags)
+        {
+            Ok(previous) => previous,
+            Err(error) => {
+                let _ = self.close_open_description(description);
+                return Err(map_process_file_table_error(error));
+            }
+        };
+        if let Some(previous) = replaced {
+            self.close_open_description(previous.description())?;
+        }
+        Ok(new_fd as u64)
     }
 
     fn fd_description(&self, pid: ProcessId, fd: usize) -> KernelResult<FileDescriptionId> {
@@ -1188,7 +1631,15 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         &mut self,
         table: &mut crate::kernel::process::ProcessFileTable<MAX_OPEN_FILES>,
     ) {
-        for description in table.clear().iter().flatten() {
+        let closed = table.clear();
+        self.release_description_ids(&closed);
+    }
+
+    fn release_description_ids(
+        &mut self,
+        descriptions: &[Option<FileDescriptionId>; MAX_OPEN_FILES],
+    ) {
+        for description in descriptions.iter().flatten() {
             let _ = self.close_open_description(*description);
         }
     }

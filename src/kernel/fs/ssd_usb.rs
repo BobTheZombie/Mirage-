@@ -673,7 +673,7 @@ impl FileSystem for SsdUsbFileSystem {
 
     fn symlink(
         &self,
-        target: Path<'_>,
+        target: &str,
         link_path: Path<'_>,
         _credentials: Credentials,
     ) -> Result<(), FsError> {
@@ -687,7 +687,7 @@ impl FileSystem for SsdUsbFileSystem {
             name,
             InodeKind::Symlink,
             Permissions::read_write(),
-            target.as_str().as_bytes(),
+            target.as_bytes(),
         )?;
         drop(state);
         self.sync_block_device()?;

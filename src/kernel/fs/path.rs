@@ -19,27 +19,35 @@ pub struct Path<'a> {
 
 impl<'a> Path<'a> {
     pub fn new(raw: &'a str) -> Result<Self, PathError> {
+        Self::validate(raw, true)
+    }
+
+    pub fn new_unchecked_rooted(raw: &'a str) -> Result<Self, PathError> {
+        Self::validate(raw, false)
+    }
+
+    fn validate(raw: &'a str, require_absolute: bool) -> Result<Self, PathError> {
         if raw.is_empty() {
             return Err(PathError::Empty);
         }
         if raw.len() > MAX_PATH_BYTES {
             return Err(PathError::TooLong);
         }
-        if !raw.starts_with('/') {
+        if require_absolute && !raw.starts_with('/') {
             return Err(PathError::NotAbsolute);
         }
 
         let mut component_len = 0usize;
         for byte in raw.bytes() {
             match byte {
+                0 => return Err(PathError::InvalidByte),
                 b'/' => component_len = 0,
-                b'.' | b'-' | b'_' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' => {
+                _ => {
                     component_len += 1;
                     if component_len > MAX_COMPONENT_BYTES {
                         return Err(PathError::ComponentTooLong);
                     }
                 }
-                _ => return Err(PathError::InvalidByte),
             }
         }
 
@@ -51,7 +59,11 @@ impl<'a> Path<'a> {
     }
 
     pub const fn is_root(self) -> bool {
-        self.raw.len() == 1
+        self.raw.len() == 1 && self.raw.as_bytes()[0] == b'/'
+    }
+
+    pub const fn is_absolute(self) -> bool {
+        self.raw.as_bytes()[0] == b'/'
     }
 
     pub const fn components(self) -> Components<'a> {

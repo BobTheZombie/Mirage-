@@ -1,6 +1,9 @@
 //! Open file descriptions, descriptor flags, and fixed-capacity registries.
 
-use crate::kernel::fs::inode::InodeId;
+use crate::kernel::fs::{
+    inode::InodeId,
+    path::{Path, MAX_PATH_BYTES},
+};
 
 /// POSIX-style access mode for an open file description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,26 +112,44 @@ pub struct File {
     cursor: u64,
     mode: FileMode,
     flags: OpenFlags,
+    path: [u8; MAX_PATH_BYTES],
+    path_len: usize,
 }
 
 impl File {
     pub const fn new(inode: InodeId, mode: FileMode) -> Self {
+        let mut path = [0u8; MAX_PATH_BYTES];
+        path[0] = b'/';
         Self {
             inode,
             cursor: 0,
             mode,
             flags: OpenFlags::EMPTY,
+            path,
+            path_len: 1,
         }
     }
 
     pub const fn with_flags(inode: InodeId, flags: OpenFlags) -> Self {
         let file_flags = flags.without_descriptor_flags();
+        let mut path = [0u8; MAX_PATH_BYTES];
+        path[0] = b'/';
         Self {
             inode,
             cursor: 0,
             mode: file_flags.access_mode(),
             flags: file_flags,
+            path,
+            path_len: 1,
         }
+    }
+
+    pub fn with_path(mut self, path: Path<'_>) -> Self {
+        let raw = path.as_str().as_bytes();
+        self.path = [0u8; MAX_PATH_BYTES];
+        self.path[..raw.len()].copy_from_slice(raw);
+        self.path_len = raw.len();
+        self
     }
 
     pub const fn inode(self) -> InodeId {
@@ -145,6 +166,10 @@ impl File {
 
     pub const fn flags(self) -> OpenFlags {
         self.flags
+    }
+
+    pub fn path(&self) -> &str {
+        unsafe { core::str::from_utf8_unchecked(&self.path[..self.path_len]) }
     }
 
     pub const fn is_append(self) -> bool {
