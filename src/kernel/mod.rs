@@ -9,6 +9,7 @@ pub mod memory;
 pub mod process;
 pub mod scheduler;
 pub mod services;
+pub mod spawn;
 pub mod sync;
 pub mod syscall;
 pub mod thread;
@@ -32,6 +33,10 @@ use crate::kernel::process::{
     ProcessPriority, ProcessState, SessionId, SignalAction, SignalMask, SIGCHLD, SIGKILL, SIGTERM,
 };
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
+use crate::kernel::spawn::{
+    dependencies_ready, DefaultServiceStartupReport, DependencyStatus, ServiceManifest,
+    ServiceStartupReport, StartupState, DEFAULT_STARTUP_MANIFEST,
+};
 use crate::kernel::syscall::{
     SyscallContext, SyscallErrorCode, SyscallNumber, MIRAGE_SYSCALL_ERROR_BIT,
 };
@@ -274,6 +279,78 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
     pub fn spawn_initial_process(&mut self, creds: Credentials) -> KernelResult<ProcessId> {
         self.spawn_process(0, ProcessPriority::Critical, None, creds)
+    }
+
+    pub fn bootstrap_services(&mut self) -> DefaultServiceStartupReport {
+        self.spawn_services(&DEFAULT_STARTUP_MANIFEST)
+    }
+
+    pub fn spawn_services<const CAP: usize>(
+        &mut self,
+        manifest: &ServiceManifest<CAP>,
+    ) -> ServiceStartupReport<CAP> {
+        let mut report = ServiceStartupReport::from_manifest(manifest);
+
+        loop {
+            let mut made_progress = false;
+            let mut pending = 0usize;
+            let mut idx = 0usize;
+
+            while idx < report.len() {
+                if let Some(record) = report.record(idx) {
+                    if record.state == StartupState::Pending {
+                        match dependencies_ready(record.descriptor, &report) {
+                            DependencyStatus::Ready(parent) => {
+                                report.set_starting(idx);
+                                let spawned = if let Some(parent_pid) = parent {
+                                    self.spawn_child_process(
+                                        parent_pid,
+                                        record.descriptor.entry_point,
+                                        record.descriptor.priority,
+                                        record.descriptor.credentials,
+                                    )
+                                } else {
+                                    self.spawn_initial_process(record.descriptor.credentials)
+                                };
+
+                                match spawned {
+                                    Ok(pid) => report.set_running(idx, pid),
+                                    Err(error) => report.set_failed(idx, error),
+                                }
+                                made_progress = true;
+                            }
+                            DependencyStatus::Waiting => {
+                                pending += 1;
+                            }
+                            DependencyStatus::Failed => {
+                                report.set_failed(idx, KernelError::InvalidArgument);
+                                made_progress = true;
+                            }
+                        }
+                    }
+                }
+                idx += 1;
+            }
+
+            if pending == 0 {
+                break;
+            }
+
+            if !made_progress {
+                let mut fail_idx = 0usize;
+                while fail_idx < report.len() {
+                    if let Some(record) = report.record(fail_idx) {
+                        if record.state == StartupState::Pending {
+                            report.set_failed(fail_idx, KernelError::InvalidArgument);
+                        }
+                    }
+                    fail_idx += 1;
+                }
+                break;
+            }
+        }
+
+        report
     }
 
     pub fn spawn_child_process(
@@ -2572,6 +2649,46 @@ mod tests {
             idx += 1;
         }
         saw_thread
+    }
+
+    #[test]
+    fn bootstrap_services_starts_l2_before_device_daemons() {
+        let mut kernel = boot_kernel();
+
+        let report = kernel.bootstrap_services();
+
+        assert!(report.all_running());
+        let l2 = report
+            .pid(crate::kernel::spawn::ServiceId::L2Subkernel)
+            .unwrap();
+        assert_eq!(l2.raw(), 1);
+        assert_eq!(
+            report.state(crate::kernel::spawn::ServiceId::Displayd),
+            Some(crate::kernel::spawn::StartupState::Running)
+        );
+        assert_eq!(
+            report.state(crate::kernel::spawn::ServiceId::Networkd),
+            Some(crate::kernel::spawn::StartupState::Running)
+        );
+        assert_eq!(
+            report.state(crate::kernel::spawn::ServiceId::Inputd),
+            Some(crate::kernel::spawn::StartupState::Running)
+        );
+
+        let mut idx = 0usize;
+        let mut child_count = 0usize;
+        while idx < Kernel::<4, 4>::THREAD_CAPACITY {
+            if idx < kernel.process_table.len() {
+                if let Some(pcb) = kernel.process_table[idx] {
+                    if pcb.pid != l2 {
+                        assert_eq!(pcb.parent, Some(l2));
+                        child_count += 1;
+                    }
+                }
+            }
+            idx += 1;
+        }
+        assert_eq!(child_count, 3);
     }
 
     #[test]
