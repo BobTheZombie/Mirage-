@@ -13,6 +13,9 @@
 //! it captures the essential mechanics one would expect from a Linux-like 64-bit kernel
 //! written in Rust.
 
+#[cfg(feature = "qfs-std")]
+extern crate std;
+
 pub mod arch;
 pub mod boot;
 pub mod kernel;
@@ -21,10 +24,10 @@ pub mod librust;
 pub mod stdlib;
 pub mod subkernel;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 use core::panic::PanicInfo;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     crate::arch::x86_64::panic_halt()

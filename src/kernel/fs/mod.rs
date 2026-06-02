@@ -12,6 +12,8 @@ pub mod mount;
 pub mod path;
 pub mod permissions;
 pub mod qfs;
+#[cfg(feature = "qfs-std")]
+pub mod qfs_std;
 pub mod ssd_usb;
 pub mod stdlib;
 pub mod vfs;
@@ -25,6 +27,9 @@ pub use inode::{Dentry, DirEntry, Inode, InodeId, InodeKind, InodeMetadata, Stat
 pub use mount::{Mount, MountError, MountTable};
 pub use path::{Path, PathError, MAX_COMPONENT_BYTES, MAX_PATH_BYTES};
 pub use permissions::{AccessMode, Credentials as FsCredentials, Permissions};
+#[cfg(feature = "qfs-std")]
+pub use qfs_std::StdQfsBlockDevice;
+
 pub use qfs::{
     QfsBookHeader, QfsBookIndexEntry, QfsBookRole, QfsChapterIndexEntry, QfsFileSystem,
     QfsInodeRecord, QfsJournalRecord, QfsJournalRecordKind, QfsPageLocation, QfsSuperblock,
