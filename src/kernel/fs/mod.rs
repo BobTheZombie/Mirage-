@@ -13,10 +13,10 @@ pub mod permissions;
 pub mod ssd_usb;
 pub mod vfs;
 
-pub use file::{FileHandle, FileMode};
-pub use inode::{InodeId, InodeKind, InodeMetadata};
+pub use file::{File, FileHandle, FileMode, FileTable, FileTableError, OpenFlags};
+pub use inode::{Dentry, DirEntry, Inode, InodeId, InodeKind, InodeMetadata, Stat};
 pub use mount::{Mount, MountError, MountTable};
 pub use path::{Path, PathError, MAX_COMPONENT_BYTES, MAX_PATH_BYTES};
 pub use permissions::{AccessMode, Credentials as FsCredentials, Permissions};
 pub use ssd_usb::{SsdUsbFileSystem, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_VOLUME_NODES};
-pub use vfs::{FileSystem, FsError};
+pub use vfs::{FileSystem, FsError, SuperBlock, VfsError};
