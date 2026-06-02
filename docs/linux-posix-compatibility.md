@@ -34,7 +34,9 @@ already represented in `SyscallNumber`:
 - `mkdirat`, `unlinkat`, `renameat2`
 - `ftruncate`, `fsync`
 - `mount` only accepts the existing root target and otherwise reports an
-  unsupported operation
+  unsupported operation. The implicit/default root filesystem type is `qfs`;
+  explicit root mount requests for `qfs`, `ext4`, `ssd_usb`, or `ssd-usb` are
+  recognized so older block backends can still be selected by name.
 
 ## Errno compatibility
 
@@ -63,7 +65,8 @@ The following deviations are intentional in this target:
   out-of-memory style syscall error/`ENOMEM` at the libc layer.
 - `mount` is a capability placeholder for the root filesystem and does not model
   Linux mount namespaces, propagation, bind mounts, or filesystem-type-specific
-  options.
+  options; filesystem type handling is limited to the default `qfs` root and
+  the explicitly recognized `ext4`/`ssd_usb` compatibility names.
 - Signals, `fork`, `execve`, Linux `fcntl` operations, advisory locks,
   `O_PATH`, `O_TMPFILE`, leases, epoll/inotify, and namespace semantics are not
   part of the current compatibility boundary.

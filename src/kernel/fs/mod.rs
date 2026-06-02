@@ -1,9 +1,9 @@
 //! Heap-free virtual filesystem scaffolding for Mirage kernel storage.
 //!
 //! The module mirrors the fixed-table style used by the rest of `src/kernel`:
-//! paths are borrowed, mount state is stored in const-generic arrays, and the
-//! SSD/USB implementation uses bounded inline node/data storage while syncing
-//! metadata and file contents through a sector-addressed block-device trait.
+//! paths are borrowed, mount state is stored in const-generic arrays, and QFS
+//! is wired as the default root filesystem while legacy SSD/USB and ext4
+//! backends remain available for explicit mounts and tooling.
 
 pub mod ext4;
 pub mod file;
