@@ -15,8 +15,13 @@ crate-type = ["staticlib", "rlib"]
 name = "mirage-kernel"
 path = "src/main.rs"
 
+[features]
+default = []
+# Enables host/testing QFS adapters backed by the Rust standard library.
+qfs-std = []
+
 [dependencies]
-# The kernel is strictly no_std and does not currently rely on external crates.
+# The default kernel build is strictly no_std and does not currently rely on external crates.
 
 [profile.dev]
 panic = "abort"
