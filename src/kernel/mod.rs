@@ -20,9 +20,9 @@ use crate::kernel::device::{
     MirageDeviceDescriptor,
 };
 use crate::kernel::fs::{
-    DescriptorFlags, DirEntry, FileDescriptionId, FileSystem, FileTable, FileTableError,
-    FsCredentials, OpenFlags, Path, PathError, Permissions, SsdUsbFileSystem, Stat, VfsError,
-    MAX_PATH_BYTES,
+    open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, CDirEntry,
+    CStat, DescriptorFlags, DirEntry, FileDescriptionId, FileSystem, FileTable, FileTableError,
+    FsCredentials, Path, PathError, SsdUsbFileSystem, VfsError, MAX_PATH_BYTES,
 };
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
@@ -618,7 +618,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
     fn syscall_openat(&mut self, context: SyscallContext) -> KernelResult<u64> {
         let path = self.absolute_user_path(context.arg(0), context.arg(1))?;
-        let raw_flags = OpenFlags::from_bits(context.arg(2) as u32);
+        let raw_flags = open_flags_from_libc(context.arg(2) as u32);
         let descriptor_flags = DescriptorFlags::from_open_flags(raw_flags);
         let credentials = fs_credentials_for(context.caller);
         let file = self
@@ -739,7 +739,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
     fn syscall_newfstatat(&self, context: SyscallContext) -> KernelResult<u64> {
         let path_ptr = context.arg(1);
-        let out = user_out_ptr::<Stat>(context.arg(2))?;
+        let out = user_out_ptr::<CStat>(context.arg(2))?;
         let stat = if path_ptr == 0 {
             let description = self.fd_description(context.caller, context.arg(0) as usize)?;
             let file = self
@@ -752,34 +752,45 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.root_fs.stat(path)
         }
         .map_err(KernelError::Filesystem)?;
-        unsafe { out.write(stat) };
+        unsafe { out.write(CStat::from_kernel(stat)) };
         Ok(0)
     }
 
     fn syscall_getdents64(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        let entries = user_slice_mut_typed::<DirEntry>(context.arg(1), context.arg(2) as usize)?;
+        let entries = user_slice_mut_typed::<CDirEntry>(context.arg(1), context.arg(2) as usize)?;
         let fd = context.arg(0) as usize;
         let description = self.fd_description(context.caller, fd)?;
         let file = self
             .open_files
             .get(description)
             .map_err(map_file_table_error)?;
-        let count = self
-            .root_fs
-            .readdir_inode(file.inode(), file.cursor() as usize, entries)
-            .map_err(KernelError::Filesystem)?;
+        let mut cursor = file.cursor() as usize;
+        let mut written = 0usize;
+        while written < entries.len() {
+            let mut kernel_entry = [DirEntry::empty(); 1];
+            let count = self
+                .root_fs
+                .readdir_inode(file.inode(), cursor, &mut kernel_entry)
+                .map_err(KernelError::Filesystem)?;
+            if count == 0 {
+                break;
+            }
+            cursor += count;
+            entries[written] = CDirEntry::from_kernel(&kernel_entry[0], cursor);
+            written += 1;
+        }
         self.open_files
             .get_mut(description)
             .map_err(map_file_table_error)?
-            .advance(count);
-        Ok(count as u64)
+            .advance(written);
+        Ok(written as u64)
     }
 
     fn syscall_mkdirat(&self, context: SyscallContext) -> KernelResult<u64> {
         let path = self.absolute_user_path(context.arg(0), context.arg(1))?;
-        let requested = context.arg(2) as u16;
-        let umask = self.process_files(context.caller)?.umask().bits();
-        let mode = Permissions::new(requested & !umask, context.caller.raw() as u16, 0);
+        let requested = context.arg(2) as u32;
+        let umask = self.process_files(context.caller)?.umask().bits() as u32;
+        let mode = permissions_from_libc_mode(requested & !umask, context.caller.raw() as u16, 0);
         self.root_fs
             .mkdir(path, mode, fs_credentials_for(context.caller))
             .map(|_| 0)
@@ -1428,28 +1439,7 @@ fn syscall_error_code(error: KernelError) -> SyscallErrorCode {
 }
 
 fn vfs_syscall_error_code(error: VfsError) -> SyscallErrorCode {
-    match error {
-        VfsError::InvalidPath(PathError::TooLong)
-        | VfsError::InvalidPath(PathError::ComponentTooLong)
-        | VfsError::NameTooLong => SyscallErrorCode::NameTooLong,
-        VfsError::InvalidPath(PathError::Empty) | VfsError::NotFound => {
-            SyscallErrorCode::FileNotFound
-        }
-        VfsError::InvalidPath(PathError::NotAbsolute)
-        | VfsError::InvalidPath(PathError::InvalidByte)
-        | VfsError::InvalidArgument => SyscallErrorCode::InvalidArgument,
-        VfsError::NotDirectory => SyscallErrorCode::NotDirectory,
-        VfsError::IsDirectory => SyscallErrorCode::IsDirectory,
-        VfsError::AlreadyExists => SyscallErrorCode::AlreadyExists,
-        VfsError::PermissionDenied => SyscallErrorCode::PermissionDenied,
-        VfsError::ReadOnly => SyscallErrorCode::ReadOnlyFilesystem,
-        VfsError::NoSpace => SyscallErrorCode::NoSpace,
-        VfsError::InvalidHandle => SyscallErrorCode::BadFileDescriptor,
-        VfsError::Busy => SyscallErrorCode::FilesystemBusy,
-        VfsError::CrossDevice => SyscallErrorCode::CrossDevice,
-        VfsError::TooManyLinks => SyscallErrorCode::TooManyLinks,
-        VfsError::Unsupported => SyscallErrorCode::UnsupportedFilesystem,
-    }
+    syscall_error_code_from_vfs(error)
 }
 
 fn isolation_syscall_error_code(reason: IsolationError) -> SyscallErrorCode {
@@ -1641,10 +1631,9 @@ mod tests {
                     [
                         AT_FDCWD as u64,
                         path.as_ptr() as u64,
-                        OpenFlags::RDWR
-                            .union(OpenFlags::CREATE)
-                            .union(OpenFlags::CLOSE_ON_EXEC)
-                            .bits() as u64,
+                        (crate::kernel::fs::O_RDWR
+                            | crate::kernel::fs::O_CREAT
+                            | crate::kernel::fs::O_CLOEXEC) as u64,
                         0,
                         0,
                         0,

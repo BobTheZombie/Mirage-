@@ -8,7 +8,7 @@
 use core::ffi::c_void;
 
 use crate::kernel::device::{DeviceId, MirageDeviceDescriptor};
-use crate::kernel::fs::{DirEntry, Stat, VfsError};
+use crate::kernel::fs::{errno_from_vfs, CDirEntry, CStat};
 use crate::kernel::ipc::Message;
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{ProcessId, ProcessPriority};
@@ -375,7 +375,7 @@ pub unsafe extern "C" fn mirage_lseek(
     )
 }
 
-/// Mirage `statx(2)`-compatible wrapper. The kernel currently writes a Mirage `Stat`.
+/// Mirage `statx(2)`-compatible wrapper writing a C-compatible stat payload.
 #[no_mangle]
 pub unsafe extern "C" fn mirage_statx(
     kernel: *mut DefaultKernel,
@@ -384,7 +384,7 @@ pub unsafe extern "C" fn mirage_statx(
     path: *const u8,
     _flags: u32,
     _mask: u32,
-    out: *mut Stat,
+    out: *mut CStat,
 ) -> isize {
     if path.is_null() || out.is_null() {
         return -(MIRAGE_EFAULT as isize);
@@ -403,7 +403,7 @@ pub unsafe extern "C" fn mirage_newfstatat(
     caller: u64,
     dirfd: i32,
     path: *const u8,
-    out: *mut Stat,
+    out: *mut CStat,
     flags: u32,
 ) -> isize {
     let path_arg = if path.is_null() { 0 } else { path as u64 };
@@ -423,7 +423,7 @@ pub unsafe extern "C" fn mirage_stat(
     kernel: *mut DefaultKernel,
     caller: u64,
     path: *const u8,
-    out: *mut Stat,
+    out: *mut CStat,
 ) -> isize {
     mirage_newfstatat(kernel, caller, MIRAGE_AT_FDCWD, path, out, 0)
 }
@@ -433,7 +433,7 @@ pub unsafe extern "C" fn mirage_fstat(
     kernel: *mut DefaultKernel,
     caller: u64,
     fd: i32,
-    out: *mut Stat,
+    out: *mut CStat,
 ) -> isize {
     mirage_newfstatat(kernel, caller, fd, core::ptr::null(), out, 0)
 }
@@ -583,7 +583,7 @@ pub unsafe extern "C" fn mirage_getdents64(
     kernel: *mut DefaultKernel,
     caller: u64,
     fd: i32,
-    entries: *mut DirEntry,
+    entries: *mut CDirEntry,
     count: usize,
 ) -> isize {
     if count > 0 && entries.is_null() {
@@ -663,7 +663,7 @@ pub unsafe extern "C" fn stat(
     kernel: *mut DefaultKernel,
     caller: u64,
     path: *const u8,
-    out: *mut Stat,
+    out: *mut CStat,
 ) -> isize {
     mirage_stat(kernel, caller, path, out)
 }
@@ -673,7 +673,7 @@ pub unsafe extern "C" fn fstat(
     kernel: *mut DefaultKernel,
     caller: u64,
     fd: i32,
-    out: *mut Stat,
+    out: *mut CStat,
 ) -> isize {
     mirage_fstat(kernel, caller, fd, out)
 }
@@ -686,7 +686,7 @@ pub unsafe extern "C" fn statx(
     path: *const u8,
     flags: u32,
     mask: u32,
-    out: *mut Stat,
+    out: *mut CStat,
 ) -> isize {
     mirage_statx(kernel, caller, dirfd, path, flags, mask, out)
 }
@@ -785,7 +785,7 @@ pub unsafe extern "C" fn getdents64(
     kernel: *mut DefaultKernel,
     caller: u64,
     fd: i32,
-    entries: *mut DirEntry,
+    entries: *mut CDirEntry,
     count: usize,
 ) -> isize {
     mirage_getdents64(kernel, caller, fd, entries, count)
@@ -917,8 +917,8 @@ fn libc_errno(error: KernelError) -> i32 {
     }
 }
 
-fn libc_vfs_errno(error: VfsError) -> i32 {
-    error.linux_errno()
+fn libc_vfs_errno(error: crate::kernel::fs::VfsError) -> i32 {
+    errno_from_vfs(error)
 }
 
 fn syscall<const MAX_PROC: usize, const MSG_DEPTH: usize>(

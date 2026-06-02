@@ -12,6 +12,7 @@ pub mod mount;
 pub mod path;
 pub mod permissions;
 pub mod ssd_usb;
+pub mod stdlib;
 pub mod vfs;
 
 pub use ext4::{Ext4Backend, Ext4Error, Ext4Superblock, SsdUsbOptions};
@@ -24,4 +25,11 @@ pub use mount::{Mount, MountError, MountTable};
 pub use path::{Path, PathError, MAX_COMPONENT_BYTES, MAX_PATH_BYTES};
 pub use permissions::{AccessMode, Credentials as FsCredentials, Permissions};
 pub use ssd_usb::{SsdUsbFileSystem, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_VOLUME_NODES};
+pub use stdlib::{
+    errno_from_vfs, negative_errno_from_vfs, open_flags_from_libc, permissions_from_libc_mode,
+    syscall_error_code_from_vfs, CDirEntry, CStat, DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG,
+    DT_SOCK, DT_UNKNOWN, F_OK, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW,
+    O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, R_OK, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT,
+    S_IFREG, S_IFSOCK, W_OK, X_OK,
+};
 pub use vfs::{FileSystem, FsError, SuperBlock, VfsError};
