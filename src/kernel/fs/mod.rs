@@ -15,7 +15,10 @@ pub mod ssd_usb;
 pub mod vfs;
 
 pub use ext4::{Ext4Backend, Ext4Error, Ext4Superblock, SsdUsbOptions};
-pub use file::{File, FileHandle, FileMode, FileTable, FileTableError, OpenFlags};
+pub use file::{
+    DescriptorFlags, File, FileDescriptionId, FileHandle, FileMode, FileTable, FileTableError,
+    OpenFileDescription, OpenFlags,
+};
 pub use inode::{Dentry, DirEntry, Inode, InodeId, InodeKind, InodeMetadata, Stat};
 pub use mount::{Mount, MountError, MountTable};
 pub use path::{Path, PathError, MAX_COMPONENT_BYTES, MAX_PATH_BYTES};

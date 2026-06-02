@@ -43,6 +43,9 @@ boot/limine/
   size, higher-half direct map, framebuffer, memory map, RSDP and executable address data.
 * **Deterministic resource management:** fixed-size tables and ring buffers are used instead of
   heap allocations, making the control flow easy to audit.
+* **Bounded Linux/POSIX target:** filesystem and descriptor APIs are guided by the supported
+  subset documented in `docs/linux-posix-compatibility.md`, not by an unbounded claim of complete
+  Linux compatibility.
 * **Security-aware IPC:** every message is tagged with a security class and must be authorised by
   the L2 kernel before delivery.
 * **Composable design:** the separation between the L1 core and the L2 security kernel allows

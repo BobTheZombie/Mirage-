@@ -33,6 +33,37 @@ impl From<PathError> for VfsError {
     }
 }
 
+impl VfsError {
+    /// Linux errno-compatible numeric value for this VFS failure.
+    ///
+    /// Mirage keeps structured internal errors, but syscall/libc boundaries use
+    /// these errno assignments so applications can reason about failures with
+    /// POSIX conventions. Path syntax failures that do not have a direct Linux
+    /// equivalent are reported as `EINVAL`.
+    pub const fn linux_errno(self) -> i32 {
+        match self {
+            VfsError::InvalidPath(PathError::TooLong)
+            | VfsError::InvalidPath(PathError::ComponentTooLong)
+            | VfsError::NameTooLong => 36,
+            VfsError::InvalidPath(PathError::Empty) | VfsError::NotFound => 2,
+            VfsError::InvalidPath(PathError::NotAbsolute)
+            | VfsError::InvalidPath(PathError::InvalidByte)
+            | VfsError::InvalidArgument => 22,
+            VfsError::NotDirectory => 20,
+            VfsError::IsDirectory => 21,
+            VfsError::AlreadyExists => 17,
+            VfsError::PermissionDenied => 13,
+            VfsError::ReadOnly => 30,
+            VfsError::NoSpace => 28,
+            VfsError::InvalidHandle => 9,
+            VfsError::Busy => 16,
+            VfsError::CrossDevice => 18,
+            VfsError::TooManyLinks => 31,
+            VfsError::Unsupported => 95,
+        }
+    }
+}
+
 /// Backward-compatible error name used by early filesystem code.
 pub type FsError = VfsError;
 

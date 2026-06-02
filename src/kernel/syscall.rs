@@ -63,11 +63,40 @@ pub enum SyscallErrorCode {
     CrossDevice = 24,
     TooManyLinks = 25,
     UnsupportedFilesystem = 26,
+    NameTooLong = 27,
 }
 
 impl SyscallErrorCode {
     pub const fn raw(self) -> u64 {
         self as u64
+    }
+
+    pub const fn linux_errno(self) -> i32 {
+        match self {
+            Self::ProcessTableFull | Self::SchedulerFull | Self::ThreadTableFull => MIRAGE_ENOMEM,
+            Self::NoSuchProcess | Self::NoSuchThread => MIRAGE_ESRCH,
+            Self::QueueFull => MIRAGE_ENOBUFS,
+            Self::QueueEmpty => MIRAGE_EAGAIN,
+            Self::PermissionDenied | Self::IsolationFault => MIRAGE_EACCES,
+            Self::NoSuchDevice => MIRAGE_ENODEV,
+            Self::DeviceFault => MIRAGE_EIO,
+            Self::InvalidSyscall => MIRAGE_ENOSYS,
+            Self::InvalidArgument => MIRAGE_EINVAL,
+            Self::BadAddress => MIRAGE_EFAULT,
+            Self::OutOfMemory => MIRAGE_ENOMEM,
+            Self::FileNotFound => MIRAGE_ENOENT,
+            Self::BadFileDescriptor => MIRAGE_EBADF,
+            Self::NotDirectory => MIRAGE_ENOTDIR,
+            Self::IsDirectory => MIRAGE_EISDIR,
+            Self::AlreadyExists => MIRAGE_EEXIST,
+            Self::ReadOnlyFilesystem => MIRAGE_EROFS,
+            Self::NoSpace => MIRAGE_ENOSPC,
+            Self::FilesystemBusy => MIRAGE_EBUSY,
+            Self::CrossDevice => MIRAGE_EXDEV,
+            Self::TooManyLinks => MIRAGE_EMLINK,
+            Self::UnsupportedFilesystem => MIRAGE_ENOTSUP,
+            Self::NameTooLong => MIRAGE_ENAMETOOLONG,
+        }
     }
 }
 
@@ -93,6 +122,7 @@ pub const MIRAGE_EINVAL: i32 = 22;
 pub const MIRAGE_ENOSPC: i32 = 28;
 pub const MIRAGE_EROFS: i32 = 30;
 pub const MIRAGE_EMLINK: i32 = 31;
+pub const MIRAGE_ENAMETOOLONG: i32 = 36;
 pub const MIRAGE_ENOSYS: i32 = 38;
 pub const MIRAGE_ENOTSUP: i32 = 95;
 pub const MIRAGE_ENOBUFS: i32 = 105;
