@@ -23,7 +23,6 @@ pub mod kernel;
 pub mod libc;
 #[cfg(not(feature = "qfs-std"))]
 pub mod librust;
-#[cfg(not(feature = "qfs-std"))]
 pub mod stdlib;
 pub mod subkernel;
 

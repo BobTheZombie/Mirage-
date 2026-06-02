@@ -28,10 +28,7 @@ pub use mount::{Mount, MountError, MountTable};
 pub use path::{Path, PathError, MAX_COMPONENT_BYTES, MAX_PATH_BYTES};
 pub use permissions::{AccessMode, Credentials as FsCredentials, Permissions};
 #[cfg(feature = "qfs-std")]
-pub use qfs_std::{
-    dump_superblock, fsck_image, mkfs_image, stat_image, QfsFormatReport, QfsImageReport,
-    QfsStatReport, QfsToolError, StdQfsBlockDevice,
-};
+pub use qfs_std::StdQfsBlockDevice;
 
 pub use qfs::{
     QfsBookHeader, QfsBookIndexEntry, QfsBookRole, QfsChapterIndexEntry, QfsFileSystem,

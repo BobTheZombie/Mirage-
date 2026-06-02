@@ -2527,7 +2527,7 @@ fn decode_security_class(raw: u64) -> KernelResult<SecurityClass> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "qfs-std")))]
 mod tests {
     use super::*;
     use crate::kernel::memory::{PROT_EXECUTE, PROT_READ, PROT_WRITE};
