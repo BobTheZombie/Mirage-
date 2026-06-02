@@ -138,6 +138,16 @@ pub trait FileSystem {
         if !file.mode().can_write() {
             return Err(VfsError::PermissionDenied);
         }
+        }
+        let bytes = self.pread(file, buffer, file.cursor())?;
+        file.advance(bytes);
+        Ok(bytes)
+    }
+
+    fn write(&self, file: &mut File, data: &[u8]) -> Result<usize, VfsError> {
+        if !file.mode().can_write() {
+            return Err(VfsError::PermissionDenied);
+        }
         let bytes = self.pwrite(file, data, file.cursor())?;
         file.advance(bytes);
         Ok(bytes)

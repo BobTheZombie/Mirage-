@@ -356,6 +356,9 @@ impl SsdUsbFileSystem {
         if self.read_only {
             return Err(FsError::ReadOnly);
         }
+        self.state
+            .lock()
+            .create_node(parent, name, InodeKind::RegularFile, permissions, initial)
         let inode = self.state.lock().create_node(
             parent,
             name,
@@ -434,6 +437,7 @@ impl FileSystem for SsdUsbFileSystem {
         flags: OpenFlags,
         credentials: Credentials,
     ) -> Result<File, FsError> {
+        let metadata = self.lookup(path)?;
         let mut existed = true;
         let metadata = match self.lookup(path) {
             Ok(metadata) => metadata,
@@ -776,6 +780,9 @@ impl FileSystem for SsdUsbFileSystem {
         }
         updated.size = new_size;
         state.nodes[index] = Some(updated);
+        Ok(())
+    }
+
         drop(state);
         self.sync_block_device()?;
         Ok(())
