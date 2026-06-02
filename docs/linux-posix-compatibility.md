@@ -182,24 +182,31 @@ otherwise:
 Portable user code should migrate toward POSIX-shaped wrappers while keeping
 Mirage-native APIs isolated behind platform modules.
 
-### `src/libc.rs`
+### `src/libc/`
 
-- Prefer the unprefixed filesystem wrappers (`openat`, `open`, `close`, `read`,
-  `write`, `lseek`, `stat`, `fstat`, `statx`, `mkdir`, `mkdirat`, `unlink`,
-  `unlinkat`, `rename`, `renameat`, `renameat2`, `fsync`, `ftruncate`, and
-  `getdents64`) over direct calls to `mirage_*` filesystem symbols.
-- Treat `mirage_openat`, `mirage_read`, and similar prefixed symbols as
-  transitional C ABI aliases for existing Mirage-only callers. New code should
-  use POSIX/Linux-shaped names and reserve `mirage_*` for functionality that has
-  no POSIX-shaped equivalent.
-- Keep process, IPC, and device services (`getpid`, `spawn`, `send_ipc`,
-  `receive_ipc`, `receive_ipc_or_block`, `block_for_ipc`, `enumerate_devices`,
-  `device_info`, `device_read`, `device_write`, and the `mirage_device_*` C
-  symbols) in Mirage-specific adapter modules. Do not present them as POSIX or
-  Linux APIs until a compatibility revision defines their portable contract.
+- Prefer the unprefixed filesystem wrappers exported from `src/libc/mod.rs` over
+  direct calls to `mirage_*` filesystem symbols: open wrappers in
+  `src/libc/fcntl.rs` (`openat` and `open`), descriptor wrappers in
+  `src/libc/unistd.rs` (`close`, `read`, `write`, and `lseek`), stat and
+  filesystem mutation wrappers in `src/libc/sys_stat.rs` (`stat`, `fstat`,
+  `statx`, `mkdir`, `mkdirat`, `unlink`, `unlinkat`, `rename`, `renameat`,
+  `renameat2`, `fsync`, and `ftruncate`), and directory entry wrappers in
+  `src/libc/dirent.rs` (`getdents64`).
+- Treat `mirage_openat`, `mirage_read`, and similar prefixed symbols in
+  `src/libc/fcntl.rs`, `src/libc/unistd.rs`, `src/libc/sys_stat.rs`, and
+  `src/libc/dirent.rs` as transitional C ABI aliases for existing Mirage-only
+  callers. New code should use POSIX/Linux-shaped names and reserve `mirage_*`
+  for functionality that has no POSIX-shaped equivalent.
+- Keep process, IPC, and device services exported through `src/libc/mod.rs`
+  (`getpid`, `spawn`, `send_ipc`, `receive_ipc`, `receive_ipc_or_block`,
+  `block_for_ipc`, `enumerate_devices`, `device_info`, `device_read`,
+  `device_write`, and the `mirage_device_*` C symbols) in Mirage-specific
+  adapter modules. Do not present them as POSIX or Linux APIs until a
+  compatibility revision defines their portable contract.
 - When adding missing M1 exports such as `pread64` and `pwrite64`, route them
   through `SyscallNumber::Pread64` and `SyscallNumber::Pwrite64` rather than
   introducing new Mirage-only names first.
+- Use `src/libc/string.rs` for string/memory compatibility exports.
 
 ### `src/stdlib.rs`
 
