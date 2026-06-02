@@ -162,6 +162,66 @@ pub enum SyscallNumber {
     Ftruncate = 29,
     Fsync = 30,
     Mount = 31,
+
+    // Process lifecycle syscalls (100-119).
+    Fork = 100,
+    Execve = 101,
+    Exit = 102,
+    Wait4 = 103,
+    GetPpid = 104,
+    SetPgid = 105,
+    Setsid = 106,
+
+    // Credential syscalls (120-139).
+    GetUid = 120,
+    GetEuid = 121,
+    SetUid = 122,
+    GetGid = 123,
+    SetGid = 124,
+    GetGroups = 125,
+    SetGroups = 126,
+
+    // Signal syscalls (140-159).
+    RtSigaction = 140,
+    RtSigprocmask = 141,
+    Kill = 142,
+    RtSigreturn = 143,
+
+    // Time syscalls (160-179).
+    ClockGettime = 160,
+    Nanosleep = 161,
+    TimerCreate = 162,
+    TimerSettime = 163,
+    TimerGettime = 164,
+    TimerDelete = 165,
+
+    // Descriptor syscalls (180-199).
+    Dup = 180,
+    Dup2 = 181,
+    Dup3 = 182,
+    Fcntl = 183,
+    Ioctl = 184,
+
+    // Pipe/event syscalls (200-219).
+    Pipe2 = 200,
+    Poll = 201,
+    Pselect = 202,
+    Eventfd = 203,
+
+    // Networking syscalls (220-239).
+    Socket = 220,
+    Bind = 221,
+    Listen = 222,
+    Accept = 223,
+    Connect = 224,
+    Sendmsg = 225,
+    Recvmsg = 226,
+
+    // Thread/TLS syscalls (240-259).
+    Clone = 240,
+    Futex = 241,
+    SetThreadArea = 242,
+    ArchPrctl = 243,
 }
 
 impl SyscallNumber {
@@ -203,6 +263,50 @@ impl SyscallNumber {
             29 => Some(Self::Ftruncate),
             30 => Some(Self::Fsync),
             31 => Some(Self::Mount),
+            100 => Some(Self::Fork),
+            101 => Some(Self::Execve),
+            102 => Some(Self::Exit),
+            103 => Some(Self::Wait4),
+            104 => Some(Self::GetPpid),
+            105 => Some(Self::SetPgid),
+            106 => Some(Self::Setsid),
+            120 => Some(Self::GetUid),
+            121 => Some(Self::GetEuid),
+            122 => Some(Self::SetUid),
+            123 => Some(Self::GetGid),
+            124 => Some(Self::SetGid),
+            125 => Some(Self::GetGroups),
+            126 => Some(Self::SetGroups),
+            140 => Some(Self::RtSigaction),
+            141 => Some(Self::RtSigprocmask),
+            142 => Some(Self::Kill),
+            143 => Some(Self::RtSigreturn),
+            160 => Some(Self::ClockGettime),
+            161 => Some(Self::Nanosleep),
+            162 => Some(Self::TimerCreate),
+            163 => Some(Self::TimerSettime),
+            164 => Some(Self::TimerGettime),
+            165 => Some(Self::TimerDelete),
+            180 => Some(Self::Dup),
+            181 => Some(Self::Dup2),
+            182 => Some(Self::Dup3),
+            183 => Some(Self::Fcntl),
+            184 => Some(Self::Ioctl),
+            200 => Some(Self::Pipe2),
+            201 => Some(Self::Poll),
+            202 => Some(Self::Pselect),
+            203 => Some(Self::Eventfd),
+            220 => Some(Self::Socket),
+            221 => Some(Self::Bind),
+            222 => Some(Self::Listen),
+            223 => Some(Self::Accept),
+            224 => Some(Self::Connect),
+            225 => Some(Self::Sendmsg),
+            226 => Some(Self::Recvmsg),
+            240 => Some(Self::Clone),
+            241 => Some(Self::Futex),
+            242 => Some(Self::SetThreadArea),
+            243 => Some(Self::ArchPrctl),
             _ => None,
         }
     }
@@ -233,6 +337,51 @@ pub const MIRAGE_SYSCALL_RENAMEAT2: u64 = SyscallNumber::RenameAt2.raw();
 pub const MIRAGE_SYSCALL_FTRUNCATE: u64 = SyscallNumber::Ftruncate.raw();
 pub const MIRAGE_SYSCALL_FSYNC: u64 = SyscallNumber::Fsync.raw();
 pub const MIRAGE_SYSCALL_MOUNT: u64 = SyscallNumber::Mount.raw();
+
+pub const MIRAGE_SYSCALL_FORK: u64 = SyscallNumber::Fork.raw();
+pub const MIRAGE_SYSCALL_EXECVE: u64 = SyscallNumber::Execve.raw();
+pub const MIRAGE_SYSCALL_EXIT: u64 = SyscallNumber::Exit.raw();
+pub const MIRAGE_SYSCALL_WAIT4: u64 = SyscallNumber::Wait4.raw();
+pub const MIRAGE_SYSCALL_GETPPID: u64 = SyscallNumber::GetPpid.raw();
+pub const MIRAGE_SYSCALL_SETPGID: u64 = SyscallNumber::SetPgid.raw();
+pub const MIRAGE_SYSCALL_SETSID: u64 = SyscallNumber::Setsid.raw();
+pub const MIRAGE_SYSCALL_GETUID: u64 = SyscallNumber::GetUid.raw();
+pub const MIRAGE_SYSCALL_GETEUID: u64 = SyscallNumber::GetEuid.raw();
+pub const MIRAGE_SYSCALL_SETUID: u64 = SyscallNumber::SetUid.raw();
+pub const MIRAGE_SYSCALL_GETGID: u64 = SyscallNumber::GetGid.raw();
+pub const MIRAGE_SYSCALL_SETGID: u64 = SyscallNumber::SetGid.raw();
+pub const MIRAGE_SYSCALL_GETGROUPS: u64 = SyscallNumber::GetGroups.raw();
+pub const MIRAGE_SYSCALL_SETGROUPS: u64 = SyscallNumber::SetGroups.raw();
+pub const MIRAGE_SYSCALL_RT_SIGACTION: u64 = SyscallNumber::RtSigaction.raw();
+pub const MIRAGE_SYSCALL_RT_SIGPROCMASK: u64 = SyscallNumber::RtSigprocmask.raw();
+pub const MIRAGE_SYSCALL_KILL: u64 = SyscallNumber::Kill.raw();
+pub const MIRAGE_SYSCALL_RT_SIGRETURN: u64 = SyscallNumber::RtSigreturn.raw();
+pub const MIRAGE_SYSCALL_CLOCK_GETTIME: u64 = SyscallNumber::ClockGettime.raw();
+pub const MIRAGE_SYSCALL_NANOSLEEP: u64 = SyscallNumber::Nanosleep.raw();
+pub const MIRAGE_SYSCALL_TIMER_CREATE: u64 = SyscallNumber::TimerCreate.raw();
+pub const MIRAGE_SYSCALL_TIMER_SETTIME: u64 = SyscallNumber::TimerSettime.raw();
+pub const MIRAGE_SYSCALL_TIMER_GETTIME: u64 = SyscallNumber::TimerGettime.raw();
+pub const MIRAGE_SYSCALL_TIMER_DELETE: u64 = SyscallNumber::TimerDelete.raw();
+pub const MIRAGE_SYSCALL_DUP: u64 = SyscallNumber::Dup.raw();
+pub const MIRAGE_SYSCALL_DUP2: u64 = SyscallNumber::Dup2.raw();
+pub const MIRAGE_SYSCALL_DUP3: u64 = SyscallNumber::Dup3.raw();
+pub const MIRAGE_SYSCALL_FCNTL: u64 = SyscallNumber::Fcntl.raw();
+pub const MIRAGE_SYSCALL_IOCTL: u64 = SyscallNumber::Ioctl.raw();
+pub const MIRAGE_SYSCALL_PIPE2: u64 = SyscallNumber::Pipe2.raw();
+pub const MIRAGE_SYSCALL_POLL: u64 = SyscallNumber::Poll.raw();
+pub const MIRAGE_SYSCALL_PSELECT: u64 = SyscallNumber::Pselect.raw();
+pub const MIRAGE_SYSCALL_EVENTFD: u64 = SyscallNumber::Eventfd.raw();
+pub const MIRAGE_SYSCALL_SOCKET: u64 = SyscallNumber::Socket.raw();
+pub const MIRAGE_SYSCALL_BIND: u64 = SyscallNumber::Bind.raw();
+pub const MIRAGE_SYSCALL_LISTEN: u64 = SyscallNumber::Listen.raw();
+pub const MIRAGE_SYSCALL_ACCEPT: u64 = SyscallNumber::Accept.raw();
+pub const MIRAGE_SYSCALL_CONNECT: u64 = SyscallNumber::Connect.raw();
+pub const MIRAGE_SYSCALL_SENDMSG: u64 = SyscallNumber::Sendmsg.raw();
+pub const MIRAGE_SYSCALL_RECVMSG: u64 = SyscallNumber::Recvmsg.raw();
+pub const MIRAGE_SYSCALL_CLONE: u64 = SyscallNumber::Clone.raw();
+pub const MIRAGE_SYSCALL_FUTEX: u64 = SyscallNumber::Futex.raw();
+pub const MIRAGE_SYSCALL_SET_THREAD_AREA: u64 = SyscallNumber::SetThreadArea.raw();
+pub const MIRAGE_SYSCALL_ARCH_PRCTL: u64 = SyscallNumber::ArchPrctl.raw();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SyscallContext {
