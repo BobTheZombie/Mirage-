@@ -156,6 +156,10 @@ pub struct ThreadControlBlock {
     pub cpu_time: u128,
     pub signal_mask: SignalMask,
     pub active_signal: Option<u8>,
+    pub thread_group: ProcessId,
+    pub tls_base: u64,
+    pub shares_address_space: bool,
+    pub shares_descriptor_table: bool,
 }
 
 impl ThreadControlBlock {
@@ -177,6 +181,10 @@ impl ThreadControlBlock {
             cpu_time: 0,
             signal_mask: SignalMask::EMPTY,
             active_signal: None,
+            thread_group: process,
+            tls_base: 0,
+            shares_address_space: false,
+            shares_descriptor_table: false,
         }
     }
 
@@ -208,8 +216,23 @@ impl ThreadControlBlock {
         self.entry_point = entry_point;
         self.stack_pointer = stack_pointer;
         self.context = CpuContext::new(entry_point, stack_pointer, PrivilegeMode::User);
+        self.tls_base = 0;
         self.state = ThreadState::Ready;
         self.active_signal = None;
+    }
+
+    pub fn configure_clone_semantics(
+        &mut self,
+        thread_group: ProcessId,
+        tls_base: u64,
+        shares_address_space: bool,
+        shares_descriptor_table: bool,
+    ) {
+        self.thread_group = thread_group;
+        self.tls_base = tls_base;
+        self.context.fs = tls_base;
+        self.shares_address_space = shares_address_space;
+        self.shares_descriptor_table = shares_descriptor_table;
     }
 
     pub fn set_signal_mask(&mut self, mask: SignalMask) -> SignalMask {

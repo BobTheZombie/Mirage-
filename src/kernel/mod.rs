@@ -3,6 +3,7 @@
 
 pub mod cpu;
 pub mod device;
+pub mod exec;
 pub mod fs;
 pub mod ipc;
 pub mod memory;
@@ -21,6 +22,7 @@ use crate::kernel::device::{
     DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceKind, DeviceManager,
     MirageDeviceDescriptor,
 };
+use crate::kernel::exec::{CloneTaskRequest, SpawnTaskRequest};
 use crate::kernel::fs::inode::InodeKind;
 use crate::kernel::fs::{
     open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, AccessMode,
@@ -287,7 +289,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     pub fn spawn_initial_process(&mut self, creds: Credentials) -> KernelResult<ProcessId> {
-        self.spawn_process(0, ProcessPriority::Critical, None, creds)
+        self.spawn_task(SpawnTaskRequest {
+            parent: None,
+            entry_point: 0,
+            priority: ProcessPriority::Critical,
+            credentials: creds,
+        })
     }
 
     pub fn bootstrap_services(&mut self) -> DefaultServiceStartupReport {
@@ -381,71 +388,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         priority: ProcessPriority,
         requested_creds: Credentials,
     ) -> KernelResult<ProcessId> {
-        self.ensure_process_exists(parent_pid)?;
-        self.security
-            .authorize_spawn(parent_pid, requested_creds)
-            .map_err(KernelError::SecurityViolation)?;
-
-        self.spawn_process(entry_point, priority, Some(parent_pid), requested_creds)
-    }
-
-    fn spawn_process(
-        &mut self,
-        entry_point: u64,
-        priority: ProcessPriority,
-        parent: Option<ProcessId>,
-        creds: Credentials,
-    ) -> KernelResult<ProcessId> {
-        let slot = self.find_free_slot().ok_or(KernelError::ProcessTableFull)?;
-        let pid = self.allocate_pid();
-        let mut pcb = ProcessControlBlock::new(pid, entry_point, priority, parent);
-        pcb.update_security_label(creds.label());
-        if let Some(parent_pid) = parent {
-            pcb.files = self.inherit_process_file_table(parent_pid)?;
-            let parent_index = self.locate_process(parent_pid)?;
-            if let Some(parent_pcb) = self.process_table[parent_index].as_ref() {
-                pcb.process_group = parent_pcb.process_group;
-                pcb.session = parent_pcb.session;
-                pcb.signal_actions = parent_pcb.signal_actions;
-            }
-        }
-
-        self.security.register_task(pid, creds).map_err(|err| {
-            self.release_process_file_table(&mut pcb.files);
-            KernelError::SecurityViolation(err)
-        })?;
-
-        self.process_table[slot] = Some(pcb);
-
-        let thread_id = match self.create_thread(pid, entry_point, priority) {
-            Ok(id) => id,
-            Err(err) => {
-                if let Some(mut failed) = self.process_table[slot].take() {
-                    self.release_process_file_table(&mut failed.files);
-                }
-                self.security.revoke_task(pid);
-                return Err(err);
-            }
-        };
-
-        if let Some(pcb) = self.process_table[slot].as_mut() {
-            pcb.state = ProcessState::Ready;
-        }
-
-        if self
-            .scheduler
-            .enqueue(ScheduledThread::new(thread_id, pid, priority))
-            .is_err()
-        {
-            self.rollback_thread_creation(thread_id);
-            if let Some(mut failed) = self.process_table[slot].take() {
-                self.release_process_file_table(&mut failed.files);
-            }
-            self.security.revoke_task(pid);
-            return Err(KernelError::SchedulerFull);
-        }
-
-        Ok(pid)
+        self.spawn_task(SpawnTaskRequest {
+            parent: Some(parent_pid),
+            entry_point,
+            priority,
+            credentials: requested_creds,
+        })
     }
 
     pub fn spawn_thread(
@@ -454,17 +402,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         entry_point: u64,
         priority: ProcessPriority,
     ) -> KernelResult<ThreadId> {
-        self.ensure_process_exists(pid)?;
-        let thread_id = self.create_thread(pid, entry_point, priority)?;
-        if self
-            .scheduler
-            .enqueue(ScheduledThread::new(thread_id, pid, priority))
-            .is_err()
-        {
-            self.rollback_thread_creation(thread_id);
-            return Err(KernelError::SchedulerFull);
-        }
-        Ok(thread_id)
+        self.clone_thread(CloneTaskRequest::legacy_thread(
+            pid,
+            None,
+            entry_point,
+            priority,
+        ))
     }
 
     pub fn terminate_process(&mut self, pid: ProcessId) {
@@ -706,12 +649,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_fork(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        // POSIX fork is represented by Mirage's spawn_child_process using the
-        // caller-provided entry point/priority/credential tuple.  The child
-        // inherits the descriptor table, cwd/root/umask, process group, session,
-        // and signal dispositions.  User space follows with execve when it wants
-        // classic fork/exec image replacement.
-        self.syscall_spawn(context)
+        self.fork_task(context.caller, context.thread)
+            .map(|pid| pid.raw())
     }
 
     fn syscall_execve(&mut self, context: SyscallContext) -> KernelResult<u64> {
@@ -738,29 +677,17 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.exec_image_metadata(&resolved, stat, entry_point, stack_pointer),
         );
 
-        self.security
-            .authorize_exec(&request)
-            .map_err(KernelError::SecurityViolation)?;
-
-        let closed = self.process_files_mut(context.caller)?.close_on_exec();
-        self.release_description_ids(&closed);
-        self.replace_process_image(context.caller, context.thread, entry_point, stack_pointer)?;
-        self.security
-            .register_task(context.caller, request.requested_credentials)
-            .map_err(KernelError::SecurityViolation)?;
-        if let Some(pcb) = self.process_table[self.locate_process(context.caller)?].as_mut() {
-            pcb.update_security_label(request.requested_credentials.label());
-        }
+        self.exec_task(request, context.thread)?;
         Ok(0)
     }
 
     fn syscall_exit(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        self.exit_process(context.caller, ExitStatus::exited(context.arg(0) as i32));
+        self.exit_task(context.caller, ExitStatus::exited(context.arg(0) as i32));
         Ok(0)
     }
 
     fn syscall_wait4(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        self.wait_for_child(
+        self.wait_task(
             context.caller,
             context.arg(0) as i64,
             context.arg(1) as *mut i32,
@@ -1072,8 +999,31 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_clone(&mut self, context: SyscallContext) -> KernelResult<u64> {
         let entry_point = context.arg(0);
         let priority = decode_priority(context.arg(1))?;
-        self.spawn_thread(context.caller, entry_point, priority)
-            .map(|thread| thread.raw())
+        let flags = context.arg(2);
+        let request = if flags == 0 && context.arg(3) == 0 && context.arg(4) == 0 {
+            CloneTaskRequest::legacy_thread(context.caller, context.thread, entry_point, priority)
+        } else {
+            let tls_base = if context.arg(3) == 0 {
+                None
+            } else {
+                Some(context.arg(3))
+            };
+            let child_stack = if context.arg(4) == 0 {
+                None
+            } else {
+                Some(context.arg(4))
+            };
+            CloneTaskRequest::new(
+                context.caller,
+                context.thread,
+                entry_point,
+                priority,
+                child_stack,
+                tls_base,
+                flags,
+            )
+        };
+        self.clone_thread(request).map(|thread| thread.raw())
     }
 
     fn syscall_futex(&mut self, _context: SyscallContext) -> KernelResult<u64> {
@@ -1092,8 +1042,13 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let entry_point = context.arg(0);
         let priority = decode_priority(context.arg(1))?;
         let credentials = decode_credentials(context.arg(2))?;
-        self.spawn_child_process(context.caller, entry_point, priority, credentials)
-            .map(|pid| pid.raw())
+        self.spawn_task(SpawnTaskRequest {
+            parent: Some(context.caller),
+            entry_point,
+            priority,
+            credentials,
+        })
+        .map(|pid| pid.raw())
     }
 
     fn syscall_send_ipc(&mut self, context: SyscallContext) -> KernelResult<u64> {
