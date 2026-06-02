@@ -5,7 +5,9 @@
 //! report. This mirrors the kernel process and IPC tables instead of relying on
 //! dynamic collections during early boot.
 
-use crate::kernel::process::{ProcessId, ProcessPriority};
+use crate::kernel::process::{
+    ExecServiceDaemon, ExecSignatureMetadata, ProcessId, ProcessPriority,
+};
 use crate::kernel::KernelError;
 use crate::subkernel::{CapabilitySet, Credentials, IsolationLevel, SecurityLabel};
 
@@ -45,6 +47,8 @@ pub struct ServiceDescriptor {
     pub priority: ProcessPriority,
     pub credentials: Credentials,
     pub dependencies: ServiceDependencies,
+    pub service_daemon: Option<ExecServiceDaemon>,
+    pub signature: Option<ExecSignatureMetadata>,
 }
 
 impl ServiceDescriptor {
@@ -55,6 +59,8 @@ impl ServiceDescriptor {
         priority: ProcessPriority,
         credentials: Credentials,
         dependencies: ServiceDependencies,
+        service_daemon: Option<ExecServiceDaemon>,
+        signature: Option<ExecSignatureMetadata>,
     ) -> Self {
         Self {
             id,
@@ -63,6 +69,8 @@ impl ServiceDescriptor {
             priority,
             credentials,
             dependencies,
+            service_daemon,
+            signature,
         }
     }
 }
@@ -234,6 +242,11 @@ pub const L2_SUBKERNEL_SERVICE: ServiceDescriptor = ServiceDescriptor::new(
     ProcessPriority::Critical,
     Credentials::system(),
     [None, None],
+    None,
+    Some(ExecSignatureMetadata::new(
+        "mirage-l2-root",
+        0x4c325f5355424b45,
+    )),
 );
 
 /// Display daemon descriptor; device-facing and dependent on L2 authorization.
@@ -248,6 +261,11 @@ pub const DISPLAYD_SERVICE: ServiceDescriptor = ServiceDescriptor::new(
         IsolationLevel::Process,
     ),
     [Some(ServiceId::L2Subkernel), None],
+    Some(ExecServiceDaemon::Display),
+    Some(ExecSignatureMetadata::new(
+        "mirage-service-root",
+        0x444953504c415944,
+    )),
 );
 
 /// Network daemon descriptor; device-facing and dependent on L2 authorization.
@@ -262,6 +280,11 @@ pub const NETWORKD_SERVICE: ServiceDescriptor = ServiceDescriptor::new(
         IsolationLevel::Process,
     ),
     [Some(ServiceId::L2Subkernel), None],
+    Some(ExecServiceDaemon::Network),
+    Some(ExecSignatureMetadata::new(
+        "mirage-service-root",
+        0x4e4554574f524b44,
+    )),
 );
 
 /// Input daemon descriptor; device-facing and dependent on L2 authorization.
@@ -276,6 +299,11 @@ pub const INPUTD_SERVICE: ServiceDescriptor = ServiceDescriptor::new(
         IsolationLevel::Process,
     ),
     [Some(ServiceId::L2Subkernel), None],
+    Some(ExecServiceDaemon::Input),
+    Some(ExecSignatureMetadata::new(
+        "mirage-service-root",
+        0x494e50555444414d,
+    )),
 );
 
 /// Built-in L1 manifest. The manifest order places L2 first, while dependency
@@ -289,6 +317,43 @@ pub const DEFAULT_STARTUP_MANIFEST: ServiceManifest<MAX_STARTUP_SERVICES> = Serv
     ],
     MAX_STARTUP_SERVICES,
 );
+
+/// Validate static service-daemon signature metadata embedded in the L1 startup
+/// manifest. This models the signed-manifest gate for displayd, networkd,
+/// inputd, and future L2 driver daemons before they are launched.
+pub fn service_manifest_signature_valid(descriptor: ServiceDescriptor) -> bool {
+    match descriptor.service_daemon {
+        Some(ExecServiceDaemon::Display) => matches!(
+            descriptor.signature,
+            Some(ExecSignatureMetadata {
+                signer: "mirage-service-root",
+                manifest_digest: 0x444953504c415944
+            })
+        ),
+        Some(ExecServiceDaemon::Network) => matches!(
+            descriptor.signature,
+            Some(ExecSignatureMetadata {
+                signer: "mirage-service-root",
+                manifest_digest: 0x4e4554574f524b44
+            })
+        ),
+        Some(ExecServiceDaemon::Input) => matches!(
+            descriptor.signature,
+            Some(ExecSignatureMetadata {
+                signer: "mirage-service-root",
+                manifest_digest: 0x494e50555444414d
+            })
+        ),
+        Some(ExecServiceDaemon::L2Driver) => matches!(
+            descriptor.signature,
+            Some(ExecSignatureMetadata {
+                signer: "mirage-driver-root",
+                ..
+            })
+        ),
+        None => true,
+    }
+}
 
 /// Dependency resolution result for one service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

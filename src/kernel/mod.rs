@@ -21,6 +21,7 @@ use crate::kernel::device::{
     DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceKind, DeviceManager,
     MirageDeviceDescriptor,
 };
+use crate::kernel::fs::inode::InodeKind;
 use crate::kernel::fs::{
     open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, AccessMode,
     CDirEntry, CStat, DescriptorFlags, DirEntry, FileDescriptionId, FileSystem, FileTable,
@@ -29,13 +30,16 @@ use crate::kernel::fs::{
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{
+    ExecImageMetadata, ExecRequest, ExecServiceDaemon, ExecSignatureMetadata, ExecVectorMetadata,
     ExitStatus, ProcessControlBlock, ProcessFileTableError, ProcessGroupId, ProcessId, ProcessPath,
-    ProcessPriority, ProcessState, SessionId, SignalAction, SignalMask, SIGCHLD, SIGKILL, SIGTERM,
+    ProcessPriority, ProcessState, SessionId, SignalAction, SignalMask, MAX_EXEC_ARGS,
+    MAX_EXEC_ENVS, SIGCHLD, SIGKILL, SIGTERM,
 };
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
 use crate::kernel::spawn::{
-    dependencies_ready, DefaultServiceStartupReport, DependencyStatus, ServiceManifest,
-    ServiceStartupReport, StartupState, DEFAULT_STARTUP_MANIFEST,
+    dependencies_ready, service_manifest_signature_valid, DefaultServiceStartupReport,
+    DependencyStatus, ServiceManifest, ServiceStartupReport, StartupState,
+    DEFAULT_STARTUP_MANIFEST,
 };
 use crate::kernel::syscall::{
     SyscallContext, SyscallErrorCode, SyscallNumber, MIRAGE_SYSCALL_ERROR_BIT,
@@ -306,6 +310,18 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                     if record.state == StartupState::Pending {
                         match dependencies_ready(record.descriptor, &report) {
                             DependencyStatus::Ready(parent) => {
+                                if !service_manifest_signature_valid(record.descriptor) {
+                                    report.set_failed(
+                                        idx,
+                                        KernelError::SecurityViolation(
+                                            IsolationError::PolicyViolation,
+                                        ),
+                                    );
+                                    made_progress = true;
+                                    idx += 1;
+                                    continue;
+                                }
+
                                 report.set_starting(idx);
                                 let spawned = if let Some(parent_pid) = parent {
                                     self.spawn_child_process(
@@ -699,14 +715,42 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_execve(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        if context.arg(0) != 0 {
-            let _ = self.user_path_str(context.arg(0))?;
+        let resolved = self.resolve_user_path(context.caller, AT_FDCWD as u64, context.arg(0))?;
+        let path = resolved.as_path()?;
+        let stat = self.root_fs.stat(path).map_err(KernelError::Filesystem)?;
+        if stat.kind != InodeKind::RegularFile {
+            return Err(KernelError::Filesystem(VfsError::PermissionDenied));
         }
+        if !crate::kernel::fs::Permissions::new(stat.mode, stat.uid, stat.gid)
+            .allows(fs_credentials_for(context.caller), AccessMode::Execute)
+        {
+            return Err(KernelError::Filesystem(VfsError::PermissionDenied));
+        }
+
         let entry_point = context.arg(3);
         let stack_pointer = context.arg(4);
+        let request = ExecRequest::new(
+            context.caller,
+            ProcessPath::from_path(path),
+            exec_vector_metadata(context.arg(1), MAX_EXEC_ARGS)?,
+            exec_vector_metadata(context.arg(2), MAX_EXEC_ENVS)?,
+            decode_credentials(context.arg(5))?,
+            self.exec_image_metadata(&resolved, stat, entry_point, stack_pointer),
+        );
+
+        self.security
+            .authorize_exec(&request)
+            .map_err(KernelError::SecurityViolation)?;
+
         let closed = self.process_files_mut(context.caller)?.close_on_exec();
         self.release_description_ids(&closed);
         self.replace_process_image(context.caller, context.thread, entry_point, stack_pointer)?;
+        self.security
+            .register_task(context.caller, request.requested_credentials)
+            .map_err(KernelError::SecurityViolation)?;
+        if let Some(pcb) = self.process_table[self.locate_process(context.caller)?].as_mut() {
+            pcb.update_security_label(request.requested_credentials.label());
+        }
         Ok(0)
     }
 
@@ -1712,6 +1756,25 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Ok(resolved)
     }
 
+    fn exec_image_metadata(
+        &self,
+        resolved: &KernelPathBuf,
+        stat: crate::kernel::fs::inode::Stat,
+        entry_point: u64,
+        stack_pointer: u64,
+    ) -> ExecImageMetadata {
+        let (service_daemon, signature) = signed_exec_manifest_for_path(resolved.as_str());
+        ExecImageMetadata::new(
+            stat.inode.raw(),
+            stat.size,
+            stat.mode,
+            entry_point,
+            stack_pointer,
+            service_daemon,
+            signature,
+        )
+    }
+
     fn user_path(&self, path_ptr: u64) -> KernelResult<Path<'_>> {
         let raw = self.user_path_str(path_ptr)?;
         Path::new(raw).map_err(map_path_error)
@@ -2449,6 +2512,59 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 }
 
+fn exec_vector_metadata(ptr: u64, max_entries: usize) -> KernelResult<ExecVectorMetadata> {
+    if ptr == 0 {
+        return Ok(ExecVectorMetadata::empty());
+    }
+
+    let entries = user_slice_typed::<u64>(ptr, max_entries + 1)?;
+    let mut count = 0usize;
+    while count < entries.len() {
+        if entries[count] == 0 {
+            return Ok(ExecVectorMetadata::new(ptr, count, false));
+        }
+        count += 1;
+    }
+
+    Ok(ExecVectorMetadata::new(ptr, max_entries, true))
+}
+
+fn signed_exec_manifest_for_path(
+    path: &str,
+) -> (Option<ExecServiceDaemon>, Option<ExecSignatureMetadata>) {
+    match path {
+        "/bin/displayd" | "/sbin/displayd" | "/displayd" => (
+            Some(ExecServiceDaemon::Display),
+            Some(ExecSignatureMetadata::new(
+                "mirage-service-root",
+                0x444953504c415944,
+            )),
+        ),
+        "/bin/networkd" | "/sbin/networkd" | "/networkd" => (
+            Some(ExecServiceDaemon::Network),
+            Some(ExecSignatureMetadata::new(
+                "mirage-service-root",
+                0x4e4554574f524b44,
+            )),
+        ),
+        "/bin/inputd" | "/sbin/inputd" | "/inputd" => (
+            Some(ExecServiceDaemon::Input),
+            Some(ExecSignatureMetadata::new(
+                "mirage-service-root",
+                0x494e50555444414d,
+            )),
+        ),
+        "/bin/l2-driverd" | "/sbin/l2-driverd" | "/l2-driverd" => (
+            Some(ExecServiceDaemon::L2Driver),
+            Some(ExecSignatureMetadata::new(
+                "mirage-driver-root",
+                0x4c32445249564552,
+            )),
+        ),
+        _ => (None, None),
+    }
+}
+
 fn map_file_table_error(error: FileTableError) -> KernelError {
     match error {
         FileTableError::Full => KernelError::FileTableFull,
@@ -2501,6 +2617,20 @@ fn user_slice_mut(ptr: u64, len: usize) -> KernelResult<&'static mut [u8]> {
         Ok(&mut [])
     } else {
         Ok(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len) })
+    }
+}
+
+fn user_slice_typed<T>(ptr: u64, count: usize) -> KernelResult<&'static [T]> {
+    let byte_len = count
+        .checked_mul(core::mem::size_of::<T>())
+        .ok_or(KernelError::InvalidPointer)?;
+    validate_user_range(ptr, byte_len)?;
+    if count == 0 {
+        Ok(&[])
+    } else if !(ptr as *const T).is_aligned() {
+        Err(KernelError::InvalidPointer)
+    } else {
+        Ok(unsafe { core::slice::from_raw_parts(ptr as *const T, count) })
     }
 }
 
