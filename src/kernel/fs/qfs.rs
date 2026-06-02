@@ -14,7 +14,7 @@ use crate::kernel::{
         inode::{DirEntry, InodeId, InodeKind, InodeMetadata},
         path::Path,
         permissions::{Credentials, Permissions},
-        vfs::{FileSystem, FsError, SuperBlock},
+        vfs::{FileSystem, FsError, SuperBlock, VfsError},
     },
     sync::SpinLock,
 };
@@ -57,6 +57,9 @@ const QFS_SUPERBLOCK_RESERVED_BYTES: usize = 64;
 const QFS_BOOK_HEADER_RESERVED_BYTES: usize = 496;
 const QFS_BOOK_INDEX_ENTRY_BYTES: usize = 16;
 const QFS_INODE_RECORD_BYTES: usize = 192;
+const QFS_JOURNAL_SLOT_SECTORS: u64 = 2;
+const QFS_JOURNAL_PAYLOAD_SECTOR_OFFSET: u64 = 1;
+const QFS_JOURNAL_RECORD_MAGIC: u32 = 0x4a_46_53_51;
 
 /// Book/page address used by sector-zero metadata pointers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,11 +322,38 @@ impl QfsInodeRecord {
     }
 }
 
-/// Fixed-width journal descriptor for replay-safe metadata updates.
+/// Monotonic QFS journal transaction identifier.
+pub type QfsTransactionId = u64;
+
+/// Journal record kind stored in each fixed-size on-disk journal slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum QfsJournalRecordKind {
+    Begin = 1,
+    MetadataWrite = 2,
+    DataWrite = 3,
+    Commit = 4,
+    Abort = 5,
+}
+
+impl QfsJournalRecordKind {
+    const fn from_u16(value: u16) -> Option<Self> {
+        match value {
+            1 => Some(Self::Begin),
+            2 => Some(Self::MetadataWrite),
+            3 => Some(Self::DataWrite),
+            4 => Some(Self::Commit),
+            5 => Some(Self::Abort),
+            _ => None,
+        }
+    }
+}
+
+/// Fixed-width journal descriptor for replay-safe metadata and data updates.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QfsJournalRecord {
-    pub sequence: u64,
+    pub sequence: QfsTransactionId,
     pub record_type: u16,
     pub target_inode: u64,
     pub sector: u64,
@@ -344,6 +374,10 @@ impl QfsJournalRecord {
             flags: 0,
         }
     }
+
+    pub const fn kind(self) -> Option<QfsJournalRecordKind> {
+        QfsJournalRecordKind::from_u16(self.record_type)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -355,6 +389,8 @@ struct QfsState {
     chapter_index: [Option<QfsChapterIndexEntry>; QFS_MAX_CHAPTER_INDEX_ENTRIES],
     inodes: [Option<QfsInodeRecord>; QFS_MAX_INODE_RECORDS],
     journal: [Option<QfsJournalRecord>; QFS_MAX_JOURNAL_RECORDS],
+    next_transaction_id: QfsTransactionId,
+    next_journal_slot: usize,
 }
 
 impl QfsState {
@@ -369,6 +405,8 @@ impl QfsState {
             chapter_index: [None; QFS_MAX_CHAPTER_INDEX_ENTRIES],
             inodes,
             journal: [None; QFS_MAX_JOURNAL_RECORDS],
+            next_transaction_id: 1,
+            next_journal_slot: 0,
         }
     }
 
@@ -474,7 +512,193 @@ impl QfsFileSystem {
         }
         let mut sector = [0u8; QFS_SECTOR_SIZE];
         self.state.lock().superblock.write_sector(&mut sector)?;
-        write_sector(device, QFS_SUPERBLOCK_SECTOR, &sector)
+        let transaction_id = self.begin_transaction()?;
+        self.journal_write(
+            transaction_id,
+            QfsJournalRecordKind::MetadataWrite,
+            0,
+            QFS_SUPERBLOCK_SECTOR,
+            &sector,
+        )?;
+        self.commit_transaction(transaction_id)
+    }
+
+    pub fn replay_journal(&self) -> Result<(), VfsError> {
+        let Some(device) = self.block_device else {
+            return Ok(());
+        };
+        if device.sector_size() != QFS_SECTOR_SIZE {
+            return Err(VfsError::Unsupported);
+        }
+        let superblock = { self.state.lock().superblock };
+        let Some(journal_start) = page_location_sector(&superblock, superblock.journal) else {
+            return Ok(());
+        };
+        let slot_count = journal_slot_count(&superblock);
+        if slot_count == 0 {
+            return Ok(());
+        }
+        let mut records = [None; QFS_MAX_JOURNAL_RECORDS];
+        let mut max_transaction_id = 0u64;
+        let mut slot = 0usize;
+        while slot < slot_count {
+            let mut sector = [0u8; QFS_SECTOR_SIZE];
+            let record_sector = journal_start + slot as u64 * QFS_JOURNAL_SLOT_SECTORS;
+            if record_sector + QFS_JOURNAL_PAYLOAD_SECTOR_OFFSET >= device.sector_count() {
+                break;
+            }
+            read_sector(device, record_sector, &mut sector)?;
+            if let Some(record) = parse_journal_record(&sector)? {
+                max_transaction_id = max_u64(max_transaction_id, record.sequence);
+                records[slot] = Some(record);
+            }
+            slot += 1;
+        }
+
+        let mut idx = 0usize;
+        while idx < slot_count {
+            if let Some(commit) = records[idx] {
+                if commit.kind() == Some(QfsJournalRecordKind::Commit)
+                    && transaction_has_begin(&records, commit.sequence)
+                    && !transaction_has_abort(&records, commit.sequence)
+                {
+                    apply_transaction_records(device, journal_start, &records, commit.sequence)?;
+                }
+            }
+            idx += 1;
+        }
+        device.flush().map_err(map_device_error)?;
+
+        let mut state = self.state.lock();
+        state.journal = records;
+        state.next_transaction_id = max_u64(
+            state.next_transaction_id,
+            max_transaction_id.saturating_add(1),
+        );
+        state.next_journal_slot = next_journal_slot(&records, slot_count);
+        Ok(())
+    }
+
+    pub fn begin_transaction(&self) -> Result<QfsTransactionId, VfsError> {
+        if self.read_only {
+            return Err(VfsError::ReadOnly);
+        }
+        let transaction_id = {
+            let mut state = self.state.lock();
+            let id = state.next_transaction_id;
+            state.next_transaction_id = state.next_transaction_id.saturating_add(1);
+            id
+        };
+        self.append_journal_record(
+            QfsJournalRecord {
+                sequence: transaction_id,
+                record_type: QfsJournalRecordKind::Begin as u16,
+                target_inode: 0,
+                sector: 0,
+                sector_count: 0,
+                checksum: 0,
+                flags: 0,
+            },
+            None,
+        )?;
+        Ok(transaction_id)
+    }
+
+    pub fn journal_write(
+        &self,
+        transaction_id: QfsTransactionId,
+        kind: QfsJournalRecordKind,
+        target_inode: u64,
+        sector: u64,
+        data: &[u8; QFS_SECTOR_SIZE],
+    ) -> Result<(), VfsError> {
+        if self.read_only {
+            return Err(VfsError::ReadOnly);
+        }
+        if kind != QfsJournalRecordKind::MetadataWrite && kind != QfsJournalRecordKind::DataWrite {
+            return Err(VfsError::InvalidArgument);
+        }
+        self.append_journal_record(
+            QfsJournalRecord {
+                sequence: transaction_id,
+                record_type: kind as u16,
+                target_inode,
+                sector,
+                sector_count: 1,
+                checksum: checksum_sector(data),
+                flags: 0,
+            },
+            Some(data),
+        )
+    }
+
+    pub fn commit_transaction(&self, transaction_id: QfsTransactionId) -> Result<(), VfsError> {
+        if self.read_only {
+            return Err(VfsError::ReadOnly);
+        }
+        let Some(device) = self.block_device else {
+            return Ok(());
+        };
+        if device.sector_size() != QFS_SECTOR_SIZE {
+            return Err(VfsError::Unsupported);
+        }
+        self.append_journal_record(
+            QfsJournalRecord {
+                sequence: transaction_id,
+                record_type: QfsJournalRecordKind::Commit as u16,
+                target_inode: 0,
+                sector: 0,
+                sector_count: 0,
+                checksum: 0,
+                flags: 0,
+            },
+            None,
+        )?;
+        let state = self.state.lock();
+        let journal_start = page_location_sector(&state.superblock, state.superblock.journal)
+            .ok_or(VfsError::Unsupported)?;
+        let records = state.journal;
+        drop(state);
+        apply_transaction_records(device, journal_start, &records, transaction_id)?;
+        device.flush().map_err(map_device_error)
+    }
+
+    fn append_journal_record(
+        &self,
+        record: QfsJournalRecord,
+        payload: Option<&[u8; QFS_SECTOR_SIZE]>,
+    ) -> Result<(), VfsError> {
+        let Some(device) = self.block_device else {
+            return Ok(());
+        };
+        if device.sector_size() != QFS_SECTOR_SIZE {
+            return Err(VfsError::Unsupported);
+        }
+        let mut state = self.state.lock();
+        let journal_start = page_location_sector(&state.superblock, state.superblock.journal)
+            .ok_or(VfsError::Unsupported)?;
+        let slot_count = journal_slot_count(&state.superblock);
+        if slot_count == 0 {
+            return Err(VfsError::NoSpace);
+        }
+        let slot = state.next_journal_slot % slot_count;
+        let record_sector = journal_start + slot as u64 * QFS_JOURNAL_SLOT_SECTORS;
+        if record_sector + QFS_JOURNAL_PAYLOAD_SECTOR_OFFSET >= device.sector_count() {
+            return Err(VfsError::NoSpace);
+        }
+        let mut sector = [0u8; QFS_SECTOR_SIZE];
+        serialize_journal_record(&record, &mut sector)?;
+        write_sector(device, record_sector, &sector)?;
+        if let Some(payload) = payload {
+            write_sector(
+                device,
+                record_sector + QFS_JOURNAL_PAYLOAD_SECTOR_OFFSET,
+                payload,
+            )?;
+        }
+        state.journal[slot] = Some(record);
+        state.next_journal_slot = (slot + 1) % slot_count;
+        Ok(())
     }
 
     pub fn refresh_from_block_device(&self) -> Result<(), FsError> {
@@ -536,7 +760,7 @@ impl QfsFileSystem {
         }
 
         *self.state.lock() = next;
-        Ok(())
+        self.replay_journal()
     }
 }
 
@@ -971,12 +1195,170 @@ fn parse_inode_records(
     Ok(())
 }
 
+fn parse_journal_record(
+    sector: &[u8; QFS_SECTOR_SIZE],
+) -> Result<Option<QfsJournalRecord>, FsError> {
+    let cur = LeCursor::new(sector);
+    if cur.u32_at(0)? != QFS_JOURNAL_RECORD_MAGIC {
+        return Ok(None);
+    }
+    let record_type = cur.u16_at(12)?;
+    if QfsJournalRecordKind::from_u16(record_type).is_none() {
+        return Ok(None);
+    }
+    let record = QfsJournalRecord {
+        sequence: cur.u64_at(4)?,
+        record_type,
+        sector_count: cur.u16_at(14)?,
+        target_inode: cur.u64_at(16)?,
+        sector: cur.u64_at(24)?,
+        checksum: cur.u32_at(32)?,
+        flags: cur.u32_at(36)?,
+    };
+    if record.sequence == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(record))
+    }
+}
+
+fn serialize_journal_record(
+    record: &QfsJournalRecord,
+    sector: &mut [u8; QFS_SECTOR_SIZE],
+) -> Result<(), FsError> {
+    sector.fill(0);
+    put_u32(sector, 0, QFS_JOURNAL_RECORD_MAGIC)?;
+    put_u64(sector, 4, record.sequence)?;
+    put_u16(sector, 12, record.record_type)?;
+    put_u16(sector, 14, record.sector_count)?;
+    put_u64(sector, 16, record.target_inode)?;
+    put_u64(sector, 24, record.sector)?;
+    put_u32(sector, 32, record.checksum)?;
+    put_u32(sector, 36, record.flags)?;
+    Ok(())
+}
+
+fn journal_slot_count(superblock: &QfsSuperblock) -> usize {
+    if superblock.journal.page >= superblock.book_pages {
+        return 0;
+    }
+    let sectors_from_journal_page =
+        (superblock.book_pages - superblock.journal.page) as u64 * superblock.page_sectors as u64;
+    min(
+        QFS_MAX_JOURNAL_RECORDS,
+        (sectors_from_journal_page / QFS_JOURNAL_SLOT_SECTORS) as usize,
+    )
+}
+
+fn next_journal_slot(
+    records: &[Option<QfsJournalRecord>; QFS_MAX_JOURNAL_RECORDS],
+    slot_count: usize,
+) -> usize {
+    let mut idx = 0usize;
+    let mut best_idx = 0usize;
+    let mut best_sequence = 0u64;
+    while idx < slot_count {
+        match records[idx] {
+            None => return idx,
+            Some(record) if record.sequence >= best_sequence => {
+                best_sequence = record.sequence;
+                best_idx = idx;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    (best_idx + 1) % slot_count
+}
+
+fn transaction_has_begin(
+    records: &[Option<QfsJournalRecord>; QFS_MAX_JOURNAL_RECORDS],
+    transaction_id: QfsTransactionId,
+) -> bool {
+    transaction_has_kind(records, transaction_id, QfsJournalRecordKind::Begin)
+}
+
+fn transaction_has_abort(
+    records: &[Option<QfsJournalRecord>; QFS_MAX_JOURNAL_RECORDS],
+    transaction_id: QfsTransactionId,
+) -> bool {
+    transaction_has_kind(records, transaction_id, QfsJournalRecordKind::Abort)
+}
+
+fn transaction_has_kind(
+    records: &[Option<QfsJournalRecord>; QFS_MAX_JOURNAL_RECORDS],
+    transaction_id: QfsTransactionId,
+    kind: QfsJournalRecordKind,
+) -> bool {
+    let mut idx = 0usize;
+    while idx < records.len() {
+        if let Some(record) = records[idx] {
+            if record.sequence == transaction_id && record.kind() == Some(kind) {
+                return true;
+            }
+        }
+        idx += 1;
+    }
+    false
+}
+
+fn apply_transaction_records(
+    device: &dyn BlockStorageDevice,
+    journal_start: u64,
+    records: &[Option<QfsJournalRecord>; QFS_MAX_JOURNAL_RECORDS],
+    transaction_id: QfsTransactionId,
+) -> Result<(), FsError> {
+    let mut idx = 0usize;
+    while idx < records.len() {
+        if let Some(record) = records[idx] {
+            let write_kind = record.kind() == Some(QfsJournalRecordKind::MetadataWrite)
+                || record.kind() == Some(QfsJournalRecordKind::DataWrite);
+            if record.sequence == transaction_id && write_kind {
+                if record.sector_count != 1 || record.sector >= device.sector_count() {
+                    return Err(FsError::NoSpace);
+                }
+                let mut payload = [0u8; QFS_SECTOR_SIZE];
+                let payload_sector = journal_start
+                    + idx as u64 * QFS_JOURNAL_SLOT_SECTORS
+                    + QFS_JOURNAL_PAYLOAD_SECTOR_OFFSET;
+                if payload_sector >= device.sector_count() {
+                    return Err(FsError::NoSpace);
+                }
+                read_sector(device, payload_sector, &mut payload)?;
+                if checksum_sector(&payload) != record.checksum {
+                    return Err(FsError::Unsupported);
+                }
+                write_sector(device, record.sector, &payload)?;
+            }
+        }
+        idx += 1;
+    }
+    Ok(())
+}
+
+fn checksum_sector(sector: &[u8; QFS_SECTOR_SIZE]) -> u32 {
+    let mut checksum = 0u32;
+    let mut idx = 0usize;
+    while idx < sector.len() {
+        checksum = checksum.wrapping_add(sector[idx] as u32);
+        idx += 1;
+    }
+    checksum
+}
+
+const fn max_u64(left: u64, right: u64) -> u64 {
+    if left >= right {
+        left
+    } else {
+        right
+    }
+}
+
 fn map_device_error(error: DeviceError) -> FsError {
     match error {
-        DeviceError::NotFound => FsError::NotFound,
+        DeviceError::NotFound | DeviceError::RegistryFull => FsError::NoSpace,
         DeviceError::Busy => FsError::Busy,
         DeviceError::Unsupported | DeviceError::BufferTooSmall => FsError::Unsupported,
-        DeviceError::RegistryFull => FsError::NoSpace,
     }
 }
 
