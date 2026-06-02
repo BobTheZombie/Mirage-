@@ -8,6 +8,7 @@
 use core::cmp::min;
 
 use crate::kernel::{
+    device::{BlockStorageDevice, DeviceError},
     fs::{
         file::{File, FileHandle, OpenFlags},
         inode::{DirEntry, InodeId, InodeKind, InodeMetadata},
@@ -21,6 +22,9 @@ use crate::kernel::{
 pub const MAX_VOLUME_NODES: usize = 16;
 pub const MAX_FILE_BYTES: usize = 4096;
 pub const MAX_NAME_BYTES: usize = 24;
+const FS_BLOCK_MAGIC: [u8; 8] = *b"MIRFSBLK";
+const FS_NODE_SECTORS: u64 = 1 + (MAX_FILE_BYTES / 512) as u64;
+const FS_DATA_SECTOR_OFFSET: u64 = 1;
 
 #[derive(Clone, Copy)]
 struct Node {
@@ -244,6 +248,7 @@ impl VolumeState {
 pub struct SsdUsbFileSystem {
     state: SpinLock<VolumeState>,
     read_only: bool,
+    block_device: Option<&'static dyn BlockStorageDevice>,
 }
 
 impl SsdUsbFileSystem {
@@ -251,7 +256,94 @@ impl SsdUsbFileSystem {
         Self {
             state: SpinLock::new(VolumeState::new()),
             read_only,
+            block_device: None,
         }
+    }
+
+    pub const fn new_on_block_device(
+        read_only: bool,
+        block_device: &'static dyn BlockStorageDevice,
+    ) -> Self {
+        Self {
+            state: SpinLock::new(VolumeState::new()),
+            read_only,
+            block_device: Some(block_device),
+        }
+    }
+
+    pub fn block_device(&self) -> Option<&dyn BlockStorageDevice> {
+        self.block_device
+    }
+
+    fn sync_block_device(&self) -> Result<(), FsError> {
+        let Some(device) = self.block_device else {
+            return Ok(());
+        };
+        if device.sector_size() != 512 {
+            return Err(FsError::Unsupported);
+        }
+        let needed_sectors = 1 + (MAX_VOLUME_NODES as u64 * FS_NODE_SECTORS);
+        if device.sector_count() < needed_sectors {
+            return Err(FsError::NoSpace);
+        }
+
+        let state = self.state.lock();
+        let mut sector = [0u8; 512];
+        sector[..FS_BLOCK_MAGIC.len()].copy_from_slice(&FS_BLOCK_MAGIC);
+        write_u64(&mut sector, 8, MAX_VOLUME_NODES as u64);
+        write_u64(&mut sector, 16, state.next_inode);
+        write_u64(&mut sector, 24, needed_sectors);
+        device
+            .write_sectors(0, &sector)
+            .map_err(fs_error_from_device)?;
+
+        let mut node_index = 0usize;
+        while node_index < MAX_VOLUME_NODES {
+            let base_sector = 1 + (node_index as u64 * FS_NODE_SECTORS);
+            sector.fill(0);
+            if let Some(node) = state.nodes[node_index] {
+                sector[..FS_BLOCK_MAGIC.len()].copy_from_slice(&FS_BLOCK_MAGIC);
+                sector[8] = 1;
+                sector[9] = encode_inode_kind(node.kind);
+                write_u64(&mut sector, 16, node.inode.raw());
+                write_u64(&mut sector, 24, node.parent.raw());
+                write_u64(&mut sector, 32, node.size as u64);
+                write_u16(&mut sector, 40, node.permissions.bits());
+                write_u16(&mut sector, 42, node.permissions.owner());
+                write_u16(&mut sector, 44, node.permissions.group());
+                write_u16(&mut sector, 46, node.links);
+                write_u16(&mut sector, 48, node.name_len as u16);
+                sector[64..64 + node.name_len].copy_from_slice(&node.name[..node.name_len]);
+            }
+            device
+                .write_sectors(base_sector, &sector)
+                .map_err(fs_error_from_device)?;
+
+            if let Some(node) = state.nodes[node_index] {
+                let mut data_sector = 0usize;
+                while data_sector < (MAX_FILE_BYTES / 512) {
+                    let start = data_sector * 512;
+                    let end = start + 512;
+                    device
+                        .write_sectors(
+                            base_sector + FS_DATA_SECTOR_OFFSET + data_sector as u64,
+                            &node.data[start..end],
+                        )
+                        .map_err(fs_error_from_device)?;
+                    data_sector += 1;
+                }
+            } else {
+                device
+                    .write_zeroes(
+                        base_sector + FS_DATA_SECTOR_OFFSET,
+                        MAX_FILE_BYTES as u64 / 512,
+                    )
+                    .map_err(fs_error_from_device)?;
+            }
+            node_index += 1;
+        }
+
+        device.flush().map_err(fs_error_from_device)
     }
 
     pub fn create_file(
@@ -267,12 +359,64 @@ impl SsdUsbFileSystem {
         self.state
             .lock()
             .create_node(parent, name, InodeKind::RegularFile, permissions, initial)
+        let inode = self.state.lock().create_node(
+            parent,
+            name,
+            InodeKind::RegularFile,
+            permissions,
+            initial,
+        )?;
+        self.sync_block_device()?;
+        Ok(inode)
+    }
+}
+
+fn fs_error_from_device(error: DeviceError) -> FsError {
+    match error {
+        DeviceError::NotFound => FsError::NotFound,
+        DeviceError::RegistryFull => FsError::NoSpace,
+        DeviceError::BufferTooSmall => FsError::InvalidArgument,
+        DeviceError::Unsupported => FsError::Unsupported,
+        DeviceError::Busy => FsError::Busy,
+    }
+}
+
+fn write_u16(buffer: &mut [u8; 512], offset: usize, value: u16) {
+    let bytes = value.to_le_bytes();
+    buffer[offset..offset + bytes.len()].copy_from_slice(&bytes);
+}
+
+fn write_u64(buffer: &mut [u8; 512], offset: usize, value: u64) {
+    let bytes = value.to_le_bytes();
+    buffer[offset..offset + bytes.len()].copy_from_slice(&bytes);
+}
+
+fn encode_inode_kind(kind: InodeKind) -> u8 {
+    match kind {
+        InodeKind::Directory => 1,
+        InodeKind::RegularFile => 2,
+        InodeKind::Symlink => 3,
+        InodeKind::BlockDevice => 4,
+        InodeKind::CharDevice => 5,
+        InodeKind::Fifo => 6,
+        InodeKind::Socket => 7,
     }
 }
 
 impl FileSystem for SsdUsbFileSystem {
     fn root_inode(&self) -> InodeId {
         InodeId::ROOT
+    }
+
+    fn super_block(&self) -> crate::kernel::fs::vfs::SuperBlock {
+        let mut super_block = crate::kernel::fs::vfs::SuperBlock::new(InodeId::ROOT);
+        if let Some(device) = self.block_device {
+            super_block.block_size = device.sector_size() as u32;
+            super_block.total_blocks = device.sector_count();
+            super_block.free_blocks = 0;
+            super_block.read_only = self.read_only;
+        }
+        super_block
     }
 
     fn lookup(&self, path: Path<'_>) -> Result<InodeMetadata, FsError> {
@@ -294,6 +438,36 @@ impl FileSystem for SsdUsbFileSystem {
         credentials: Credentials,
     ) -> Result<File, FsError> {
         let metadata = self.lookup(path)?;
+        let mut existed = true;
+        let metadata = match self.lookup(path) {
+            Ok(metadata) => metadata,
+            Err(FsError::NotFound) if flags.contains(OpenFlags::CREATE) => {
+                existed = false;
+                if self.read_only {
+                    return Err(FsError::ReadOnly);
+                }
+                let mut state = self.state.lock();
+                let (parent, name) = state.resolve_parent(path)?;
+                let inode = state.create_node(
+                    parent,
+                    name,
+                    InodeKind::RegularFile,
+                    Permissions::new(0o644, credentials.uid, credentials.gid),
+                    &[],
+                )?;
+                let metadata = state
+                    .node_by_inode(inode)
+                    .ok_or(FsError::NotFound)?
+                    .metadata();
+                drop(state);
+                self.sync_block_device()?;
+                metadata
+            }
+            Err(error) => return Err(error),
+        };
+        if existed && flags.contains(OpenFlags::EXCLUSIVE) && flags.contains(OpenFlags::CREATE) {
+            return Err(FsError::AlreadyExists);
+        }
         if flags.contains(OpenFlags::DIRECTORY) && metadata.kind != InodeKind::Directory {
             return Err(FsError::NotDirectory);
         }
@@ -374,6 +548,8 @@ impl FileSystem for SsdUsbFileSystem {
         node.data[offset..offset + to_copy].copy_from_slice(&data[..to_copy]);
         node.size = node.size.max(offset + to_copy);
         state.nodes[index] = Some(node);
+        drop(state);
+        self.sync_block_device()?;
         Ok(to_copy)
     }
 
@@ -389,6 +565,8 @@ impl FileSystem for SsdUsbFileSystem {
         let mut state = self.state.lock();
         let (parent, name) = state.resolve_parent(path)?;
         state.create_node(parent, name, InodeKind::Directory, mode, &[])?;
+        drop(state);
+        self.sync_block_device()?;
         Ok(())
     }
 
@@ -408,6 +586,8 @@ impl FileSystem for SsdUsbFileSystem {
             .node_index_by_inode(node.inode)
             .ok_or(FsError::NotFound)?;
         state.nodes[index] = None;
+        drop(state);
+        self.sync_block_device()?;
         Ok(())
     }
 
@@ -424,6 +604,8 @@ impl FileSystem for SsdUsbFileSystem {
             .node_index_by_inode(node.inode)
             .ok_or(FsError::NotFound)?;
         state.nodes[index] = None;
+        drop(state);
+        self.sync_block_device()?;
         Ok(())
     }
 
@@ -454,6 +636,8 @@ impl FileSystem for SsdUsbFileSystem {
         renamed.name_len = new_name.len();
         renamed.name[..new_name.len()].copy_from_slice(new_name.as_bytes());
         state.nodes[index] = Some(renamed);
+        drop(state);
+        self.sync_block_device()?;
         Ok(())
     }
 
@@ -486,6 +670,8 @@ impl FileSystem for SsdUsbFileSystem {
         alias.name[..name.len()].copy_from_slice(name.as_bytes());
         alias.links = alias.links.saturating_add(1);
         state.nodes[slot] = Some(alias);
+        drop(state);
+        self.sync_block_device()?;
         Ok(())
     }
 
@@ -507,6 +693,8 @@ impl FileSystem for SsdUsbFileSystem {
             Permissions::read_write(),
             target.as_str().as_bytes(),
         )?;
+        drop(state);
+        self.sync_block_device()?;
         Ok(())
     }
 
@@ -537,6 +725,8 @@ impl FileSystem for SsdUsbFileSystem {
             updated.permissions.group(),
         );
         state.nodes[index] = Some(updated);
+        drop(state);
+        self.sync_block_device()?;
         Ok(())
     }
 
@@ -558,6 +748,8 @@ impl FileSystem for SsdUsbFileSystem {
         let mut updated = state.nodes[index].ok_or(FsError::NotFound)?;
         updated.permissions = Permissions::new(updated.permissions.bits(), uid, gid);
         state.nodes[index] = Some(updated);
+        drop(state);
+        self.sync_block_device()?;
         Ok(())
     }
 
@@ -591,6 +783,41 @@ impl FileSystem for SsdUsbFileSystem {
         Ok(())
     }
 
+        drop(state);
+        self.sync_block_device()?;
+        Ok(())
+    }
+
+    fn ftruncate(&self, file: &File, size: u64, _credentials: Credentials) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        if size as usize > MAX_FILE_BYTES {
+            return Err(FsError::NoSpace);
+        }
+        let mut state = self.state.lock();
+        let index = state
+            .node_index_by_inode(file.inode())
+            .ok_or(FsError::InvalidHandle)?;
+        let mut updated = state.nodes[index].ok_or(FsError::InvalidHandle)?;
+        if updated.kind == InodeKind::Directory {
+            return Err(FsError::IsDirectory);
+        }
+        let new_size = size as usize;
+        if new_size > updated.size {
+            updated.data[updated.size..new_size].fill(0);
+        }
+        updated.size = new_size;
+        state.nodes[index] = Some(updated);
+        drop(state);
+        self.sync_block_device()?;
+        Ok(())
+    }
+
+    fn fsync(&self, _file: &File) -> Result<(), FsError> {
+        self.sync_block_device()
+    }
+
     fn readdir(
         &self,
         path: Path<'_>,
@@ -599,6 +826,35 @@ impl FileSystem for SsdUsbFileSystem {
     ) -> Result<usize, FsError> {
         let state = self.state.lock();
         let directory = state.resolve_inode(path)?;
+        if directory.kind != InodeKind::Directory {
+            return Err(FsError::NotDirectory);
+        }
+        let mut seen = 0usize;
+        let mut written = 0usize;
+        let mut idx = 0usize;
+        while idx < MAX_VOLUME_NODES && written < entries.len() {
+            if let Some(node) = state.nodes[idx] {
+                if node.parent == directory.inode && node.inode != directory.inode {
+                    if seen >= offset {
+                        entries[written] = DirEntry::new(node.inode, node.kind, node.name_str())?;
+                        written += 1;
+                    }
+                    seen += 1;
+                }
+            }
+            idx += 1;
+        }
+        Ok(written)
+    }
+
+    fn readdir_inode(
+        &self,
+        inode: InodeId,
+        offset: usize,
+        entries: &mut [DirEntry],
+    ) -> Result<usize, FsError> {
+        let state = self.state.lock();
+        let directory = state.node_by_inode(inode).ok_or(FsError::NotFound)?;
         if directory.kind != InodeKind::Directory {
             return Err(FsError::NotDirectory);
         }

@@ -2,9 +2,10 @@
 //!
 //! The module mirrors the fixed-table style used by the rest of `src/kernel`:
 //! paths are borrowed, mount state is stored in const-generic arrays, and the
-//! SSD/USB implementation uses bounded inline node/data storage until a real
-//! block-device cache is available.
+//! SSD/USB implementation uses bounded inline node/data storage while syncing
+//! metadata and file contents through a sector-addressed block-device trait.
 
+pub mod ext4;
 pub mod file;
 pub mod inode;
 pub mod mount;
@@ -13,6 +14,7 @@ pub mod permissions;
 pub mod ssd_usb;
 pub mod vfs;
 
+pub use ext4::{Ext4Backend, Ext4Error, Ext4Superblock, SsdUsbOptions};
 pub use file::{File, FileHandle, FileMode, FileTable, FileTableError, OpenFlags};
 pub use inode::{Dentry, DirEntry, Inode, InodeId, InodeKind, InodeMetadata, Stat};
 pub use mount::{Mount, MountError, MountTable};

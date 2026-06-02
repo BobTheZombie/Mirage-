@@ -107,6 +107,16 @@ pub trait FileSystem {
         if !file.mode().can_write() {
             return Err(VfsError::PermissionDenied);
         }
+        }
+        let bytes = self.pread(file, buffer, file.cursor())?;
+        file.advance(bytes);
+        Ok(bytes)
+    }
+
+    fn write(&self, file: &mut File, data: &[u8]) -> Result<usize, VfsError> {
+        if !file.mode().can_write() {
+            return Err(VfsError::PermissionDenied);
+        }
         let bytes = self.pwrite(file, data, file.cursor())?;
         file.advance(bytes);
         Ok(bytes)
@@ -208,6 +218,15 @@ pub trait FileSystem {
         Err(VfsError::Unsupported)
     }
 
+    fn ftruncate(
+        &self,
+        _file: &File,
+        _size: u64,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported)
+    }
+
     fn fsync(&self, _file: &File) -> Result<(), VfsError> {
         Ok(())
     }
@@ -215,6 +234,15 @@ pub trait FileSystem {
     fn readdir(
         &self,
         _path: Path<'_>,
+        _offset: usize,
+        _entries: &mut [DirEntry],
+    ) -> Result<usize, VfsError> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn readdir_inode(
+        &self,
+        _inode: InodeId,
         _offset: usize,
         _entries: &mut [DirEntry],
     ) -> Result<usize, VfsError> {

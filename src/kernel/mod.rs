@@ -19,6 +19,10 @@ use crate::kernel::device::{
     DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceKind, DeviceManager,
     MirageDeviceDescriptor,
 };
+use crate::kernel::fs::{
+    DirEntry, FileSystem, FileTable, FileTableError, FsCredentials, OpenFlags, Path, PathError,
+    Permissions, SsdUsbFileSystem, Stat, VfsError, MAX_PATH_BYTES,
+};
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{ProcessControlBlock, ProcessId, ProcessPriority, ProcessState};
@@ -37,6 +41,12 @@ use core::ptr::NonNull;
 pub const MAX_PROCESSES: usize = 64;
 pub const MESSAGE_DEPTH: usize = 16;
 pub const MAX_DEVICES: usize = 8;
+pub const MAX_OPEN_FILES: usize = 64;
+
+const AT_FDCWD: i32 = -100;
+const SEEK_SET: u64 = 0;
+const SEEK_CUR: u64 = 1;
+const SEEK_END: u64 = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub enum KernelError {
@@ -55,6 +65,8 @@ pub enum KernelError {
     InvalidArgument,
     InvalidPointer,
     AllocationFailed,
+    FileTableFull,
+    Filesystem(VfsError),
 }
 
 pub type KernelResult<T> = core::result::Result<T, KernelError>;
@@ -72,6 +84,8 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     scheduler: Scheduler<MAX_THREADS>,
     security: SecurityKernel<MAX_PROC>,
     devices: DeviceManager<MAX_DEVICES>,
+    root_fs: SsdUsbFileSystem,
+    open_files: FileTable<MAX_OPEN_FILES>,
     core_states: [CpuCoreState; cpu::MAX_CORES],
     thread_table: [Option<ThreadControlBlock>; MAX_THREADS],
     next_pid: u64,
@@ -89,6 +103,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             scheduler: Scheduler::new(),
             security: SecurityKernel::new(),
             devices: DeviceManager::new(),
+            root_fs: SsdUsbFileSystem::new_on_block_device(
+                false,
+                crate::kernel::device::built_in_block_storage(),
+            ),
+            open_files: FileTable::new(),
             core_states: [CpuCoreState::new(); cpu::MAX_CORES],
             thread_table: [None; MAX_THREADS],
             next_pid: 1,
@@ -101,6 +120,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.scheduler.reset();
         self.security.reset();
         self.devices.reset();
+        self.open_files.clear();
         self.next_pid = 1;
         self.next_thread = 1;
         self.message_sequence = 0;
@@ -367,6 +387,22 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             SyscallNumber::Free => self.syscall_free(context),
             SyscallNumber::Realloc => self.syscall_realloc(context),
             SyscallNumber::MallocAligned => self.syscall_malloc_aligned(context),
+            SyscallNumber::OpenAt => self.syscall_openat(context),
+            SyscallNumber::Close => self.syscall_close(context),
+            SyscallNumber::Read => self.syscall_read(context),
+            SyscallNumber::Write => self.syscall_write(context),
+            SyscallNumber::Pread64 => self.syscall_pread64(context),
+            SyscallNumber::Pwrite64 => self.syscall_pwrite64(context),
+            SyscallNumber::Lseek => self.syscall_lseek(context),
+            SyscallNumber::Statx => self.syscall_statx(context),
+            SyscallNumber::NewFstatAt => self.syscall_newfstatat(context),
+            SyscallNumber::Getdents64 => self.syscall_getdents64(context),
+            SyscallNumber::MkdirAt => self.syscall_mkdirat(context),
+            SyscallNumber::UnlinkAt => self.syscall_unlinkat(context),
+            SyscallNumber::RenameAt2 => self.syscall_renameat2(context),
+            SyscallNumber::Ftruncate => self.syscall_ftruncate(context),
+            SyscallNumber::Fsync => self.syscall_fsync(context),
+            SyscallNumber::Mount => self.syscall_mount(context),
         }
     }
 
@@ -565,6 +601,227 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         memory::malloc_aligned_for(context.caller, context.arg(0) as usize, alignment)
             .map(|ptr| ptr.as_ptr() as u64)
             .ok_or(KernelError::AllocationFailed)
+    }
+
+    fn syscall_openat(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let path = self.absolute_user_path(context.arg(0), context.arg(1))?;
+        let flags = OpenFlags::from_bits(context.arg(2) as u32);
+        let credentials = fs_credentials_for(context.caller);
+        let file = self
+            .root_fs
+            .open(path, flags, credentials)
+            .map_err(KernelError::Filesystem)?;
+        self.open_files
+            .insert(file)
+            .map(|fd| fd as u64)
+            .map_err(map_file_table_error)
+    }
+
+    fn syscall_close(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let file = self
+            .open_files
+            .close(context.arg(0) as usize)
+            .map_err(map_file_table_error)?;
+        self.root_fs.close(file).map_err(KernelError::Filesystem)?;
+        Ok(0)
+    }
+
+    fn syscall_read(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let buffer = user_slice_mut(context.arg(1), context.arg(2) as usize)?;
+        let file = self
+            .open_files
+            .get_mut(context.arg(0) as usize)
+            .map_err(map_file_table_error)?;
+        self.root_fs
+            .read(file, buffer)
+            .map(|read| read as u64)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_write(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let data = user_slice(context.arg(1), context.arg(2) as usize)?;
+        let file = self
+            .open_files
+            .get_mut(context.arg(0) as usize)
+            .map_err(map_file_table_error)?;
+        self.root_fs
+            .write(file, data)
+            .map(|written| written as u64)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_pread64(&self, context: SyscallContext) -> KernelResult<u64> {
+        let buffer = user_slice_mut(context.arg(1), context.arg(2) as usize)?;
+        let file = self
+            .open_files
+            .get(context.arg(0) as usize)
+            .map_err(map_file_table_error)?;
+        self.root_fs
+            .pread(&file, buffer, context.arg(3))
+            .map(|read| read as u64)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_pwrite64(&self, context: SyscallContext) -> KernelResult<u64> {
+        let data = user_slice(context.arg(1), context.arg(2) as usize)?;
+        let file = self
+            .open_files
+            .get(context.arg(0) as usize)
+            .map_err(map_file_table_error)?;
+        self.root_fs
+            .pwrite(&file, data, context.arg(3))
+            .map(|written| written as u64)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_lseek(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let fd = context.arg(0) as usize;
+        let offset = context.arg(1) as i64;
+        let whence = context.arg(2);
+        let file = self.open_files.get(fd).map_err(map_file_table_error)?;
+        let current = file.cursor() as i64;
+        let end = self
+            .root_fs
+            .fstat(&file)
+            .map_err(KernelError::Filesystem)?
+            .size as i64;
+        let base = match whence {
+            SEEK_SET => 0,
+            SEEK_CUR => current,
+            SEEK_END => end,
+            _ => return Err(KernelError::InvalidArgument),
+        };
+        let new_offset = base
+            .checked_add(offset)
+            .ok_or(KernelError::InvalidArgument)?;
+        if new_offset < 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        self.open_files
+            .get_mut(fd)
+            .map_err(map_file_table_error)?
+            .seek(new_offset as u64);
+        Ok(new_offset as u64)
+    }
+
+    fn syscall_statx(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.syscall_newfstatat(context)
+    }
+
+    fn syscall_newfstatat(&self, context: SyscallContext) -> KernelResult<u64> {
+        let path_ptr = context.arg(1);
+        let out = user_out_ptr::<Stat>(context.arg(2))?;
+        let stat = if path_ptr == 0 {
+            let file = self
+                .open_files
+                .get(context.arg(0) as usize)
+                .map_err(map_file_table_error)?;
+            self.root_fs.fstat(&file)
+        } else {
+            let path = self.absolute_user_path(context.arg(0), path_ptr)?;
+            self.root_fs.stat(path)
+        }
+        .map_err(KernelError::Filesystem)?;
+        unsafe { out.write(stat) };
+        Ok(0)
+    }
+
+    fn syscall_getdents64(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let entries = user_slice_mut_typed::<DirEntry>(context.arg(1), context.arg(2) as usize)?;
+        let fd = context.arg(0) as usize;
+        let file = self.open_files.get(fd).map_err(map_file_table_error)?;
+        let count = self
+            .root_fs
+            .readdir_inode(file.inode(), file.cursor() as usize, entries)
+            .map_err(KernelError::Filesystem)?;
+        self.open_files
+            .get_mut(fd)
+            .map_err(map_file_table_error)?
+            .advance(count);
+        Ok(count as u64)
+    }
+
+    fn syscall_mkdirat(&self, context: SyscallContext) -> KernelResult<u64> {
+        let path = self.absolute_user_path(context.arg(0), context.arg(1))?;
+        let mode = Permissions::new(context.arg(2) as u16, context.caller.raw() as u16, 0);
+        self.root_fs
+            .mkdir(path, mode, fs_credentials_for(context.caller))
+            .map(|_| 0)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_unlinkat(&self, context: SyscallContext) -> KernelResult<u64> {
+        let path = self.absolute_user_path(context.arg(0), context.arg(1))?;
+        let flags = context.arg(2);
+        let result = if (flags & 0x200) != 0 {
+            self.root_fs.rmdir(path, fs_credentials_for(context.caller))
+        } else {
+            self.root_fs
+                .unlink(path, fs_credentials_for(context.caller))
+        };
+        result.map(|_| 0).map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_renameat2(&self, context: SyscallContext) -> KernelResult<u64> {
+        if context.arg(4) != 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let old_path = self.absolute_user_path(context.arg(0), context.arg(1))?;
+        let new_path = self.absolute_user_path(context.arg(2), context.arg(3))?;
+        self.root_fs
+            .rename(old_path, new_path, fs_credentials_for(context.caller))
+            .map(|_| 0)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_ftruncate(&self, context: SyscallContext) -> KernelResult<u64> {
+        let file = self
+            .open_files
+            .get(context.arg(0) as usize)
+            .map_err(map_file_table_error)?;
+        self.root_fs
+            .ftruncate(&file, context.arg(1), fs_credentials_for(context.caller))
+            .map(|_| 0)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_fsync(&self, context: SyscallContext) -> KernelResult<u64> {
+        let file = self
+            .open_files
+            .get(context.arg(0) as usize)
+            .map_err(map_file_table_error)?;
+        self.root_fs
+            .fsync(&file)
+            .map(|_| 0)
+            .map_err(KernelError::Filesystem)
+    }
+
+    fn syscall_mount(&self, context: SyscallContext) -> KernelResult<u64> {
+        if context.arg(0) != 0 {
+            let _source = user_cstr(context.arg(0))?;
+        }
+        let target = self.user_path(context.arg(1))?;
+        if context.arg(2) != 0 {
+            let _filesystem_type = user_cstr(context.arg(2))?;
+        }
+        if !target.is_root() {
+            return Err(KernelError::Filesystem(VfsError::Unsupported));
+        }
+        Ok(0)
+    }
+
+    fn absolute_user_path(&self, dirfd: u64, path_ptr: u64) -> KernelResult<Path<'_>> {
+        let path = self.user_path(path_ptr)?;
+        if !path.as_str().starts_with('/') && dirfd as i32 != AT_FDCWD {
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(path)
+    }
+
+    fn user_path(&self, path_ptr: u64) -> KernelResult<Path<'_>> {
+        let bytes = user_cstr(path_ptr)?;
+        let raw = core::str::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)?;
+        Path::new(raw).map_err(map_path_error)
     }
 
     pub fn tick(&mut self) {
@@ -931,6 +1188,90 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 }
 
+fn map_file_table_error(error: FileTableError) -> KernelError {
+    match error {
+        FileTableError::Full => KernelError::FileTableFull,
+        FileTableError::InvalidDescriptor => KernelError::Filesystem(VfsError::InvalidHandle),
+    }
+}
+
+fn map_path_error(error: PathError) -> KernelError {
+    KernelError::Filesystem(VfsError::InvalidPath(error))
+}
+
+fn fs_credentials_for(pid: ProcessId) -> FsCredentials {
+    FsCredentials::user(pid.raw() as u16, 0)
+}
+
+fn validate_user_range(ptr: u64, len: usize) -> KernelResult<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    if ptr == 0 {
+        return Err(KernelError::InvalidPointer);
+    }
+    ptr.checked_add(len as u64)
+        .filter(|end| *end >= ptr)
+        .map(|_| ())
+        .ok_or(KernelError::InvalidPointer)
+}
+
+fn user_slice(ptr: u64, len: usize) -> KernelResult<&'static [u8]> {
+    validate_user_range(ptr, len)?;
+    if len == 0 {
+        Ok(&[])
+    } else {
+        Ok(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) })
+    }
+}
+
+fn user_slice_mut(ptr: u64, len: usize) -> KernelResult<&'static mut [u8]> {
+    validate_user_range(ptr, len)?;
+    if len == 0 {
+        Ok(&mut [])
+    } else {
+        Ok(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len) })
+    }
+}
+
+fn user_slice_mut_typed<T>(ptr: u64, count: usize) -> KernelResult<&'static mut [T]> {
+    let byte_len = count
+        .checked_mul(core::mem::size_of::<T>())
+        .ok_or(KernelError::InvalidPointer)?;
+    validate_user_range(ptr, byte_len)?;
+    if count == 0 {
+        Ok(&mut [])
+    } else if !(ptr as *mut T).is_aligned() {
+        Err(KernelError::InvalidPointer)
+    } else {
+        Ok(unsafe { core::slice::from_raw_parts_mut(ptr as *mut T, count) })
+    }
+}
+
+fn user_out_ptr<T>(ptr: u64) -> KernelResult<*mut T> {
+    validate_user_range(ptr, core::mem::size_of::<T>())?;
+    if !(ptr as *mut T).is_aligned() {
+        return Err(KernelError::InvalidPointer);
+    }
+    Ok(ptr as *mut T)
+}
+
+fn user_cstr(ptr: u64) -> KernelResult<&'static [u8]> {
+    validate_user_range(ptr, 1)?;
+    let start = ptr as *const u8;
+    let mut len = 0usize;
+    while len <= MAX_PATH_BYTES {
+        let byte = unsafe { start.add(len).read() };
+        if byte == 0 {
+            return user_slice(ptr, len);
+        }
+        len += 1;
+    }
+    Err(KernelError::Filesystem(VfsError::InvalidPath(
+        PathError::TooLong,
+    )))
+}
+
 fn encode_syscall_error(error: KernelError) -> u64 {
     MIRAGE_SYSCALL_ERROR_BIT | syscall_error_code(error).raw()
 }
@@ -952,6 +1293,28 @@ fn syscall_error_code(error: KernelError) -> SyscallErrorCode {
         KernelError::InvalidArgument => SyscallErrorCode::InvalidArgument,
         KernelError::InvalidPointer => SyscallErrorCode::BadAddress,
         KernelError::AllocationFailed => SyscallErrorCode::OutOfMemory,
+        KernelError::FileTableFull => SyscallErrorCode::OutOfMemory,
+        KernelError::Filesystem(error) => vfs_syscall_error_code(error),
+    }
+}
+
+fn vfs_syscall_error_code(error: VfsError) -> SyscallErrorCode {
+    match error {
+        VfsError::InvalidPath(_) | VfsError::NameTooLong | VfsError::InvalidArgument => {
+            SyscallErrorCode::InvalidArgument
+        }
+        VfsError::NotFound => SyscallErrorCode::FileNotFound,
+        VfsError::NotDirectory => SyscallErrorCode::NotDirectory,
+        VfsError::IsDirectory => SyscallErrorCode::IsDirectory,
+        VfsError::AlreadyExists => SyscallErrorCode::AlreadyExists,
+        VfsError::PermissionDenied => SyscallErrorCode::PermissionDenied,
+        VfsError::ReadOnly => SyscallErrorCode::ReadOnlyFilesystem,
+        VfsError::NoSpace => SyscallErrorCode::NoSpace,
+        VfsError::InvalidHandle => SyscallErrorCode::BadFileDescriptor,
+        VfsError::Busy => SyscallErrorCode::FilesystemBusy,
+        VfsError::CrossDevice => SyscallErrorCode::CrossDevice,
+        VfsError::TooManyLinks => SyscallErrorCode::TooManyLinks,
+        VfsError::Unsupported => SyscallErrorCode::UnsupportedFilesystem,
     }
 }
 
