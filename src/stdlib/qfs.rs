@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use crate::kernel::device::{BlockStorageDevice, DeviceError};
 
-pub use crate::kernel::fs::qfs::{
+pub use crate::kernel::fs::qfs_format::{
     QfsSuperblock, QFS_BOOK_PAGES, QFS_PAGE_SECTORS, QFS_SECTOR_SIZE,
 };
 
@@ -303,25 +303,7 @@ pub fn mkfs_image<P: AsRef<std::path::Path>>(
     sector_count: u64,
 ) -> Result<QfsFormatReport, QfsToolError> {
     use crate::kernel::device::BlockStorageDevice;
-    use crate::kernel::fs::qfs::{
-        QfsBookHeader, QfsBookIndexEntry, QfsBookRole, QfsInodeRecord, QfsPageLocation,
-        QfsSuperblock, QFS_BOOK_INDEX_ENTRY_BYTES, QFS_BOOK_PAGES, QFS_MAX_INODE_RECORDS,
-        QFS_PAGE_SECTORS,
-    };
-
-    let book_size_sectors = QFS_BOOK_PAGES as u64 * QFS_PAGE_SECTORS as u64;
-    if sector_count < 1 + book_size_sectors {
-        return Err(QfsToolError::InvalidArgument(
-            "QFS images must contain at least one complete book",
-        ));
-    }
-
-    let total_books = ((sector_count - 1) / book_size_sectors)
-        .try_into()
-        .map_err(|_| QfsToolError::InvalidArgument("QFS image is too large"))?;
-    let formatted_sectors = 1 + u64::from(total_books) * book_size_sectors;
-    let reserved_sectors = 1 + 1 + 1 + u64::from(QFS_PAGE_SECTORS) * 3;
-    let free_sectors = formatted_sectors.saturating_sub(reserved_sectors);
+    use crate::kernel::fs::qfs_format::initialize_image;
 
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -329,72 +311,14 @@ pub fn mkfs_image<P: AsRef<std::path::Path>>(
         .write(true)
         .truncate(true)
         .open(path)?;
-    let device = StdQfsBlockDevice::create_sized(file, QFS_SECTOR_SIZE, formatted_sectors)?;
-
-    let superblock = QfsSuperblock {
-        total_books,
-        root_inode: crate::kernel::fs::inode::InodeId::ROOT.raw(),
-        inode_table: QfsPageLocation::new(0, 1),
-        free_space_bitmap: QfsPageLocation::new(0, 2),
-        journal: QfsPageLocation::new(0, 8),
-        total_sectors: formatted_sectors,
-        free_sectors,
-        ..QfsSuperblock::empty()
-    };
-
-    let mut sector = [0u8; QFS_SECTOR_SIZE];
-    superblock.write_sector(&mut sector)?;
-    device.write_sectors(0, &sector)?;
-
-    let mut header = QfsBookHeader::empty();
-    header.book_id = 0;
-    header.chapter_count = 3;
-    header.index_entry_count = 3;
-    sector.fill(0);
-    header.write_sector(&mut sector)?;
-    device.write_sectors(1, &sector)?;
-
-    sector.fill(0);
-    QfsBookIndexEntry {
-        chapter_id: 1,
-        first_page: 1,
-        page_count: 1,
-        role: QfsBookRole::Inode,
-        flags: 0,
-        reserved: [0; 6],
-    }
-    .write(&mut sector[0..QFS_BOOK_INDEX_ENTRY_BYTES])?;
-    QfsBookIndexEntry {
-        chapter_id: 2,
-        first_page: 2,
-        page_count: 1,
-        role: QfsBookRole::FreeMap,
-        flags: 0,
-        reserved: [0; 6],
-    }
-    .write(&mut sector[QFS_BOOK_INDEX_ENTRY_BYTES..QFS_BOOK_INDEX_ENTRY_BYTES * 2])?;
-    QfsBookIndexEntry {
-        chapter_id: 3,
-        first_page: 8,
-        page_count: QFS_BOOK_PAGES - 8,
-        role: QfsBookRole::Journal,
-        flags: 0,
-        reserved: [0; 6],
-    }
-    .write(&mut sector[QFS_BOOK_INDEX_ENTRY_BYTES * 2..QFS_BOOK_INDEX_ENTRY_BYTES * 3])?;
-    device.write_sectors(2, &sector)?;
-
-    let mut inodes = [None; QFS_MAX_INODE_RECORDS];
-    inodes[0] = Some(QfsInodeRecord::root());
-    sector.fill(0);
-    crate::kernel::fs::qfs::serialize_inode_records(&inodes, &mut sector)?;
-    device.write_sectors(1 + u64::from(QFS_PAGE_SECTORS), &sector)?;
+    let device = StdQfsBlockDevice::create_sized(file, QFS_SECTOR_SIZE, sector_count)?;
+    let superblock = initialize_image(&device, sector_count)?;
     device.flush()?;
 
     Ok(QfsFormatReport {
-        sector_count: formatted_sectors,
-        total_books,
-        free_sectors,
+        sector_count: superblock.total_sectors,
+        total_books: superblock.total_books,
+        free_sectors: superblock.free_sectors,
     })
 }
 
@@ -410,9 +334,7 @@ pub fn fsck_image<P: AsRef<std::path::Path>>(path: P) -> Result<QfsImageReport, 
 pub fn dump_superblock<P: AsRef<std::path::Path>>(path: P) -> Result<QfsSuperblock, QfsToolError> {
     let file = std::fs::OpenOptions::new().read(true).open(path)?;
     let device = StdQfsBlockDevice::new(file)?;
-    let mut sector = [0u8; QFS_SECTOR_SIZE];
-    crate::kernel::device::BlockStorageDevice::read_sectors(&device, 0, &mut sector)?;
-    Ok(QfsSuperblock::parse_sector(&sector)?)
+    Ok(crate::kernel::fs::qfs_format::read_superblock(&device)?)
 }
 
 /// Returns mounted QFS metadata plus a stat lookup for `path` inside the image.
@@ -480,7 +402,5 @@ fn dump_mounted_superblock(
     let device = fs.block_device().ok_or(QfsToolError::InvalidArgument(
         "QFS filesystem has no block device",
     ))?;
-    let mut sector = [0u8; QFS_SECTOR_SIZE];
-    device.read_sectors(0, &mut sector)?;
-    Ok(QfsSuperblock::parse_sector(&sector)?)
+    Ok(crate::kernel::fs::qfs_format::read_superblock(device)?)
 }
