@@ -55,7 +55,7 @@ const QFS_BOOK_HEADER_SECTORS: u64 = 1;
 pub const QFS_BOOK_INDEX_SECTORS: u64 = 1;
 const QFS_SUPERBLOCK_RESERVED_BYTES: usize = 64;
 const QFS_BOOK_HEADER_RESERVED_BYTES: usize = 496;
-const QFS_BOOK_INDEX_ENTRY_BYTES: usize = 16;
+pub const QFS_BOOK_INDEX_ENTRY_BYTES: usize = 16;
 const QFS_INODE_RECORD_BYTES: usize = 192;
 const QFS_JOURNAL_SLOT_SECTORS: u64 = 2;
 const QFS_JOURNAL_PAYLOAD_SECTOR_OFFSET: u64 = 1;
@@ -1892,7 +1892,7 @@ fn parse_inode_records(
     Ok(())
 }
 
-fn serialize_inode_records(
+pub(crate) fn serialize_inode_records(
     inodes: &[Option<QfsInodeRecord>; QFS_MAX_INODE_RECORDS],
     sector: &mut [u8; QFS_SECTOR_SIZE],
 ) -> Result<(), FsError> {

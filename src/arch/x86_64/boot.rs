@@ -4,18 +4,18 @@
 //! takes ownership of the initial stack contract, aligns it to the SysV x86_64 ABI, clears the
 //! kernel `.bss`, snapshots boot-protocol state, and only then calls the Rust kernel entry point.
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 use core::arch::global_asm;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 use core::ptr::addr_of;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 use core::ptr::write_bytes;
 
 use crate::boot::MemoryMapEntry as LimineMemoryMapEntry;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 use crate::boot::{self as limine, Framebuffer};
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 global_asm!(
     r#"
     .section .text._start,"ax",@progbits
@@ -33,7 +33,7 @@ _start:
 "#
 );
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 extern "C" {
     static mut __bss_start: u8;
     static mut __bss_end: u8;
@@ -47,13 +47,13 @@ extern "C" {
     static __data_end: u8;
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 extern "Rust" {
     fn kernel_main(boot_info: BootInfo) -> !;
 }
 
 /// Architecture-owned entry point called by the `_start` assembly stub.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 #[no_mangle]
 pub unsafe extern "C" fn __mirage_x86_64_bootstrap() -> ! {
     clear_bss();
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn __mirage_x86_64_bootstrap() -> ! {
     kernel_main(boot_info)
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 unsafe fn clear_bss() {
     let start = addr_of!(__bss_start) as usize;
     let end = addr_of!(__bss_end) as usize;
@@ -90,7 +90,7 @@ pub struct BootInfo {
 }
 
 impl BootInfo {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "qfs-std")))]
     fn from_limine(raw: limine::LimineBootSnapshot, sections: KernelSections) -> Self {
         let executable = raw.executable_address.map(|address| KernelLoadRange {
             physical_start: PhysicalAddress(address.physical_base),
@@ -266,7 +266,7 @@ pub struct FramebufferInfo {
     pub blue_mask_shift: u8,
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 fn first_framebuffer(
     response: Option<&'static limine::FramebufferResponse>,
 ) -> Option<FramebufferInfo> {
@@ -320,7 +320,7 @@ pub struct KernelSections {
 }
 
 impl KernelSections {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "qfs-std")))]
     fn from_linker() -> Self {
         Self {
             kernel: VirtualRange::from_symbols(addr_of!(__kernel_start), addr_of!(__kernel_end)),
@@ -339,7 +339,7 @@ pub struct VirtualRange {
 }
 
 impl VirtualRange {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "qfs-std")))]
     fn from_symbols(start: *const u8, end: *const u8) -> Self {
         Self {
             start: VirtualAddress(start as u64),

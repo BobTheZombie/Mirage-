@@ -63,7 +63,7 @@ struct DescriptorTablePointer {
 
 static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 extern "C" {
     fn __mirage_isr_divide_error();
     fn __mirage_isr_debug();
@@ -89,52 +89,52 @@ extern "C" {
     fn __mirage_syscall_entry();
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "qfs-std")))]
 core::arch::global_asm!(include_str!("entry.S"));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_divide_error() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_debug() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_non_maskable() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_breakpoint() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_overflow() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_bound_range() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_invalid_opcode() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_device_not_available() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_double_fault() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_invalid_tss() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_segment_not_present() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_stack_segment_fault() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_general_protection() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_page_fault() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_x87() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_alignment_check() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_machine_check() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_simd() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_virtualization() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_timer() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_isr_syscall_trap() {}
-#[cfg(test)]
+#[cfg(any(test, feature = "qfs-std"))]
 extern "C" fn __mirage_syscall_entry() {}
 
 /// Build and load the IDT, then enable the CPU syscall entry point.
@@ -224,7 +224,7 @@ unsafe fn set_gate(vector: u8, handler: usize, ist: u8, options: u8) {
 }
 
 unsafe fn load() {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "qfs-std")))]
     {
         let pointer = DescriptorTablePointer {
             limit: (core::mem::size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
@@ -255,14 +255,14 @@ extern "C" fn __mirage_rust_interrupt_dispatch(vector: u64, error_code: u64) {
 }
 
 fn read_cr2() -> u64 {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "qfs-std")))]
     unsafe {
         let value: u64;
         core::arch::asm!("mov {}, cr2", out(reg) value, options(nomem, nostack, preserves_flags));
         value
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "qfs-std"))]
     {
         0
     }
