@@ -11,6 +11,7 @@ pub mod inode;
 pub mod mount;
 pub mod path;
 pub mod permissions;
+pub mod qfs;
 pub mod ssd_usb;
 pub mod stdlib;
 pub mod vfs;
@@ -24,6 +25,13 @@ pub use inode::{Dentry, DirEntry, Inode, InodeId, InodeKind, InodeMetadata, Stat
 pub use mount::{Mount, MountError, MountTable};
 pub use path::{Path, PathError, MAX_COMPONENT_BYTES, MAX_PATH_BYTES};
 pub use permissions::{AccessMode, Credentials as FsCredentials, Permissions};
+pub use qfs::{
+    QfsBookHeader, QfsBookIndexEntry, QfsChapterIndexEntry, QfsFileSystem, QfsInodeRecord,
+    QfsJournalRecord, QfsSuperblock, QFS_BOOK_PAGES, QFS_INLINE_DATA_BYTES, QFS_MAGIC,
+    QFS_MAX_BOOKS, QFS_MAX_BOOK_INDEX_ENTRIES, QFS_MAX_CHAPTER_INDEX_ENTRIES,
+    QFS_MAX_INODE_RECORDS, QFS_MAX_JOURNAL_RECORDS, QFS_NAME_BYTES, QFS_PAGE_SECTORS,
+    QFS_SECTOR_SIZE, QFS_VERSION,
+};
 pub use ssd_usb::{SsdUsbFileSystem, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_VOLUME_NODES};
 pub use stdlib::{
     errno_from_vfs, negative_errno_from_vfs, open_flags_from_libc, permissions_from_libc_mode,
