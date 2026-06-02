@@ -1,7 +1,7 @@
 //! The Mirage L2 security kernel responsible for authentication and isolation.
 
 use crate::kernel::memory::MemoryProtection;
-use crate::kernel::process::ProcessId;
+use crate::kernel::process::{ExecRequest, ProcessId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecurityLevel {
@@ -130,7 +130,7 @@ impl CapabilitySet {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Credentials {
     label: SecurityLabel,
     capabilities: CapabilitySet,
@@ -370,6 +370,33 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         Ok(())
     }
 
+    /// Authorize an exec image replacement. Unlike spawn, exec does not require
+    /// CAP_SPAWN because the process is not creating a new task domain. L2 still
+    /// verifies filesystem executable metadata and rejects credential escalation
+    /// unless the target is modeled as a signed service daemon.
+    pub fn authorize_exec(&self, request: &ExecRequest) -> Result<(), IsolationError> {
+        let domain = self.domain(request.caller)?;
+
+        if !request.image.is_executable() {
+            return Err(IsolationError::PolicyViolation);
+        }
+
+        if request.argv.truncated || request.envp.truncated {
+            return Err(IsolationError::PolicyViolation);
+        }
+
+        let requested = request.requested_credentials;
+        if domain.has_system_privilege() || domain.can_delegate(requested) {
+            return Ok(());
+        }
+
+        if request.image.is_signed_service_daemon() {
+            return Ok(());
+        }
+
+        Err(IsolationError::PolicyViolation)
+    }
+
     pub fn authorize_device_enumeration(&self, pid: ProcessId) -> Result<(), IsolationError> {
         let domain = self.domain(pid)?;
         if domain.capabilities.allows_io() {
@@ -442,6 +469,87 @@ mod tests {
 
     fn pid(raw: u64) -> ProcessId {
         ProcessId::new(raw)
+    }
+
+    fn exec_request(
+        caller: ProcessId,
+        requested_credentials: Credentials,
+        mode: u16,
+        signature: Option<crate::kernel::process::ExecSignatureMetadata>,
+    ) -> crate::kernel::process::ExecRequest {
+        let path = crate::kernel::fs::Path::new("/bin/app").unwrap();
+        crate::kernel::process::ExecRequest::new(
+            caller,
+            crate::kernel::process::ProcessPath::from_path(path),
+            crate::kernel::process::ExecVectorMetadata::empty(),
+            crate::kernel::process::ExecVectorMetadata::empty(),
+            requested_credentials,
+            crate::kernel::process::ExecImageMetadata::new(
+                7,
+                4096,
+                mode,
+                0x1000,
+                0x8000,
+                signature.map(|_| crate::kernel::process::ExecServiceDaemon::Display),
+                signature,
+            ),
+        )
+    }
+
+    #[test]
+    fn authorize_exec_allows_same_credentials_without_spawn_capability() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        security.register_task(pid(1), Credentials::user()).unwrap();
+
+        let request = exec_request(pid(1), Credentials::user(), 0o755, None);
+
+        assert_eq!(security.authorize_exec(&request), Ok(()));
+    }
+
+    #[test]
+    fn authorize_exec_rejects_unsigned_escalation_and_non_executable_image() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        security.register_task(pid(1), Credentials::user()).unwrap();
+
+        let elevated = Credentials::new(
+            SecurityLabel::internal(),
+            CapabilitySet::ipc_io(),
+            IsolationLevel::Process,
+        );
+        let unsigned = exec_request(pid(1), elevated, 0o755, None);
+        assert_eq!(
+            security.authorize_exec(&unsigned),
+            Err(IsolationError::PolicyViolation)
+        );
+
+        let non_executable = exec_request(pid(1), Credentials::user(), 0o644, None);
+        assert_eq!(
+            security.authorize_exec(&non_executable),
+            Err(IsolationError::PolicyViolation)
+        );
+    }
+
+    #[test]
+    fn authorize_exec_allows_signed_service_daemon_escalation() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        security.register_task(pid(1), Credentials::user()).unwrap();
+
+        let elevated = Credentials::new(
+            SecurityLabel::internal(),
+            CapabilitySet::ipc_io(),
+            IsolationLevel::Process,
+        );
+        let signed = exec_request(
+            pid(1),
+            elevated,
+            0o755,
+            Some(crate::kernel::process::ExecSignatureMetadata::new(
+                "mirage-service-root",
+                0x444953504c415944,
+            )),
+        );
+
+        assert_eq!(security.authorize_exec(&signed), Ok(()));
     }
 
     #[test]

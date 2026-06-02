@@ -1,13 +1,147 @@
 //! Process control structures for the Mirage kernel.
 
 use crate::kernel::fs::{DescriptorFlags, FileDescriptionId, Path, Permissions, MAX_PATH_BYTES};
-use crate::subkernel::SecurityLabel;
+use crate::subkernel::{Credentials, SecurityLabel};
 
 pub const MAX_PENDING_SIGNALS: usize = 32;
 pub const MAX_SIGNAL_NUMBER: usize = 64;
 pub const SIGKILL: u8 = 9;
 pub const SIGTERM: u8 = 15;
 pub const SIGCHLD: u8 = 17;
+
+/// Maximum argument pointers recorded for one exec request.
+pub const MAX_EXEC_ARGS: usize = 64;
+/// Maximum environment pointers recorded for one exec request.
+pub const MAX_EXEC_ENVS: usize = 64;
+
+/// Fixed-size argv/env metadata copied from userspace before an exec decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecVectorMetadata {
+    pub base: u64,
+    pub count: usize,
+    pub truncated: bool,
+}
+
+impl ExecVectorMetadata {
+    pub const fn empty() -> Self {
+        Self {
+            base: 0,
+            count: 0,
+            truncated: false,
+        }
+    }
+
+    pub const fn new(base: u64, count: usize, truncated: bool) -> Self {
+        Self {
+            base,
+            count,
+            truncated,
+        }
+    }
+}
+
+/// Well-known service-daemon classes whose images must be backed by a manifest
+/// signature before L2 may authorize privileged credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecServiceDaemon {
+    Display,
+    Network,
+    Input,
+    L2Driver,
+}
+
+/// Compact model of a signed executable manifest. Mirage stores the signer and
+/// manifest digest here; actual cryptographic validation happens while building
+/// image metadata, not while mechanically replacing process state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecSignatureMetadata {
+    pub signer: &'static str,
+    pub manifest_digest: u64,
+}
+
+impl ExecSignatureMetadata {
+    pub const fn new(signer: &'static str, manifest_digest: u64) -> Self {
+        Self {
+            signer,
+            manifest_digest,
+        }
+    }
+}
+
+/// Filesystem and trust metadata for the image targeted by an exec request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecImageMetadata {
+    pub inode: u64,
+    pub size: u64,
+    pub mode: u16,
+    pub entry_point: u64,
+    pub stack_pointer: u64,
+    pub service_daemon: Option<ExecServiceDaemon>,
+    pub signature: Option<ExecSignatureMetadata>,
+}
+
+impl ExecImageMetadata {
+    pub const fn new(
+        inode: u64,
+        size: u64,
+        mode: u16,
+        entry_point: u64,
+        stack_pointer: u64,
+        service_daemon: Option<ExecServiceDaemon>,
+        signature: Option<ExecSignatureMetadata>,
+    ) -> Self {
+        Self {
+            inode,
+            size,
+            mode,
+            entry_point,
+            stack_pointer,
+            service_daemon,
+            signature,
+        }
+    }
+
+    pub const fn is_executable(self) -> bool {
+        (self.mode & 0o111) != 0
+    }
+
+    pub const fn is_signed_service_daemon(self) -> bool {
+        self.service_daemon.is_some() && self.signature.is_some()
+    }
+}
+
+/// Fully resolved and policy-ready exec request. Building this structure is the
+/// parsing/loading phase; L2 authorization consumes it before any process image
+/// mutation is allowed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecRequest {
+    pub caller: ProcessId,
+    pub path: ProcessPath,
+    pub argv: ExecVectorMetadata,
+    pub envp: ExecVectorMetadata,
+    pub requested_credentials: Credentials,
+    pub image: ExecImageMetadata,
+}
+
+impl ExecRequest {
+    pub const fn new(
+        caller: ProcessId,
+        path: ProcessPath,
+        argv: ExecVectorMetadata,
+        envp: ExecVectorMetadata,
+        requested_credentials: Credentials,
+        image: ExecImageMetadata,
+    ) -> Self {
+        Self {
+            caller,
+            path,
+            argv,
+            envp,
+            requested_credentials,
+            image,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProcessGroupId(u64);
