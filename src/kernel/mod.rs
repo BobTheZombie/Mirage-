@@ -22,7 +22,7 @@ use crate::kernel::device::{
 use crate::kernel::fs::{
     open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, CDirEntry,
     CStat, DescriptorFlags, DirEntry, FileDescriptionId, FileSystem, FileTable, FileTableError,
-    FsCredentials, Path, PathError, SsdUsbFileSystem, VfsError, MAX_PATH_BYTES,
+    FsCredentials, Path, PathError, QfsFileSystem, VfsError, MAX_PATH_BYTES,
 };
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
@@ -50,6 +50,12 @@ const AT_FDCWD: i32 = -100;
 const SEEK_SET: u64 = 0;
 const SEEK_CUR: u64 = 1;
 const SEEK_END: u64 = 2;
+
+const DEFAULT_ROOT_FILESYSTEM: &[u8] = b"qfs";
+
+fn is_supported_root_filesystem(filesystem_type: &[u8]) -> bool {
+    matches!(filesystem_type, b"qfs" | b"ext4" | b"ssd_usb" | b"ssd-usb")
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum KernelError {
@@ -87,7 +93,7 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     scheduler: Scheduler<MAX_THREADS>,
     security: SecurityKernel<MAX_PROC>,
     devices: DeviceManager<MAX_DEVICES>,
-    root_fs: SsdUsbFileSystem,
+    root_fs: QfsFileSystem,
     open_files: FileTable<MAX_OPEN_FILES>,
     core_states: [CpuCoreState; cpu::MAX_CORES],
     thread_table: [Option<ThreadControlBlock>; MAX_THREADS],
@@ -106,7 +112,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             scheduler: Scheduler::new(),
             security: SecurityKernel::new(),
             devices: DeviceManager::new(),
-            root_fs: SsdUsbFileSystem::new_on_block_device(
+            root_fs: QfsFileSystem::new_on_block_device(
                 false,
                 crate::kernel::device::built_in_block_storage(),
             ),
@@ -847,10 +853,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             let _source = user_cstr(context.arg(0))?;
         }
         let target = self.user_path(context.arg(1))?;
-        if context.arg(2) != 0 {
-            let _filesystem_type = user_cstr(context.arg(2))?;
-        }
-        if !target.is_root() {
+        let filesystem_type = if context.arg(2) == 0 {
+            DEFAULT_ROOT_FILESYSTEM
+        } else {
+            user_cstr(context.arg(2))?
+        };
+        if !target.is_root() || !is_supported_root_filesystem(filesystem_type) {
             return Err(KernelError::Filesystem(VfsError::Unsupported));
         }
         Ok(0)
