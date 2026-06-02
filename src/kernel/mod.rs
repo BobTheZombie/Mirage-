@@ -15,7 +15,7 @@ pub mod syscall;
 pub mod thread;
 pub mod time;
 
-use crate::arch::x86_64::{self, clock, ThreadRunOutcome};
+use crate::arch::x86_64::{self, boot::FramebufferInfo, clock, ThreadRunOutcome};
 use crate::kernel::cpu::CpuCoreState;
 use crate::kernel::device::{
     DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceKind, DeviceManager,
@@ -221,6 +221,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     pub fn bootstrap(&mut self) {
+        self.bootstrap_with_framebuffer(None);
+    }
+
+    pub fn bootstrap_with_framebuffer(&mut self, framebuffer: Option<FramebufferInfo>) {
         self.scheduler.reset();
         self.security.reset();
         self.devices.reset();
@@ -252,7 +256,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.core_states[0].online();
         }
 
-        self.devices.install_core_devices();
+        self.devices
+            .install_core_devices_with_framebuffer(framebuffer);
     }
 
     pub fn bring_up_secondary_cores(&mut self, count: usize) {

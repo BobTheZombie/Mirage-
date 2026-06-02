@@ -11,7 +11,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
     x86_64::init_architecture(&boot_info);
 
     let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
-    kernel.bootstrap();
+    kernel.bootstrap_with_framebuffer(boot_info.framebuffer);
 
     if cpu::MAX_CORES > 1 {
         kernel.bring_up_secondary_cores(cpu::MAX_CORES - 1);
