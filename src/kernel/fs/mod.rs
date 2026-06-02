@@ -12,6 +12,7 @@ pub mod mount;
 pub mod path;
 pub mod permissions;
 pub mod qfs;
+pub mod qfs_format;
 #[cfg(feature = "qfs-std")]
 pub mod qfs_std;
 pub mod ssd_usb;
