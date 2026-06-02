@@ -159,6 +159,26 @@ pub trait DeviceDriver {
     fn write(&self, _data: &[u8]) -> Result<usize, DeviceError> {
         Err(DeviceError::Unsupported)
     }
+    fn as_block_storage(&self) -> Option<&dyn BlockStorageDevice> {
+        None
+    }
+}
+
+/// Sector-addressed interface implemented by block storage devices.
+///
+/// Block filesystems should use these operations instead of treating storage as
+/// a byte stream: every read or write starts at a logical sector and transfers
+/// whole sectors whose byte length is `sector_size() * sector_count`.
+pub trait BlockStorageDevice {
+    fn sector_size(&self) -> usize;
+    fn sector_count(&self) -> u64;
+    fn read_sectors(&self, first_sector: u64, buffer: &mut [u8]) -> Result<usize, DeviceError>;
+    fn write_sectors(&self, first_sector: u64, data: &[u8]) -> Result<usize, DeviceError>;
+    fn flush(&self) -> Result<(), DeviceError>;
+    fn discard(&self, first_sector: u64, sector_count: u64) -> Result<(), DeviceError>;
+    fn write_zeroes(&self, first_sector: u64, sector_count: u64) -> Result<(), DeviceError> {
+        self.discard(first_sector, sector_count)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -246,6 +266,66 @@ impl<const MAX: usize> DeviceManager<MAX> {
     pub fn write(&self, id: DeviceId, data: &[u8]) -> Result<usize, DeviceError> {
         let entry = self.find_device(id).ok_or(DeviceError::NotFound)?;
         entry.driver.write(data)
+    }
+
+    pub fn block_storage(&self, id: DeviceId) -> Result<&dyn BlockStorageDevice, DeviceError> {
+        let entry = self.find_device(id).ok_or(DeviceError::NotFound)?;
+        if entry.driver.kind() != DeviceKind::BlockStorage {
+            return Err(DeviceError::Unsupported);
+        }
+        entry
+            .driver
+            .as_block_storage()
+            .ok_or(DeviceError::Unsupported)
+    }
+
+    pub fn sector_size(&self, id: DeviceId) -> Result<usize, DeviceError> {
+        Ok(self.block_storage(id)?.sector_size())
+    }
+
+    pub fn sector_count(&self, id: DeviceId) -> Result<u64, DeviceError> {
+        Ok(self.block_storage(id)?.sector_count())
+    }
+
+    pub fn read_sectors(
+        &self,
+        id: DeviceId,
+        first_sector: u64,
+        buffer: &mut [u8],
+    ) -> Result<usize, DeviceError> {
+        self.block_storage(id)?.read_sectors(first_sector, buffer)
+    }
+
+    pub fn write_sectors(
+        &self,
+        id: DeviceId,
+        first_sector: u64,
+        data: &[u8],
+    ) -> Result<usize, DeviceError> {
+        self.block_storage(id)?.write_sectors(first_sector, data)
+    }
+
+    pub fn flush_block_storage(&self, id: DeviceId) -> Result<(), DeviceError> {
+        self.block_storage(id)?.flush()
+    }
+
+    pub fn discard_sectors(
+        &self,
+        id: DeviceId,
+        first_sector: u64,
+        sector_count: u64,
+    ) -> Result<(), DeviceError> {
+        self.block_storage(id)?.discard(first_sector, sector_count)
+    }
+
+    pub fn write_zeroes(
+        &self,
+        id: DeviceId,
+        first_sector: u64,
+        sector_count: u64,
+    ) -> Result<(), DeviceError> {
+        self.block_storage(id)?
+            .write_zeroes(first_sector, sector_count)
     }
 
     fn find_free_slot(&self) -> Option<usize> {
@@ -393,28 +473,46 @@ impl DeviceDriver for SystemTimerDriver {
 }
 
 struct BlockStorageState {
-    block: [u8; BlockStorageDriver::BLOCK_SIZE],
+    sectors: [[u8; BlockStorageDriver::SECTOR_SIZE]; BlockStorageDriver::SECTOR_COUNT],
 }
 
 impl BlockStorageState {
     const fn new() -> Self {
         Self {
-            block: [0; BlockStorageDriver::BLOCK_SIZE],
+            sectors: [[0; BlockStorageDriver::SECTOR_SIZE]; BlockStorageDriver::SECTOR_COUNT],
         }
     }
 }
 
+/// Built-in RAM-backed block device used until platform storage drivers register
+/// their own block devices with [`DeviceManager`].
 pub struct BlockStorageDriver {
     state: SpinLock<BlockStorageState>,
 }
 
 impl BlockStorageDriver {
-    const BLOCK_SIZE: usize = 512;
+    pub const SECTOR_SIZE: usize = 512;
+    pub const SECTOR_COUNT: usize = 160;
 
     pub const fn new() -> Self {
         Self {
             state: SpinLock::new(BlockStorageState::new()),
         }
+    }
+
+    fn validate_transfer(&self, first_sector: u64, byte_len: usize) -> Result<usize, DeviceError> {
+        let sector_size = Self::SECTOR_SIZE;
+        if byte_len % sector_size != 0 {
+            return Err(DeviceError::BufferTooSmall);
+        }
+        let sectors = byte_len / sector_size;
+        let last_sector = first_sector
+            .checked_add(sectors as u64)
+            .ok_or(DeviceError::Unsupported)?;
+        if first_sector > Self::SECTOR_COUNT as u64 || last_sector > Self::SECTOR_COUNT as u64 {
+            return Err(DeviceError::NotFound);
+        }
+        Ok(sectors)
     }
 }
 
@@ -432,26 +530,75 @@ impl DeviceDriver for BlockStorageDriver {
     }
 
     fn read(&self, buffer: &mut [u8]) -> Result<usize, DeviceError> {
-        if buffer.len() < Self::BLOCK_SIZE {
-            return Err(DeviceError::BufferTooSmall);
-        }
-        let state = self.state.lock();
-        buffer[..Self::BLOCK_SIZE].copy_from_slice(&state.block);
-        Ok(Self::BLOCK_SIZE)
+        self.read_sectors(0, buffer)
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, DeviceError> {
-        let mut state = self.state.lock();
-        let to_copy = min(Self::BLOCK_SIZE, data.len());
-        state.block[..to_copy].copy_from_slice(&data[..to_copy]);
-        if to_copy < Self::BLOCK_SIZE {
-            let mut idx = to_copy;
-            while idx < Self::BLOCK_SIZE {
-                state.block[idx] = 0;
-                idx += 1;
-            }
+        self.write_sectors(0, data)
+    }
+
+    fn as_block_storage(&self) -> Option<&dyn BlockStorageDevice> {
+        Some(self)
+    }
+}
+
+impl BlockStorageDevice for BlockStorageDriver {
+    fn sector_size(&self) -> usize {
+        Self::SECTOR_SIZE
+    }
+
+    fn sector_count(&self) -> u64 {
+        Self::SECTOR_COUNT as u64
+    }
+
+    fn read_sectors(&self, first_sector: u64, buffer: &mut [u8]) -> Result<usize, DeviceError> {
+        let sectors = self.validate_transfer(first_sector, buffer.len())?;
+        let state = self.state.lock();
+        let mut idx = 0usize;
+        while idx < sectors {
+            let sector = first_sector as usize + idx;
+            let start = idx * Self::SECTOR_SIZE;
+            let end = start + Self::SECTOR_SIZE;
+            buffer[start..end].copy_from_slice(&state.sectors[sector]);
+            idx += 1;
         }
-        Ok(to_copy)
+        Ok(buffer.len())
+    }
+
+    fn write_sectors(&self, first_sector: u64, data: &[u8]) -> Result<usize, DeviceError> {
+        let sectors = self.validate_transfer(first_sector, data.len())?;
+        let mut state = self.state.lock();
+        let mut idx = 0usize;
+        while idx < sectors {
+            let sector = first_sector as usize + idx;
+            let start = idx * Self::SECTOR_SIZE;
+            let end = start + Self::SECTOR_SIZE;
+            state.sectors[sector].copy_from_slice(&data[start..end]);
+            idx += 1;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&self) -> Result<(), DeviceError> {
+        Ok(())
+    }
+
+    fn discard(&self, first_sector: u64, sector_count: u64) -> Result<(), DeviceError> {
+        let byte_len = (sector_count as usize)
+            .checked_mul(Self::SECTOR_SIZE)
+            .ok_or(DeviceError::Unsupported)?;
+        let sectors = self.validate_transfer(first_sector, byte_len)?;
+        let mut state = self.state.lock();
+        let mut idx = 0usize;
+        while idx < sectors {
+            state.sectors[first_sector as usize + idx].fill(0);
+            idx += 1;
+        }
+        Ok(())
+    }
+
+    fn write_zeroes(&self, first_sector: u64, sector_count: u64) -> Result<(), DeviceError> {
+        self.discard(first_sector, sector_count)
     }
 }
 
@@ -461,4 +608,8 @@ static BLOCK_STORAGE_DRIVER: BlockStorageDriver = BlockStorageDriver::new();
 
 pub fn system_timer() -> &'static SystemTimerDriver {
     &SYSTEM_TIMER_DRIVER
+}
+
+pub const fn built_in_block_storage() -> &'static BlockStorageDriver {
+    &BLOCK_STORAGE_DRIVER
 }
