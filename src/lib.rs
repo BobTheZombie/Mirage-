@@ -18,6 +18,7 @@ pub mod boot;
 pub mod kernel;
 pub mod libc;
 pub mod librust;
+pub mod stdlib;
 pub mod subkernel;
 
 #[cfg(not(test))]
