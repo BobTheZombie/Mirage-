@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod memory;
 pub mod process;
 pub mod scheduler;
+pub mod services;
 pub mod sync;
 pub mod syscall;
 pub mod thread;
