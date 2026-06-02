@@ -105,6 +105,10 @@ impl CapabilitySet {
         Self::new(CAP_IPC)
     }
 
+    pub const fn ipc_io() -> Self {
+        Self::new(CAP_IPC | CAP_IO)
+    }
+
     pub fn allows_ipc(&self) -> bool {
         (self.flags & CAP_IPC) != 0
     }
