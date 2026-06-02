@@ -352,6 +352,33 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         }
     }
 
+    /// Authorize the L2/subkernel control plane to bind a service endpoint.
+    pub fn authorize_service_control(&self, pid: ProcessId) -> Result<(), IsolationError> {
+        let domain = self.domain(pid)?;
+        if domain.has_system_privilege() {
+            Ok(())
+        } else {
+            Err(IsolationError::CapabilityMissing)
+        }
+    }
+
+    /// Authorize a task domain to own a service advertised at the given class.
+    pub fn authorize_service_registration(
+        &self,
+        pid: ProcessId,
+        class: SecurityClass,
+    ) -> Result<(), IsolationError> {
+        let domain = self.domain(pid)?;
+        if !domain.capabilities.allows_ipc() {
+            return Err(IsolationError::CapabilityMissing);
+        }
+        if domain.can_receive(class) {
+            Ok(())
+        } else {
+            Err(IsolationError::PolicyViolation)
+        }
+    }
+
     pub fn authorize_spawn(
         &self,
         parent: ProcessId,

@@ -38,6 +38,10 @@ use crate::kernel::process::{
     MAX_EXEC_ENVS, SIGCHLD, SIGKILL, SIGTERM,
 };
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
+use crate::kernel::services::registry::{
+    ServiceId as RegistryServiceId, ServiceRegistry, ServiceRegistryError, MAX_DEVICE_CLAIMS,
+    MAX_SERVICE_REGISTRATIONS,
+};
 use crate::kernel::spawn::{
     dependencies_ready, service_manifest_signature_valid, DefaultServiceStartupReport,
     DependencyStatus, ServiceManifest, ServiceStartupReport, StartupState,
@@ -194,6 +198,7 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     scheduler: Scheduler<MAX_THREADS>,
     security: SecurityKernel<MAX_PROC>,
     devices: DeviceManager<MAX_DEVICES>,
+    service_registry: ServiceRegistry<MAX_SERVICE_REGISTRATIONS, MAX_DEVICE_CLAIMS>,
     root_fs: QfsFileSystem,
     open_files: FileTable<MAX_OPEN_FILES>,
     core_states: [CpuCoreState; cpu::MAX_CORES],
@@ -213,6 +218,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             scheduler: Scheduler::new(),
             security: SecurityKernel::new(),
             devices: DeviceManager::new(),
+            service_registry: ServiceRegistry::new(),
             root_fs: QfsFileSystem::new_on_block_device(
                 false,
                 crate::kernel::device::built_in_block_storage(),
@@ -234,6 +240,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.scheduler.reset();
         self.security.reset();
         self.devices.reset();
+        self.service_registry.reset();
         self.open_files.clear();
         self.next_pid = 1;
         self.next_thread = 1;
@@ -342,7 +349,20 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                                 };
 
                                 match spawned {
-                                    Ok(pid) => report.set_running(idx, pid),
+                                    Ok(pid) => {
+                                        report.set_running(idx, pid);
+                                        if let Some(registry_service) =
+                                            startup_service_to_registry(record.descriptor.id)
+                                        {
+                                            if let Some(authorizer) = parent {
+                                                let _ = self.register_service(
+                                                    authorizer,
+                                                    registry_service,
+                                                    pid,
+                                                );
+                                            }
+                                        }
+                                    }
                                     Err(error) => report.set_failed(idx, error),
                                 }
                                 made_progress = true;
@@ -430,6 +450,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.scheduler.remove_process(pid);
             self.remove_threads_for_process(pid);
             memory::release_process(pid);
+            self.security.revoke_task(pid);
+            self.service_registry.revoke_owner(pid);
             let _ = self.queue_signal_to_parent(pid, SIGCHLD);
         }
     }
@@ -443,6 +465,70 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 self.update_process_thread_count(tcb.process, false);
             }
         }
+    }
+
+    pub fn register_service(
+        &mut self,
+        authorizer: ProcessId,
+        service: RegistryServiceId,
+        owner: ProcessId,
+    ) -> KernelResult<()> {
+        self.security
+            .authorize_service_control(authorizer)
+            .map_err(KernelError::SecurityViolation)?;
+        self.security
+            .authorize_service_registration(owner, service.security_class())
+            .map_err(KernelError::SecurityViolation)?;
+        self.ensure_process_exists(owner)?;
+        self.service_registry
+            .register(service, owner)
+            .map_err(map_service_registry_error)
+    }
+
+    pub fn service_owner(&self, service: RegistryServiceId) -> Option<ProcessId> {
+        self.service_registry.owner(service)
+    }
+
+    pub fn send_service_message(
+        &mut self,
+        sender: ProcessId,
+        service: RegistryServiceId,
+        payload: MessagePayload,
+    ) -> KernelResult<()> {
+        let receiver = self
+            .service_registry
+            .owner(service)
+            .ok_or(KernelError::UnknownProcess)?;
+        self.send_message(sender, receiver, payload)
+    }
+
+    pub fn claim_service_device(
+        &mut self,
+        owner: ProcessId,
+        service: RegistryServiceId,
+        device: DeviceId,
+    ) -> KernelResult<()> {
+        let descriptor = self
+            .devices
+            .descriptor(device)
+            .ok_or(KernelError::DeviceNotFound)?;
+        self.security
+            .authorize_device_access(owner, descriptor.security)
+            .map_err(KernelError::SecurityViolation)?;
+        self.service_registry
+            .claim_device(service, owner, descriptor)
+            .map_err(map_service_registry_error)
+    }
+
+    pub fn release_service_device(
+        &mut self,
+        owner: ProcessId,
+        service: RegistryServiceId,
+        device: DeviceId,
+    ) -> KernelResult<()> {
+        self.service_registry
+            .release_device(service, owner, device)
+            .map_err(map_service_registry_error)
     }
 
     pub fn send_message(
@@ -601,6 +687,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             SyscallNumber::Symlinkat => self.syscall_symlinkat(context),
             SyscallNumber::Readlinkat => self.syscall_readlinkat(context),
             SyscallNumber::Linkat => self.syscall_linkat(context),
+            SyscallNumber::RegisterService => self.syscall_register_service(context),
+            SyscallNumber::SendServiceIpc => self.syscall_send_service_ipc(context),
+            SyscallNumber::ClaimDevice => self.syscall_claim_device(context),
+            SyscallNumber::ReleaseDevice => self.syscall_release_device(context),
             SyscallNumber::Fork => self.syscall_fork(context),
             SyscallNumber::Execve => self.syscall_execve(context),
             SyscallNumber::Exit => self.syscall_exit(context),
@@ -1081,6 +1171,49 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let message = self.receive_message(context.caller)?;
         unsafe { out.write(message) };
         Ok(message.payload.length as u64)
+    }
+
+    fn syscall_register_service(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let service = decode_registry_service_id(context.arg(0))?;
+        let owner = if context.arg(1) == 0 {
+            context.caller
+        } else {
+            ProcessId::new(context.arg(1))
+        };
+        self.register_service(context.caller, service, owner)?;
+        Ok(0)
+    }
+
+    fn syscall_send_service_ipc(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let service = decode_registry_service_id(context.arg(0))?;
+        let data_ptr = context.arg(1) as *const u8;
+        let data_len = context.arg(2) as usize;
+        let security_class = decode_security_class(context.arg(3))?;
+        if data_len > 0 && data_ptr.is_null() {
+            return Err(KernelError::InvalidPointer);
+        }
+        let data = if data_len == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+        };
+        let payload = MessagePayload::from_slice(security_class, data);
+        self.send_service_message(context.caller, service, payload)?;
+        Ok(payload.length as u64)
+    }
+
+    fn syscall_claim_device(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let service = decode_registry_service_id(context.arg(0))?;
+        let device = DeviceId::new(context.arg(1) as u16);
+        self.claim_service_device(context.caller, service, device)?;
+        Ok(0)
+    }
+
+    fn syscall_release_device(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let service = decode_registry_service_id(context.arg(0))?;
+        let device = DeviceId::new(context.arg(1) as u16);
+        self.release_service_device(context.caller, service, device)?;
+        Ok(0)
     }
 
     fn syscall_receive_or_block_ipc(&mut self, context: SyscallContext) -> KernelResult<u64> {
@@ -2445,6 +2578,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.security
             .authorize_device_access(pid, descriptor.security)
             .map_err(KernelError::SecurityViolation)?;
+        if !self.service_registry.claimed_by(pid, id) {
+            return Err(KernelError::SecurityViolation(
+                IsolationError::PolicyViolation,
+            ));
+        }
 
         self.devices
             .read(id, buffer)
@@ -2460,6 +2598,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.security
             .authorize_device_access(pid, descriptor.security)
             .map_err(KernelError::SecurityViolation)?;
+        if !self.service_registry.claimed_by(pid, id) {
+            return Err(KernelError::SecurityViolation(
+                IsolationError::PolicyViolation,
+            ));
+        }
 
         self.devices
             .write(id, data)
@@ -2538,6 +2681,33 @@ fn map_process_file_table_error(error: ProcessFileTableError) -> KernelError {
 
 fn map_path_error(error: PathError) -> KernelError {
     KernelError::Filesystem(VfsError::InvalidPath(error))
+}
+
+fn map_service_registry_error(error: ServiceRegistryError) -> KernelError {
+    match error {
+        ServiceRegistryError::Full => KernelError::ProcessTableFull,
+        ServiceRegistryError::AlreadyRegistered
+        | ServiceRegistryError::DeviceAlreadyClaimed
+        | ServiceRegistryError::DeviceClassMismatch
+        | ServiceRegistryError::NotOwner => KernelError::InvalidArgument,
+        ServiceRegistryError::NotRegistered => KernelError::UnknownProcess,
+        ServiceRegistryError::DeviceNotClaimed => KernelError::DeviceNotFound,
+    }
+}
+
+fn decode_registry_service_id(raw: u64) -> KernelResult<RegistryServiceId> {
+    RegistryServiceId::from_raw(raw).ok_or(KernelError::InvalidArgument)
+}
+
+fn startup_service_to_registry(
+    service: crate::kernel::spawn::ServiceId,
+) -> Option<RegistryServiceId> {
+    match service {
+        crate::kernel::spawn::ServiceId::Displayd => Some(RegistryServiceId::Displayd),
+        crate::kernel::spawn::ServiceId::Networkd => Some(RegistryServiceId::Networkd),
+        crate::kernel::spawn::ServiceId::Inputd => Some(RegistryServiceId::Inputd),
+        crate::kernel::spawn::ServiceId::L2Subkernel => None,
+    }
 }
 
 fn fs_credentials_for(pid: ProcessId) -> FsCredentials {
@@ -2699,6 +2869,7 @@ mod tests {
     use super::*;
     use crate::kernel::memory::{PROT_EXECUTE, PROT_READ, PROT_WRITE};
     use crate::libc;
+    use crate::subkernel::{CapabilitySet, IsolationLevel, SecurityLabel};
 
     fn boot_kernel() -> Kernel<4, 4> {
         let mut kernel = Kernel::<4, 4>::new();
@@ -2850,6 +3021,93 @@ mod tests {
                 ProcessId::new(999),
                 MessagePayload::empty(SecurityClass::Public)
             ),
+            Err(KernelError::SecurityViolation(IsolationError::UnknownTask))
+        ));
+    }
+
+    #[test]
+    fn service_registry_routes_ipc_and_gates_raw_device_access() {
+        let mut kernel = boot_kernel();
+        let l2 = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let displayd = kernel
+            .spawn_child_process(
+                l2,
+                0,
+                ProcessPriority::High,
+                Credentials::new(
+                    SecurityLabel::internal(),
+                    CapabilitySet::ipc_io(),
+                    IsolationLevel::Process,
+                ),
+            )
+            .unwrap();
+        let user = kernel
+            .spawn_child_process(l2, 0, ProcessPriority::Normal, Credentials::user())
+            .unwrap();
+
+        kernel
+            .register_service(l2, RegistryServiceId::Displayd, displayd)
+            .unwrap();
+
+        let payload = MessagePayload::from_slice(SecurityClass::Public, b"draw");
+        kernel
+            .send_service_message(user, RegistryServiceId::Displayd, payload)
+            .unwrap();
+
+        let message = kernel.receive_message(displayd).unwrap();
+        assert_eq!(message.sender, user);
+        assert_eq!(message.receiver, displayd);
+        assert_eq!(&message.payload.data[..message.payload.length], b"draw");
+
+        let mut buffer = [0u8; 64];
+        assert!(matches!(
+            kernel.device_read(displayd, DeviceId::new(5), &mut buffer),
+            Err(KernelError::SecurityViolation(
+                IsolationError::PolicyViolation
+            ))
+        ));
+
+        kernel
+            .claim_service_device(displayd, RegistryServiceId::Displayd, DeviceId::new(5))
+            .unwrap();
+        assert!(kernel
+            .device_read(displayd, DeviceId::new(5), &mut buffer)
+            .is_ok());
+    }
+
+    #[test]
+    fn service_registry_revokes_registration_and_claims_on_exit() {
+        let mut kernel = boot_kernel();
+        let l2 = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let networkd = kernel
+            .spawn_child_process(
+                l2,
+                0,
+                ProcessPriority::High,
+                Credentials::new(
+                    SecurityLabel::internal(),
+                    CapabilitySet::ipc_io(),
+                    IsolationLevel::Process,
+                ),
+            )
+            .unwrap();
+
+        kernel
+            .register_service(l2, RegistryServiceId::Networkd, networkd)
+            .unwrap();
+        kernel
+            .claim_service_device(networkd, RegistryServiceId::Networkd, DeviceId::new(6))
+            .unwrap();
+        assert_eq!(
+            kernel.service_owner(RegistryServiceId::Networkd),
+            Some(networkd)
+        );
+
+        kernel.exit_process(networkd, ExitStatus::exited(0));
+
+        assert_eq!(kernel.service_owner(RegistryServiceId::Networkd), None);
+        assert!(matches!(
+            kernel.device_write(networkd, DeviceId::new(6), b"ping"),
             Err(KernelError::SecurityViolation(IsolationError::UnknownTask))
         ));
     }
