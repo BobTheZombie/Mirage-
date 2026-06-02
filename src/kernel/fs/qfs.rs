@@ -454,6 +454,84 @@ impl QfsState {
         Ok(current)
     }
 
+    fn child_slot_by_name(&self, parent: InodeId, name: &str) -> Option<usize> {
+        let mut idx = 0usize;
+        while idx < QFS_MAX_INODE_RECORDS {
+            if let Some(record) = self.inodes[idx] {
+                if record.parent_inode == parent.raw() && record.name() == name {
+                    return Some(idx);
+                }
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    fn inode_slot_by_id(&self, inode: InodeId) -> Option<usize> {
+        let mut idx = 0usize;
+        while idx < QFS_MAX_INODE_RECORDS {
+            if let Some(record) = self.inodes[idx] {
+                if record.inode == inode.raw() {
+                    return Some(idx);
+                }
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    fn free_inode_slot(&self) -> Option<usize> {
+        let mut idx = 0usize;
+        while idx < QFS_MAX_INODE_RECORDS {
+            if self.inodes[idx].is_none() {
+                return Some(idx);
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    fn next_inode_id(&self) -> InodeId {
+        let mut next = InodeId::ROOT.raw().saturating_add(1);
+        let mut idx = 0usize;
+        while idx < QFS_MAX_INODE_RECORDS {
+            if let Some(record) = self.inodes[idx] {
+                if record.inode >= next {
+                    next = record.inode.saturating_add(1);
+                }
+            }
+            idx += 1;
+        }
+        InodeId::new(next)
+    }
+
+    fn set_link_count(&mut self, inode: InodeId, links: u16) {
+        let mut idx = 0usize;
+        while idx < QFS_MAX_INODE_RECORDS {
+            if let Some(mut record) = self.inodes[idx] {
+                if record.inode == inode.raw() {
+                    record.links = links;
+                    self.inodes[idx] = Some(record);
+                }
+            }
+            idx += 1;
+        }
+    }
+
+    fn link_count(&self, inode: InodeId) -> u16 {
+        let mut count = 0u16;
+        let mut idx = 0usize;
+        while idx < QFS_MAX_INODE_RECORDS {
+            if let Some(record) = self.inodes[idx] {
+                if record.inode == inode.raw() {
+                    count = count.saturating_add(1);
+                }
+            }
+            idx += 1;
+        }
+        count
+    }
+
     fn cached_counts(&self) -> (usize, usize, usize, usize, usize) {
         (
             count_options(&self.book_headers),
@@ -701,6 +779,152 @@ impl QfsFileSystem {
         Ok(())
     }
 
+    fn persist_inode_table(&self, transaction_id: QfsTransactionId) -> Result<(), FsError> {
+        let Some(device) = self.block_device else {
+            return Ok(());
+        };
+        if device.sector_size() != QFS_SECTOR_SIZE {
+            return Err(FsError::Unsupported);
+        }
+        let (superblock, inodes) = {
+            let state = self.state.lock();
+            (state.superblock, state.inodes)
+        };
+        let sector_number = page_location_sector(&superblock, superblock.inode_table)
+            .ok_or(FsError::Unsupported)?;
+        let mut sector = [0u8; QFS_SECTOR_SIZE];
+        serialize_inode_records(&inodes, &mut sector)?;
+        self.journal_write(
+            transaction_id,
+            QfsJournalRecordKind::MetadataWrite,
+            0,
+            sector_number,
+            &sector,
+        )
+    }
+
+    fn commit_inode_transaction(&self, transaction_id: QfsTransactionId) -> Result<(), FsError> {
+        self.persist_inode_table(transaction_id)?;
+        self.commit_transaction(transaction_id)
+    }
+
+    fn parent_and_name(
+        &self,
+        path: Path<'_>,
+    ) -> Result<(InodeId, [u8; QFS_NAME_BYTES], u8), FsError> {
+        if path.is_root() {
+            return Err(FsError::InvalidArgument);
+        }
+        let mut components = path.components();
+        let mut current = InodeId::ROOT;
+        let mut pending = components.next().ok_or(FsError::InvalidArgument)?;
+        while let Some(next) = components.next() {
+            let state = self.state.lock();
+            let parent = state.inode_by_id(current).ok_or(FsError::NotFound)?;
+            if decode_inode_kind(parent.kind) != InodeKind::Directory {
+                return Err(FsError::NotDirectory);
+            }
+            current = InodeId::new(
+                state
+                    .child_by_name(current, pending)
+                    .ok_or(FsError::NotFound)?
+                    .inode,
+            );
+            pending = next;
+        }
+        if pending.len() > QFS_NAME_BYTES {
+            return Err(FsError::NameTooLong);
+        }
+        let mut name = [0u8; QFS_NAME_BYTES];
+        name[..pending.len()].copy_from_slice(pending.as_bytes());
+        Ok((current, name, pending.len() as u8))
+    }
+
+    fn data_sector_for_offset(
+        state: &QfsState,
+        record: QfsInodeRecord,
+        offset: u64,
+    ) -> Option<(u64, usize)> {
+        let page_bytes = state.superblock.page_sectors as u64 * QFS_SECTOR_SIZE as u64;
+        if page_bytes == 0 {
+            return None;
+        }
+        let logical_page = offset / page_bytes;
+        let offset_in_page = offset % page_bytes;
+        let mut idx = if record.chapter_count == 0 {
+            0usize
+        } else {
+            record.first_chapter as usize
+        };
+        let end = if record.chapter_count == 0 {
+            QFS_MAX_CHAPTER_INDEX_ENTRIES
+        } else {
+            min(
+                QFS_MAX_CHAPTER_INDEX_ENTRIES,
+                record.first_chapter.saturating_add(record.chapter_count) as usize,
+            )
+        };
+        while idx < end {
+            if let Some(entry) = state.chapter_index[idx] {
+                let in_range = logical_page >= entry.logical_page
+                    && logical_page < entry.logical_page.saturating_add(entry.page_count as u64);
+                if entry.inode == record.inode && in_range {
+                    let page = entry
+                        .first_page
+                        .saturating_add((logical_page - entry.logical_page) as u16);
+                    if let Some(page_sector) = page_location_sector(
+                        &state.superblock,
+                        QfsPageLocation::new(entry.book_id, page),
+                    ) {
+                        return Some((
+                            page_sector + offset_in_page / QFS_SECTOR_SIZE as u64,
+                            (offset_in_page % QFS_SECTOR_SIZE as u64) as usize,
+                        ));
+                    }
+                }
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    fn write_record_data(
+        &self,
+        transaction_id: QfsTransactionId,
+        record: QfsInodeRecord,
+        data: &[u8],
+        offset: u64,
+    ) -> Result<usize, FsError> {
+        let Some(device) = self.block_device else {
+            return Err(FsError::NoSpace);
+        };
+        if device.sector_size() != QFS_SECTOR_SIZE {
+            return Err(FsError::Unsupported);
+        }
+        let mut written = 0usize;
+        while written < data.len() {
+            let absolute = offset.saturating_add(written as u64);
+            let (sector_number, sector_offset) = {
+                let state = self.state.lock();
+                Self::data_sector_for_offset(&state, record, absolute).ok_or(FsError::NoSpace)?
+            };
+            let mut sector = [0u8; QFS_SECTOR_SIZE];
+            read_sector(device, sector_number, &mut sector)?;
+            let to_copy = min(data.len() - written, QFS_SECTOR_SIZE - sector_offset);
+            sector[sector_offset..sector_offset + to_copy]
+                .copy_from_slice(&data[written..written + to_copy]);
+            self.journal_write(
+                transaction_id,
+                QfsJournalRecordKind::DataWrite,
+                record.inode,
+                sector_number,
+                &sector,
+            )?;
+            written += to_copy;
+        }
+        Ok(written)
+    }
+
     pub fn refresh_from_block_device(&self) -> Result<(), FsError> {
         let Some(device) = self.block_device else {
             return Ok(());
@@ -797,25 +1021,510 @@ impl FileSystem for QfsFileSystem {
         if decode_inode_kind(record.kind) == InodeKind::Directory {
             return Err(FsError::IsDirectory);
         }
-        if offset >= record.size {
+        if offset >= record.size || buffer.is_empty() {
             return Ok(0);
         }
         let available = min((record.size - offset) as usize, buffer.len());
         let inline_len = min(record.inline_data_len as usize, QFS_INLINE_DATA_BYTES);
-        if offset as usize >= inline_len {
-            return Ok(0);
+        if (offset as usize) < inline_len {
+            let to_copy = min(available, inline_len - offset as usize);
+            let start = offset as usize;
+            buffer[..to_copy].copy_from_slice(&record.inline_data[start..start + to_copy]);
+            return Ok(to_copy);
         }
-        let to_copy = min(available, inline_len - offset as usize);
-        let start = offset as usize;
-        buffer[..to_copy].copy_from_slice(&record.inline_data[start..start + to_copy]);
-        Ok(to_copy)
+        let Some(device) = self.block_device else {
+            return Ok(0);
+        };
+        if device.sector_size() != QFS_SECTOR_SIZE {
+            return Err(FsError::Unsupported);
+        }
+        let mut read = 0usize;
+        drop(state);
+        while read < available {
+            let absolute = offset.saturating_add(read as u64);
+            let (sector_number, sector_offset) = {
+                let state = self.state.lock();
+                Self::data_sector_for_offset(&state, record, absolute).ok_or(FsError::NoSpace)?
+            };
+            let mut sector = [0u8; QFS_SECTOR_SIZE];
+            read_sector(device, sector_number, &mut sector)?;
+            let to_copy = min(available - read, QFS_SECTOR_SIZE - sector_offset);
+            buffer[read..read + to_copy]
+                .copy_from_slice(&sector[sector_offset..sector_offset + to_copy]);
+            read += to_copy;
+        }
+        Ok(read)
     }
 
-    fn pwrite(&self, _file: &File, _data: &[u8], _offset: u64) -> Result<usize, FsError> {
+    fn pwrite(&self, file: &File, data: &[u8], offset: u64) -> Result<usize, FsError> {
         if self.read_only {
             return Err(FsError::ReadOnly);
         }
-        Err(FsError::Unsupported)
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let initial_record = {
+            let state = self.state.lock();
+            let record = state.inode_by_id(file.inode()).ok_or(FsError::NotFound)?;
+            if decode_inode_kind(record.kind) == InodeKind::Directory {
+                return Err(FsError::IsDirectory);
+            }
+            record
+        };
+        if offset.saturating_add(data.len() as u64) > QFS_INLINE_DATA_BYTES as u64 {
+            if self.block_device.is_none() {
+                return Err(FsError::NoSpace);
+            }
+            let mut checked = if (offset as usize) < QFS_INLINE_DATA_BYTES {
+                QFS_INLINE_DATA_BYTES - offset as usize
+            } else {
+                0usize
+            };
+            while checked < data.len() {
+                let absolute = offset.saturating_add(checked as u64);
+                let state = self.state.lock();
+                Self::data_sector_for_offset(&state, initial_record, absolute)
+                    .ok_or(FsError::NoSpace)?;
+                checked = checked.saturating_add(QFS_SECTOR_SIZE);
+            }
+        }
+        let transaction_id = self.begin_transaction()?;
+        let mut wrote_inline = 0usize;
+        let record = {
+            let mut state = self.state.lock();
+            let slot = state
+                .inode_slot_by_id(file.inode())
+                .ok_or(FsError::NotFound)?;
+            let mut record = state.inodes[slot].ok_or(FsError::NotFound)?;
+            if (offset as usize) < QFS_INLINE_DATA_BYTES {
+                wrote_inline = min(data.len(), QFS_INLINE_DATA_BYTES - offset as usize);
+                let start = offset as usize;
+                record.inline_data[start..start + wrote_inline]
+                    .copy_from_slice(&data[..wrote_inline]);
+                record.inline_data_len =
+                    max_u16(record.inline_data_len, (start + wrote_inline) as u16);
+            }
+            record.size = max_u64(record.size, offset.saturating_add(data.len() as u64));
+            state.inodes[slot] = Some(record);
+            record
+        };
+        let mut written = wrote_inline;
+        if written < data.len() {
+            written += self.write_record_data(
+                transaction_id,
+                record,
+                &data[written..],
+                offset.saturating_add(written as u64),
+            )?;
+        }
+        self.commit_inode_transaction(transaction_id)?;
+        Ok(written)
+    }
+
+    fn mkdir(
+        &self,
+        path: Path<'_>,
+        mode: Permissions,
+        credentials: Credentials,
+    ) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let (parent, name, name_len) = self.parent_and_name(path)?;
+        let transaction_id = self.begin_transaction()?;
+        {
+            let mut state = self.state.lock();
+            let parent_record = state.inode_by_id(parent).ok_or(FsError::NotFound)?;
+            if decode_inode_kind(parent_record.kind) != InodeKind::Directory {
+                return Err(FsError::NotDirectory);
+            }
+            if !parent_record.metadata().permissions.allows(
+                credentials,
+                crate::kernel::fs::permissions::AccessMode::Write,
+            ) {
+                return Err(FsError::PermissionDenied);
+            }
+            let name_str = core::str::from_utf8(&name[..name_len as usize]).unwrap_or("");
+            if state.child_by_name(parent, name_str).is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+            let slot = state.free_inode_slot().ok_or(FsError::NoSpace)?;
+            state.inodes[slot] = Some(QfsInodeRecord {
+                inode: state.next_inode_id().raw(),
+                parent_inode: parent.raw(),
+                kind: encode_inode_kind(InodeKind::Directory),
+                name_len,
+                mode: mode.bits(),
+                uid: credentials.uid,
+                gid: credentials.gid,
+                links: 1,
+                size: 0,
+                first_chapter: 0,
+                chapter_count: 0,
+                name,
+                inline_data_len: 0,
+                inline_data: [0; QFS_INLINE_DATA_BYTES],
+            });
+        }
+        self.commit_inode_transaction(transaction_id)
+    }
+
+    fn rmdir(&self, path: Path<'_>, credentials: Credentials) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let record = self.state.lock().resolve_inode(path)?;
+        if record.inode == InodeId::ROOT.raw() {
+            return Err(FsError::Busy);
+        }
+        if decode_inode_kind(record.kind) != InodeKind::Directory {
+            return Err(FsError::NotDirectory);
+        }
+        let transaction_id = self.begin_transaction()?;
+        {
+            let mut state = self.state.lock();
+            let mut idx = 0usize;
+            while idx < QFS_MAX_INODE_RECORDS {
+                if let Some(child) = state.inodes[idx] {
+                    if child.parent_inode == record.inode && child.inode != record.inode {
+                        return Err(FsError::Busy);
+                    }
+                }
+                idx += 1;
+            }
+            let parent = state
+                .inode_by_id(InodeId::new(record.parent_inode))
+                .ok_or(FsError::NotFound)?;
+            if !parent.metadata().permissions.allows(
+                credentials,
+                crate::kernel::fs::permissions::AccessMode::Write,
+            ) {
+                return Err(FsError::PermissionDenied);
+            }
+            let slot = state
+                .child_slot_by_name(InodeId::new(record.parent_inode), record.name())
+                .ok_or(FsError::NotFound)?;
+            state.inodes[slot] = None;
+        }
+        self.commit_inode_transaction(transaction_id)
+    }
+
+    fn unlink(&self, path: Path<'_>, credentials: Credentials) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let record = self.state.lock().resolve_inode(path)?;
+        if decode_inode_kind(record.kind) == InodeKind::Directory {
+            return Err(FsError::IsDirectory);
+        }
+        let transaction_id = self.begin_transaction()?;
+        {
+            let mut state = self.state.lock();
+            let parent = state
+                .inode_by_id(InodeId::new(record.parent_inode))
+                .ok_or(FsError::NotFound)?;
+            if !parent.metadata().permissions.allows(
+                credentials,
+                crate::kernel::fs::permissions::AccessMode::Write,
+            ) {
+                return Err(FsError::PermissionDenied);
+            }
+            let slot = state
+                .child_slot_by_name(InodeId::new(record.parent_inode), record.name())
+                .ok_or(FsError::NotFound)?;
+            state.inodes[slot] = None;
+            let links = state.link_count(InodeId::new(record.inode));
+            state.set_link_count(InodeId::new(record.inode), links);
+        }
+        self.commit_inode_transaction(transaction_id)
+    }
+
+    fn rename(
+        &self,
+        old_path: Path<'_>,
+        new_path: Path<'_>,
+        credentials: Credentials,
+    ) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let record = self.state.lock().resolve_inode(old_path)?;
+        let (new_parent, new_name, new_name_len) = self.parent_and_name(new_path)?;
+        let transaction_id = self.begin_transaction()?;
+        {
+            let mut state = self.state.lock();
+            let old_parent = state
+                .inode_by_id(InodeId::new(record.parent_inode))
+                .ok_or(FsError::NotFound)?;
+            let parent = state.inode_by_id(new_parent).ok_or(FsError::NotFound)?;
+            if decode_inode_kind(parent.kind) != InodeKind::Directory {
+                return Err(FsError::NotDirectory);
+            }
+            if !old_parent.metadata().permissions.allows(
+                credentials,
+                crate::kernel::fs::permissions::AccessMode::Write,
+            ) || !parent.metadata().permissions.allows(
+                credentials,
+                crate::kernel::fs::permissions::AccessMode::Write,
+            ) {
+                return Err(FsError::PermissionDenied);
+            }
+            let new_name_str =
+                core::str::from_utf8(&new_name[..new_name_len as usize]).unwrap_or("");
+            if state.child_by_name(new_parent, new_name_str).is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+            let slot = state
+                .child_slot_by_name(InodeId::new(record.parent_inode), record.name())
+                .ok_or(FsError::NotFound)?;
+            let mut updated = state.inodes[slot].ok_or(FsError::NotFound)?;
+            updated.parent_inode = new_parent.raw();
+            updated.name = new_name;
+            updated.name_len = new_name_len;
+            state.inodes[slot] = Some(updated);
+        }
+        self.commit_inode_transaction(transaction_id)
+    }
+
+    fn link(
+        &self,
+        old_path: Path<'_>,
+        new_path: Path<'_>,
+        credentials: Credentials,
+    ) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let source = self.state.lock().resolve_inode(old_path)?;
+        if decode_inode_kind(source.kind) == InodeKind::Directory {
+            return Err(FsError::IsDirectory);
+        }
+        let (parent, name, name_len) = self.parent_and_name(new_path)?;
+        let transaction_id = self.begin_transaction()?;
+        {
+            let mut state = self.state.lock();
+            let parent_record = state.inode_by_id(parent).ok_or(FsError::NotFound)?;
+            if decode_inode_kind(parent_record.kind) != InodeKind::Directory {
+                return Err(FsError::NotDirectory);
+            }
+            if !parent_record.metadata().permissions.allows(
+                credentials,
+                crate::kernel::fs::permissions::AccessMode::Write,
+            ) {
+                return Err(FsError::PermissionDenied);
+            }
+            let name_str = core::str::from_utf8(&name[..name_len as usize]).unwrap_or("");
+            if state.child_by_name(parent, name_str).is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+            let slot = state.free_inode_slot().ok_or(FsError::NoSpace)?;
+            let mut entry = source;
+            entry.parent_inode = parent.raw();
+            entry.name = name;
+            entry.name_len = name_len;
+            entry.links = state
+                .link_count(InodeId::new(source.inode))
+                .saturating_add(1);
+            state.inodes[slot] = Some(entry);
+            state.set_link_count(InodeId::new(source.inode), entry.links);
+        }
+        self.commit_inode_transaction(transaction_id)
+    }
+
+    fn symlink(
+        &self,
+        target: Path<'_>,
+        link_path: Path<'_>,
+        credentials: Credentials,
+    ) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let target_bytes = target.as_str().as_bytes();
+        let (parent, name, name_len) = self.parent_and_name(link_path)?;
+        let transaction_id = self.begin_transaction()?;
+        let record = {
+            let mut state = self.state.lock();
+            let parent_record = state.inode_by_id(parent).ok_or(FsError::NotFound)?;
+            if decode_inode_kind(parent_record.kind) != InodeKind::Directory {
+                return Err(FsError::NotDirectory);
+            }
+            if !parent_record.metadata().permissions.allows(
+                credentials,
+                crate::kernel::fs::permissions::AccessMode::Write,
+            ) {
+                return Err(FsError::PermissionDenied);
+            }
+            let name_str = core::str::from_utf8(&name[..name_len as usize]).unwrap_or("");
+            if state.child_by_name(parent, name_str).is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+            let slot = state.free_inode_slot().ok_or(FsError::NoSpace)?;
+            let mut inline_data = [0u8; QFS_INLINE_DATA_BYTES];
+            let inline_len = min(target_bytes.len(), QFS_INLINE_DATA_BYTES);
+            inline_data[..inline_len].copy_from_slice(&target_bytes[..inline_len]);
+            let record = QfsInodeRecord {
+                inode: state.next_inode_id().raw(),
+                parent_inode: parent.raw(),
+                kind: encode_inode_kind(InodeKind::Symlink),
+                name_len,
+                mode: 0o777,
+                uid: credentials.uid,
+                gid: credentials.gid,
+                links: 1,
+                size: target_bytes.len() as u64,
+                first_chapter: 0,
+                chapter_count: 0,
+                name,
+                inline_data_len: inline_len as u16,
+                inline_data,
+            };
+            state.inodes[slot] = Some(record);
+            record
+        };
+        if target_bytes.len() > QFS_INLINE_DATA_BYTES {
+            self.write_record_data(
+                transaction_id,
+                record,
+                &target_bytes[QFS_INLINE_DATA_BYTES..],
+                QFS_INLINE_DATA_BYTES as u64,
+            )?;
+        }
+        self.commit_inode_transaction(transaction_id)
+    }
+
+    fn readlink(&self, path: Path<'_>, buffer: &mut [u8]) -> Result<usize, FsError> {
+        let record = self.state.lock().resolve_inode(path)?;
+        if decode_inode_kind(record.kind) != InodeKind::Symlink {
+            return Err(FsError::InvalidArgument);
+        }
+        let file = File::new(
+            InodeId::new(record.inode),
+            crate::kernel::fs::file::FileMode::ReadOnly,
+        );
+        self.pread(&file, buffer, 0)
+    }
+
+    fn chmod(&self, path: Path<'_>, mode: u16, credentials: Credentials) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let record = self.state.lock().resolve_inode(path)?;
+        if !credentials.is_kernel && credentials.uid != record.uid {
+            return Err(FsError::PermissionDenied);
+        }
+        let transaction_id = self.begin_transaction()?;
+        {
+            let mut state = self.state.lock();
+            let mut idx = 0usize;
+            while idx < QFS_MAX_INODE_RECORDS {
+                if let Some(mut candidate) = state.inodes[idx] {
+                    if candidate.inode == record.inode {
+                        candidate.mode = mode & 0o777;
+                        state.inodes[idx] = Some(candidate);
+                    }
+                }
+                idx += 1;
+            }
+        }
+        self.commit_inode_transaction(transaction_id)
+    }
+
+    fn chown(
+        &self,
+        path: Path<'_>,
+        uid: u16,
+        gid: u16,
+        credentials: Credentials,
+    ) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let record = self.state.lock().resolve_inode(path)?;
+        if !credentials.is_kernel && credentials.uid != 0 {
+            return Err(FsError::PermissionDenied);
+        }
+        let transaction_id = self.begin_transaction()?;
+        {
+            let mut state = self.state.lock();
+            let mut idx = 0usize;
+            while idx < QFS_MAX_INODE_RECORDS {
+                if let Some(mut candidate) = state.inodes[idx] {
+                    if candidate.inode == record.inode {
+                        candidate.uid = uid;
+                        candidate.gid = gid;
+                        state.inodes[idx] = Some(candidate);
+                    }
+                }
+                idx += 1;
+            }
+        }
+        self.commit_inode_transaction(transaction_id)
+    }
+
+    fn truncate(&self, path: Path<'_>, size: u64, credentials: Credentials) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let record = self.state.lock().resolve_inode(path)?;
+        if !record.metadata().permissions.allows(
+            credentials,
+            crate::kernel::fs::permissions::AccessMode::Write,
+        ) {
+            return Err(FsError::PermissionDenied);
+        }
+        let transaction_id = self.begin_transaction()?;
+        {
+            let mut state = self.state.lock();
+            let mut idx = 0usize;
+            while idx < QFS_MAX_INODE_RECORDS {
+                if let Some(mut candidate) = state.inodes[idx] {
+                    if candidate.inode == record.inode {
+                        candidate.size = size;
+                        candidate.inline_data_len = min(
+                            candidate.inline_data_len as usize,
+                            min(size as usize, QFS_INLINE_DATA_BYTES),
+                        ) as u16;
+                        state.inodes[idx] = Some(candidate);
+                    }
+                }
+                idx += 1;
+            }
+        }
+        self.commit_inode_transaction(transaction_id)
+    }
+
+    fn ftruncate(&self, file: &File, size: u64, credentials: Credentials) -> Result<(), FsError> {
+        let record = self
+            .state
+            .lock()
+            .inode_by_id(file.inode())
+            .ok_or(FsError::NotFound)?;
+        if !record.metadata().permissions.allows(
+            credentials,
+            crate::kernel::fs::permissions::AccessMode::Write,
+        ) {
+            return Err(FsError::PermissionDenied);
+        }
+        let transaction_id = self.begin_transaction()?;
+        {
+            let mut state = self.state.lock();
+            let mut idx = 0usize;
+            while idx < QFS_MAX_INODE_RECORDS {
+                if let Some(mut candidate) = state.inodes[idx] {
+                    if candidate.inode == file.inode().raw() {
+                        candidate.size = size;
+                        candidate.inline_data_len = min(
+                            candidate.inline_data_len as usize,
+                            min(size as usize, QFS_INLINE_DATA_BYTES),
+                        ) as u16;
+                        state.inodes[idx] = Some(candidate);
+                    }
+                }
+                idx += 1;
+            }
+        }
+        self.commit_inode_transaction(transaction_id)
     }
 
     fn fsync(&self, _file: &File) -> Result<(), FsError> {
@@ -867,18 +1576,6 @@ impl FileSystem for QfsFileSystem {
             idx += 1;
         }
         Ok(written)
-    }
-
-    fn truncate(
-        &self,
-        _path: Path<'_>,
-        _size: u64,
-        _credentials: Credentials,
-    ) -> Result<(), FsError> {
-        if self.read_only {
-            return Err(FsError::ReadOnly);
-        }
-        Err(FsError::Unsupported)
     }
 }
 
@@ -1195,6 +1892,38 @@ fn parse_inode_records(
     Ok(())
 }
 
+fn serialize_inode_records(
+    inodes: &[Option<QfsInodeRecord>; QFS_MAX_INODE_RECORDS],
+    sector: &mut [u8; QFS_SECTOR_SIZE],
+) -> Result<(), FsError> {
+    sector.fill(0);
+    let mut idx = 0usize;
+    let mut offset = 0usize;
+    while idx < inodes.len() && offset + QFS_INODE_RECORD_BYTES <= QFS_SECTOR_SIZE {
+        if let Some(record) = inodes[idx] {
+            put_u64(sector, offset, record.inode)?;
+            put_u64(sector, offset + 8, record.parent_inode)?;
+            sector[offset + 16] = record.kind;
+            sector[offset + 17] = min(record.name_len as usize, QFS_NAME_BYTES) as u8;
+            put_u16(sector, offset + 18, record.mode)?;
+            put_u16(sector, offset + 20, record.uid)?;
+            put_u16(sector, offset + 22, record.gid)?;
+            put_u16(sector, offset + 24, record.links)?;
+            put_u64(sector, offset + 32, record.size)?;
+            put_u32(sector, offset + 40, record.first_chapter)?;
+            put_u32(sector, offset + 44, record.chapter_count)?;
+            sector[offset + 48..offset + 80].copy_from_slice(&record.name);
+            let inline_len = min(record.inline_data_len as usize, QFS_INLINE_DATA_BYTES);
+            put_u16(sector, offset + 80, inline_len as u16)?;
+            sector[offset + 82..offset + 82 + inline_len]
+                .copy_from_slice(&record.inline_data[..inline_len]);
+        }
+        idx += 1;
+        offset += QFS_INODE_RECORD_BYTES;
+    }
+    Ok(())
+}
+
 fn parse_journal_record(
     sector: &[u8; QFS_SECTOR_SIZE],
 ) -> Result<Option<QfsJournalRecord>, FsError> {
@@ -1344,6 +2073,14 @@ fn checksum_sector(sector: &[u8; QFS_SECTOR_SIZE]) -> u32 {
         idx += 1;
     }
     checksum
+}
+
+const fn max_u16(left: u16, right: u16) -> u16 {
+    if left >= right {
+        left
+    } else {
+        right
+    }
 }
 
 const fn max_u64(left: u64, right: u64) -> u64 {
