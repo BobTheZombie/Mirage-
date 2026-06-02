@@ -6,14 +6,16 @@
 //! generic tables so the code can be used by early kernel mount code, recovery
 //! paths, and small USB/SSD boot volumes.
 
-use core::cmp::min;
+use core::{cmp::min, str};
 
 use crate::kernel::{
     device::{BlockStorageDevice, DeviceError},
     fs::{
-        inode::{InodeId, InodeKind, InodeMetadata},
-        permissions::Permissions,
-        vfs::SuperBlock as VfsSuperBlock,
+        file::{File, OpenFlags},
+        inode::{DirEntry, InodeId, InodeKind, InodeMetadata},
+        path::Path,
+        permissions::{AccessMode, Credentials, Permissions},
+        vfs::{FileSystem, SuperBlock as VfsSuperBlock, VfsError},
     },
 };
 
@@ -1302,6 +1304,417 @@ impl<'a> Ext4Backend<'a> {
             }
         }
         Ok(MountRecovery::Clean)
+    }
+}
+
+const EXT4_ROOT_INODE: u64 = 2;
+const MAX_EXT4_EXTENTS_PER_INODE: usize =
+    (EXT4_INODE_BLOCK_BYTES - ExtentHeader::SIZE) / Extent::SIZE;
+
+impl From<Ext4Error> for VfsError {
+    fn from(value: Ext4Error) -> Self {
+        match value {
+            Ext4Error::BufferTooSmall
+            | Ext4Error::BadMagic
+            | Ext4Error::ChecksumMismatch
+            | Ext4Error::InvalidBlockSize
+            | Ext4Error::InvalidDescriptor
+            | Ext4Error::InvalidExtent
+            | Ext4Error::InvalidInode
+            | Ext4Error::InvalidDirectoryEntry
+            | Ext4Error::InvalidBitmap => VfsError::InvalidArgument,
+            Ext4Error::JournalReplayNeeded => VfsError::Busy,
+            Ext4Error::NoSpace => VfsError::NoSpace,
+            Ext4Error::Device(_) => VfsError::Unsupported,
+        }
+    }
+}
+
+impl<'a> Ext4Backend<'a> {
+    fn ext4_inode_number(inode: InodeId) -> u64 {
+        if inode == InodeId::ROOT {
+            EXT4_ROOT_INODE
+        } else {
+            inode.raw()
+        }
+    }
+
+    fn vfs_inode_id(ext4_inode: u64) -> InodeId {
+        if ext4_inode == EXT4_ROOT_INODE {
+            InodeId::ROOT
+        } else {
+            InodeId::new(ext4_inode)
+        }
+    }
+
+    fn sectors_per_block(&self) -> Result<u64, Ext4Error> {
+        Ok(self.superblock.block_size()? as u64 / self.device.sector_size() as u64)
+    }
+
+    fn read_block_into(&self, block: u64, buffer: &mut [u8]) -> Result<(), Ext4Error> {
+        let block_size = self.superblock.block_size()? as usize;
+        if buffer.len() < block_size || block_size > MAX_METADATA_BLOCK_BYTES {
+            return Err(Ext4Error::BufferTooSmall);
+        }
+        let sectors_per_block = self.sectors_per_block()?;
+        self.device.read_sectors(
+            block.saturating_mul(sectors_per_block),
+            &mut buffer[..block_size],
+        )?;
+        Ok(())
+    }
+
+    fn read_block_group_descriptor(&self, group: u32) -> Result<BlockGroupDescriptor, Ext4Error> {
+        let block_size = self.superblock.block_size()? as usize;
+        if block_size > MAX_METADATA_BLOCK_BYTES {
+            return Err(Ext4Error::InvalidBlockSize);
+        }
+        let descriptor_size = self
+            .superblock
+            .descriptor_size
+            .max(BlockGroupDescriptor::MIN_SIZE as u16) as usize;
+        if descriptor_size > BlockGroupDescriptor::FULL_SIZE {
+            return Err(Ext4Error::InvalidDescriptor);
+        }
+        let descriptors_per_block = block_size / descriptor_size;
+        if descriptors_per_block == 0 {
+            return Err(Ext4Error::InvalidDescriptor);
+        }
+        let descriptor_table_block = self.superblock.first_data_block as u64 + 1;
+        let descriptor_block =
+            descriptor_table_block + (group as usize / descriptors_per_block) as u64;
+        let descriptor_offset = (group as usize % descriptors_per_block) * descriptor_size;
+        let mut block = [0u8; MAX_METADATA_BLOCK_BYTES];
+        self.read_block_into(descriptor_block, &mut block)?;
+        BlockGroupDescriptor::parse(&block[descriptor_offset..descriptor_offset + descriptor_size])
+    }
+
+    fn read_inode_record(&self, inode: InodeId) -> Result<InodeRecord, Ext4Error> {
+        let ext4_inode = Self::ext4_inode_number(inode);
+        if ext4_inode == 0 || ext4_inode > self.superblock.inodes_count as u64 {
+            return Err(Ext4Error::InvalidInode);
+        }
+        let inode_index = ext4_inode - 1;
+        let inodes_per_group = self.superblock.inodes_per_group.max(1) as u64;
+        let group = (inode_index / inodes_per_group) as u32;
+        let index_in_group = inode_index % inodes_per_group;
+        let descriptor = self.read_block_group_descriptor(group)?;
+        let inode_size = self.superblock.inode_size.max(EXT4_GOOD_OLD_INODE_SIZE) as usize;
+        let block_size = self.superblock.block_size()? as usize;
+        if inode_size > MAX_METADATA_BLOCK_BYTES || block_size > MAX_METADATA_BLOCK_BYTES {
+            return Err(Ext4Error::InvalidInode);
+        }
+        let byte_offset = index_in_group.saturating_mul(inode_size as u64);
+        let inode_block = descriptor.inode_table + byte_offset / block_size as u64;
+        let offset_in_block = (byte_offset % block_size as u64) as usize;
+        let mut block = [0u8; MAX_METADATA_BLOCK_BYTES];
+        self.read_block_into(inode_block, &mut block)?;
+        if offset_in_block + inode_size > block_size {
+            return Err(Ext4Error::InvalidInode);
+        }
+        InodeRecord::parse(&block[offset_in_block..offset_in_block + inode_size])
+    }
+
+    fn data_block_for(
+        &self,
+        inode: &InodeRecord,
+        logical_block: u64,
+    ) -> Result<Option<u64>, Ext4Error> {
+        if inode.uses_extents() {
+            let tree = ExtentTree::<MAX_EXT4_EXTENTS_PER_INODE>::parse_leaf(&inode.block)?;
+            let mut idx = 0usize;
+            while idx < tree.header.entries as usize {
+                let extent = tree.extents[idx].ok_or(Ext4Error::InvalidExtent)?;
+                let start = extent.logical_block as u64;
+                let end = start.saturating_add(extent.len as u64);
+                if logical_block >= start && logical_block < end {
+                    return Ok(Some(extent.start + logical_block - start));
+                }
+                idx += 1;
+            }
+            return Ok(None);
+        }
+
+        if logical_block < 12 {
+            let offset = logical_block as usize * 4;
+            let block = LeCursor::new(&inode.block).u32_at(offset)? as u64;
+            if block == 0 {
+                Ok(None)
+            } else {
+                Ok(Some(block))
+            }
+        } else {
+            Err(Ext4Error::InvalidExtent)
+        }
+    }
+
+    fn read_inode_data(
+        &self,
+        inode: &InodeRecord,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> Result<usize, Ext4Error> {
+        if offset >= inode.size || buffer.is_empty() {
+            return Ok(0);
+        }
+        let block_size = self.superblock.block_size()? as usize;
+        if block_size > MAX_METADATA_BLOCK_BYTES {
+            return Err(Ext4Error::InvalidBlockSize);
+        }
+        let available = (inode.size - offset) as usize;
+        let target = min(buffer.len(), available);
+        let mut done = 0usize;
+        let mut block = [0u8; MAX_METADATA_BLOCK_BYTES];
+        while done < target {
+            let absolute = offset + done as u64;
+            let logical_block = absolute / block_size as u64;
+            let block_offset = (absolute % block_size as u64) as usize;
+            let chunk = min(target - done, block_size - block_offset);
+            if let Some(physical_block) = self.data_block_for(inode, logical_block)? {
+                self.read_block_into(physical_block, &mut block)?;
+                buffer[done..done + chunk]
+                    .copy_from_slice(&block[block_offset..block_offset + chunk]);
+            } else {
+                buffer[done..done + chunk].fill(0);
+            }
+            done += chunk;
+        }
+        Ok(done)
+    }
+
+    fn find_child(
+        &self,
+        parent: InodeId,
+        name: &str,
+    ) -> Result<Option<(InodeId, DirectoryFileType)>, VfsError> {
+        let parent_record = self.read_inode_record(parent)?;
+        if parent_record.mode.kind() != InodeKind::Directory {
+            return Err(VfsError::NotDirectory);
+        }
+        let mut offset = 0u64;
+        let mut block = [0u8; MAX_METADATA_BLOCK_BYTES];
+        while offset < parent_record.size {
+            let read = self.read_inode_data(&parent_record, offset, &mut block)?;
+            if read == 0 {
+                break;
+            }
+            let mut cursor = 0usize;
+            while cursor + EXT4_DIR_ENTRY_HEADER_LEN <= read {
+                let entry = DirectoryEntry::parse(&block[cursor..read])?;
+                if entry.inode != 0 && entry.name == name.as_bytes() {
+                    return Ok(Some((
+                        Self::vfs_inode_id(entry.inode as u64),
+                        entry.file_type,
+                    )));
+                }
+                if entry.record_len == 0 {
+                    return Err(VfsError::InvalidArgument);
+                }
+                cursor += entry.record_len as usize;
+            }
+            offset += read as u64;
+        }
+        Ok(None)
+    }
+}
+
+impl<'a> FileSystem for Ext4Backend<'a> {
+    fn root_inode(&self) -> InodeId {
+        InodeId::ROOT
+    }
+
+    fn super_block(&self) -> VfsSuperBlock {
+        let mut superblock = self.superblock.to_vfs_superblock();
+        superblock.read_only = true;
+        superblock
+    }
+
+    fn lookup(&self, path: Path<'_>) -> Result<InodeMetadata, VfsError> {
+        let mut inode = self.root_inode();
+        let mut components = path.components();
+        while let Some(component) = components.next() {
+            inode = self
+                .find_child(inode, component)?
+                .ok_or(VfsError::NotFound)?
+                .0;
+        }
+        self.lookup_inode(inode)
+    }
+
+    fn lookup_inode(&self, inode: InodeId) -> Result<InodeMetadata, VfsError> {
+        let record = self.read_inode_record(inode)?;
+        Ok(record.metadata(inode))
+    }
+
+    fn open(
+        &self,
+        path: Path<'_>,
+        flags: OpenFlags,
+        credentials: Credentials,
+    ) -> Result<File, VfsError> {
+        if flags.access_mode().can_write()
+            || flags.contains(OpenFlags::CREATE)
+            || flags.contains(OpenFlags::TRUNCATE)
+        {
+            return Err(VfsError::ReadOnly);
+        }
+        let metadata = self.lookup(path)?;
+        if flags.contains(OpenFlags::DIRECTORY) && metadata.kind != InodeKind::Directory {
+            return Err(VfsError::NotDirectory);
+        }
+        if !metadata.permissions.allows(credentials, AccessMode::Read) {
+            return Err(VfsError::PermissionDenied);
+        }
+        Ok(File::with_flags(metadata.id, flags))
+    }
+
+    fn pread(&self, file: &File, buffer: &mut [u8], offset: u64) -> Result<usize, VfsError> {
+        let inode = self.read_inode_record(file.inode())?;
+        if inode.mode.kind() == InodeKind::Directory {
+            return Err(VfsError::IsDirectory);
+        }
+        self.read_inode_data(&inode, offset, buffer)
+            .map_err(Into::into)
+    }
+
+    fn readdir(
+        &self,
+        path: Path<'_>,
+        offset: usize,
+        entries: &mut [DirEntry],
+    ) -> Result<usize, VfsError> {
+        let metadata = self.lookup(path)?;
+        self.readdir_inode(metadata.id, offset, entries)
+    }
+
+    fn readdir_inode(
+        &self,
+        inode: InodeId,
+        offset: usize,
+        entries: &mut [DirEntry],
+    ) -> Result<usize, VfsError> {
+        let record = self.read_inode_record(inode)?;
+        if record.mode.kind() != InodeKind::Directory {
+            return Err(VfsError::NotDirectory);
+        }
+        let mut file_offset = 0u64;
+        let mut seen = 0usize;
+        let mut written = 0usize;
+        let mut block = [0u8; MAX_METADATA_BLOCK_BYTES];
+        while file_offset < record.size && written < entries.len() {
+            let read = self.read_inode_data(&record, file_offset, &mut block)?;
+            if read == 0 {
+                break;
+            }
+            let mut cursor = 0usize;
+            while cursor + EXT4_DIR_ENTRY_HEADER_LEN <= read && written < entries.len() {
+                let entry = DirectoryEntry::parse(&block[cursor..read])?;
+                if entry.inode != 0 {
+                    if seen >= offset {
+                        let name =
+                            str::from_utf8(entry.name).map_err(|_| VfsError::InvalidArgument)?;
+                        entries[written] = DirEntry::new(
+                            Self::vfs_inode_id(entry.inode as u64),
+                            entry.file_type.kind(),
+                            name,
+                        )?;
+                        written += 1;
+                    }
+                    seen += 1;
+                }
+                if entry.record_len == 0 {
+                    return Err(VfsError::InvalidArgument);
+                }
+                cursor += entry.record_len as usize;
+            }
+            file_offset += read as u64;
+        }
+        Ok(written)
+    }
+
+    fn pwrite(&self, _file: &File, _data: &[u8], _offset: u64) -> Result<usize, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn mkdir(
+        &self,
+        _path: Path<'_>,
+        _mode: Permissions,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn rmdir(&self, _path: Path<'_>, _credentials: Credentials) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn unlink(&self, _path: Path<'_>, _credentials: Credentials) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn rename(
+        &self,
+        _old_path: Path<'_>,
+        _new_path: Path<'_>,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn link(
+        &self,
+        _old_path: Path<'_>,
+        _new_path: Path<'_>,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn symlink(
+        &self,
+        _target: Path<'_>,
+        _link_path: Path<'_>,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn chmod(
+        &self,
+        _path: Path<'_>,
+        _mode: u16,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn chown(
+        &self,
+        _path: Path<'_>,
+        _uid: u16,
+        _gid: u16,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn truncate(
+        &self,
+        _path: Path<'_>,
+        _size: u64,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn ftruncate(
+        &self,
+        _file: &File,
+        _size: u64,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
     }
 }
 
