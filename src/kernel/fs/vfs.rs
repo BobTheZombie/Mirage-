@@ -208,6 +208,15 @@ pub trait FileSystem {
         Err(VfsError::Unsupported)
     }
 
+    fn ftruncate(
+        &self,
+        _file: &File,
+        _size: u64,
+        _credentials: Credentials,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported)
+    }
+
     fn fsync(&self, _file: &File) -> Result<(), VfsError> {
         Ok(())
     }
@@ -215,6 +224,15 @@ pub trait FileSystem {
     fn readdir(
         &self,
         _path: Path<'_>,
+        _offset: usize,
+        _entries: &mut [DirEntry],
+    ) -> Result<usize, VfsError> {
+        Err(VfsError::Unsupported)
+    }
+
+    fn readdir_inode(
+        &self,
+        _inode: InodeId,
         _offset: usize,
         _entries: &mut [DirEntry],
     ) -> Result<usize, VfsError> {
