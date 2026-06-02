@@ -3,25 +3,47 @@
 Mirage is a conceptual 64-bit, Rust-based operating system kernel organised into two tightly
 coupled layers:
 
-* **Level 1 (L1) core** – handles CPU scheduling, process lifecycle management and message-based
-  inter-process communication (IPC).
-* **Level 2 (L2) security core** – authenticates every task, enforces isolation domains and
-  adjudicates the flow of messages between processes.
+* **Level 1 (L1) core** – handles CPU scheduling, process lifecycle management,
+  message-based inter-process communication (IPC), device management, filesystem access and syscall
+  dispatch.
+* **Level 2 (L2) security core** – uses the `src/subkernel/` isolation domains, credentials,
+  capabilities and message authorization to authenticate tasks and adjudicate message flow between
+  processes.
 
 The kernel is `#![no_std]` and now has a real x86_64 boot artifact path: Cargo builds a
 freestanding ELF for a custom target, a linker script places the kernel and Limine request records,
 and the Makefile packages the ELF into a BIOS/UEFI bootable ISO.
 
+## Architecture flow
+
+Mirage boots from the Limine request and response records declared in `src/boot.rs`. Control enters
+through the `_start` entry point in `src/main.rs`, which gathers boot information and hands it to
+`kernel_main`. The architecture layer is initialised with `x86_64::init_architecture` from
+`src/arch/x86_64/mod.rs`, then the L1/L2 runtime is constructed with
+`Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new()`.
+
+From there, `bootstrap_with_framebuffer` seeds framebuffer-aware boot state, `bootstrap_services`
+registers the kernel service surface and the kernel settles into the `tick` loop where L1 scheduling,
+process lifecycle, IPC, device, filesystem and syscall dispatch continue to pass through the L2
+`src/subkernel/` checks for isolation domains, credentials, capabilities and message authorization.
+
 ## Layout
 
 ```
 src/
-├── arch/          # 64-bit x86 architectural scaffolding (initialisation, CPU hints)
-├── boot.rs        # Limine boot protocol request/response records
-├── kernel/        # L1 kernel components: processes, scheduler, IPC queues
-├── subkernel/     # L2 security kernel responsible for isolation domains and capabilities
-├── lib.rs         # Crate entry point that exposes the layered kernel modules
-└── main.rs        # `_start` entry point wiring the boot data and layers together
+├── arch/             # 64-bit x86 architectural scaffolding (initialisation, CPU hints)
+├── bin/
+│   └── qfsprogs.rs   # Host QFS tooling gated behind the `qfs-std` feature
+├── boot.rs           # Limine boot protocol request/response records
+├── kernel/           # L1 kernel components: scheduler, processes, IPC, devices, syscalls
+│   ├── fs/           # Heap-free VFS, QFS, ext4, SSD/USB, path, inode, mount, permissions
+│   └── services/     # Bootstrap/service registry support
+├── libc/             # C/POSIX-shaped ABI wrappers and syscall shims
+├── subkernel/        # L2 isolation domains, credentials, capabilities, message authorization
+├── lib.rs            # Crate entry point that exposes the layered kernel modules
+├── librust.rs        # Local runtime primitives and allocator exports
+├── main.rs           # `_start` entry point wiring the boot data and layers together
+└── stdlib.rs         # no-alloc stdlib-shaped import surface
 
 targets/
 └── x86_64-mirage.json # Freestanding x86_64 target: no OS, no red zone, static kernel code model
