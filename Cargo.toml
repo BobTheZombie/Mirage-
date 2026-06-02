@@ -15,6 +15,11 @@ crate-type = ["staticlib", "rlib"]
 name = "mirage-kernel"
 path = "src/main.rs"
 
+[[bin]]
+name = "qfsprogs"
+path = "src/bin/qfsprogs.rs"
+required-features = ["qfs-std"]
+
 [features]
 default = []
 # Enables host/testing QFS adapters backed by the Rust standard library.

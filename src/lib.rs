@@ -19,8 +19,11 @@ extern crate std;
 pub mod arch;
 pub mod boot;
 pub mod kernel;
+#[cfg(not(feature = "qfs-std"))]
 pub mod libc;
+#[cfg(not(feature = "qfs-std"))]
 pub mod librust;
+#[cfg(not(feature = "qfs-std"))]
 pub mod stdlib;
 pub mod subkernel;
 

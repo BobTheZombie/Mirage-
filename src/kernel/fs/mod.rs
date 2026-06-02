@@ -28,15 +28,18 @@ pub use mount::{Mount, MountError, MountTable};
 pub use path::{Path, PathError, MAX_COMPONENT_BYTES, MAX_PATH_BYTES};
 pub use permissions::{AccessMode, Credentials as FsCredentials, Permissions};
 #[cfg(feature = "qfs-std")]
-pub use qfs_std::StdQfsBlockDevice;
+pub use qfs_std::{
+    dump_superblock, fsck_image, mkfs_image, stat_image, QfsFormatReport, QfsImageReport,
+    QfsStatReport, QfsToolError, StdQfsBlockDevice,
+};
 
 pub use qfs::{
     QfsBookHeader, QfsBookIndexEntry, QfsBookRole, QfsChapterIndexEntry, QfsFileSystem,
     QfsInodeRecord, QfsJournalRecord, QfsJournalRecordKind, QfsPageLocation, QfsSuperblock,
-    QfsTransactionId, QFS_BOOK_INDEX_SECTORS, QFS_BOOK_PAGES, QFS_INLINE_DATA_BYTES, QFS_MAGIC,
-    QFS_MAX_BOOKS, QFS_MAX_BOOK_INDEX_ENTRIES, QFS_MAX_CHAPTER_INDEX_ENTRIES,
-    QFS_MAX_INODE_RECORDS, QFS_MAX_JOURNAL_RECORDS, QFS_NAME_BYTES, QFS_PAGE_SECTORS,
-    QFS_SECTOR_SIZE, QFS_VERSION,
+    QfsTransactionId, QFS_BOOK_INDEX_ENTRY_BYTES, QFS_BOOK_INDEX_SECTORS, QFS_BOOK_PAGES,
+    QFS_INLINE_DATA_BYTES, QFS_MAGIC, QFS_MAX_BOOKS, QFS_MAX_BOOK_INDEX_ENTRIES,
+    QFS_MAX_CHAPTER_INDEX_ENTRIES, QFS_MAX_INODE_RECORDS, QFS_MAX_JOURNAL_RECORDS, QFS_NAME_BYTES,
+    QFS_PAGE_SECTORS, QFS_SECTOR_SIZE, QFS_VERSION,
 };
 pub use ssd_usb::{SsdUsbFileSystem, MAX_FILE_BYTES, MAX_NAME_BYTES, MAX_VOLUME_NODES};
 pub use stdlib::{
