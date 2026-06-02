@@ -428,6 +428,15 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         self.enforce_isolation(pid)
     }
 
+    pub fn credentials(&self, pid: ProcessId) -> Result<Credentials, IsolationError> {
+        let domain = self.domain(pid)?;
+        Ok(Credentials::new(
+            domain.label,
+            domain.capabilities,
+            domain.isolation,
+        ))
+    }
+
     pub fn enforce_isolation(&self, pid: ProcessId) -> Result<(), IsolationError> {
         let domain = self.domain(pid)?;
         match domain.isolation {
