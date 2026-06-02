@@ -104,7 +104,29 @@ impl<const MAX: usize> Scheduler<MAX> {
         None
     }
 
-    pub fn remove_thread(&mut self, thread: ThreadId) {
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn contains_process(&self, process: ProcessId) -> bool {
+        let mut idx = 0;
+        while idx < MAX {
+            if let Some(entry) = self.queue[idx] {
+                if entry.process == process {
+                    return true;
+                }
+            }
+            idx += 1;
+        }
+        false
+    }
+
+    pub fn remove_thread(&mut self, thread: ThreadId) -> usize {
+        let mut removed = 0usize;
         let mut idx = 0;
         while idx < MAX {
             if let Some(entry) = self.queue[idx] {
@@ -113,13 +135,16 @@ impl<const MAX: usize> Scheduler<MAX> {
                     if self.len > 0 {
                         self.len -= 1;
                     }
+                    removed += 1;
                 }
             }
             idx += 1;
         }
+        removed
     }
 
-    pub fn remove_process(&mut self, process: ProcessId) {
+    pub fn remove_process(&mut self, process: ProcessId) -> usize {
+        let mut removed = 0usize;
         let mut idx = 0;
         while idx < MAX {
             if let Some(entry) = self.queue[idx] {
@@ -128,9 +153,11 @@ impl<const MAX: usize> Scheduler<MAX> {
                     if self.len > 0 {
                         self.len -= 1;
                     }
+                    removed += 1;
                 }
             }
             idx += 1;
         }
+        removed
     }
 }

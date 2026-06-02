@@ -27,8 +27,8 @@ use crate::kernel::fs::{
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{
-    ProcessControlBlock, ProcessFileTableError, ProcessId, ProcessPath, ProcessPriority,
-    ProcessState,
+    ExitStatus, ProcessControlBlock, ProcessFileTableError, ProcessGroupId, ProcessId, ProcessPath,
+    ProcessPriority, ProcessState, SessionId, SignalAction, SignalMask, SIGCHLD, SIGKILL, SIGTERM,
 };
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
 use crate::kernel::syscall::{
@@ -303,6 +303,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         pcb.update_security_label(creds.label());
         if let Some(parent_pid) = parent {
             pcb.files = self.inherit_process_file_table(parent_pid)?;
+            let parent_index = self.locate_process(parent_pid)?;
+            if let Some(parent_pcb) = self.process_table[parent_index].as_ref() {
+                pcb.process_group = parent_pcb.process_group;
+                pcb.session = parent_pcb.session;
+                pcb.signal_actions = parent_pcb.signal_actions;
+            }
         }
 
         self.security.register_task(pid, creds).map_err(|err| {
@@ -363,15 +369,26 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     pub fn terminate_process(&mut self, pid: ProcessId) {
+        self.exit_process(pid, ExitStatus::signaled(SIGTERM));
+    }
+
+    pub fn exit_process(&mut self, pid: ProcessId, status: ExitStatus) {
         if let Ok(index) = self.locate_process(pid) {
+            if let Some(pcb) = self.process_table[index].as_ref() {
+                if pcb.state == ProcessState::Zombie {
+                    return;
+                }
+            }
             if let Some(mut pcb) = self.process_table[index].take() {
                 self.release_process_file_table(&mut pcb.files);
+                pcb.mark_zombie(status);
+                self.process_table[index] = Some(pcb);
             }
             self.ipc_queues[index].clear();
             self.scheduler.remove_process(pid);
             self.remove_threads_for_process(pid);
             memory::release_process(pid);
-            self.security.revoke_task(pid);
+            let _ = self.queue_signal_to_parent(pid, SIGCHLD);
         }
     }
 
@@ -447,6 +464,28 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if let Ok(index) = self.locate_process(pid) {
             self.block_process_at_index(pid, index);
         }
+    }
+
+    pub fn wait(&mut self, parent: ProcessId, status: Option<&mut i32>) -> KernelResult<ProcessId> {
+        let status_ptr = status
+            .map(|out| out as *mut i32)
+            .unwrap_or(core::ptr::null_mut());
+        self.wait_for_child(parent, -1, status_ptr, 0)
+            .map(ProcessId::new)
+    }
+
+    pub fn waitpid(
+        &mut self,
+        parent: ProcessId,
+        pid: i64,
+        status: Option<&mut i32>,
+        options: u64,
+    ) -> KernelResult<ProcessId> {
+        let status_ptr = status
+            .map(|out| out as *mut i32)
+            .unwrap_or(core::ptr::null_mut());
+        self.wait_for_child(parent, pid, status_ptr, options)
+            .map(ProcessId::new)
     }
 
     pub fn queue_thread_syscall(
@@ -568,22 +607,38 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_fork(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        // POSIX fork is represented by Mirage's spawn_child_process using the
+        // caller-provided entry point/priority/credential tuple.  The child
+        // inherits the descriptor table, cwd/root/umask, process group, session,
+        // and signal dispositions.  User space follows with execve when it wants
+        // classic fork/exec image replacement.
         self.syscall_spawn(context)
     }
 
     fn syscall_execve(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        if context.arg(0) != 0 {
+            let _ = self.user_path_str(context.arg(0))?;
+        }
+        let entry_point = context.arg(3);
+        let stack_pointer = context.arg(4);
         let closed = self.process_files_mut(context.caller)?.close_on_exec();
         self.release_description_ids(&closed);
+        self.replace_process_image(context.caller, context.thread, entry_point, stack_pointer)?;
         Ok(0)
     }
 
     fn syscall_exit(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        self.terminate_process(context.caller);
+        self.exit_process(context.caller, ExitStatus::exited(context.arg(0) as i32));
         Ok(0)
     }
 
-    fn syscall_wait4(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_wait4(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.wait_for_child(
+            context.caller,
+            context.arg(0) as i64,
+            context.arg(1) as *mut i32,
+            context.arg(2),
+        )
     }
 
     fn syscall_getppid(&self, context: SyscallContext) -> KernelResult<u64> {
@@ -595,12 +650,49 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .unwrap_or(0))
     }
 
-    fn syscall_setpgid(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_setpgid(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let target = if context.arg(0) == 0 {
+            context.caller
+        } else {
+            ProcessId::new(context.arg(0))
+        };
+        let pgid = if context.arg(1) == 0 {
+            ProcessGroupId::new(target.raw())
+        } else {
+            ProcessGroupId::new(context.arg(1))
+        };
+        let caller_index = self.locate_process(context.caller)?;
+        let caller_session = self.process_table[caller_index]
+            .as_ref()
+            .ok_or(KernelError::UnknownProcess)?
+            .session;
+        let target_index = self.locate_process(target)?;
+        let target_pcb = self.process_table[target_index]
+            .as_mut()
+            .ok_or(KernelError::UnknownProcess)?;
+        if target != context.caller && target_pcb.parent != Some(context.caller) {
+            return Err(KernelError::InvalidArgument);
+        }
+        if target_pcb.session != caller_session {
+            return Err(KernelError::InvalidArgument);
+        }
+        target_pcb.set_process_group(pgid);
+        Ok(0)
     }
 
-    fn syscall_setsid(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_setsid(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let index = self.locate_process(context.caller)?;
+        let sid = SessionId::new(context.caller.raw());
+        let pgid = ProcessGroupId::new(context.caller.raw());
+        let pcb = self.process_table[index]
+            .as_mut()
+            .ok_or(KernelError::UnknownProcess)?;
+        if pcb.process_group.raw() == context.caller.raw() {
+            return Err(KernelError::InvalidArgument);
+        }
+        pcb.set_session(sid);
+        pcb.set_process_group(pgid);
+        Ok(sid.raw())
     }
 
     fn syscall_setuid(&mut self, _context: SyscallContext) -> KernelResult<u64> {
@@ -627,21 +719,63 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Err(KernelError::InvalidSyscall)
     }
 
-    fn syscall_rt_sigaction(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
-    }
-
-    fn syscall_rt_sigprocmask(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
-    }
-
-    fn syscall_kill(&self, context: SyscallContext) -> KernelResult<u64> {
-        self.ensure_process_exists(ProcessId::new(context.arg(0)))?;
+    fn syscall_rt_sigaction(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let signal = context.arg(0) as usize;
+        if signal == 0 || signal > crate::kernel::process::MAX_SIGNAL_NUMBER {
+            return Err(KernelError::InvalidArgument);
+        }
+        let new_action = context.arg(1) as *const SignalAction;
+        let old_action = context.arg(2) as *mut SignalAction;
+        let index = self.locate_process(context.caller)?;
+        let pcb = self.process_table[index]
+            .as_mut()
+            .ok_or(KernelError::UnknownProcess)?;
+        if !old_action.is_null() {
+            unsafe { old_action.write(pcb.signal_actions[signal]) };
+        }
+        if !new_action.is_null() {
+            pcb.signal_actions[signal] = unsafe { new_action.read() };
+        }
         Ok(0)
     }
 
-    fn syscall_rt_sigreturn(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_rt_sigprocmask(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let how = context.arg(0);
+        let new_mask = context.arg(1) as *const SignalMask;
+        let old_mask = context.arg(2) as *mut SignalMask;
+        let thread = context.thread.ok_or(KernelError::UnknownThread)?;
+        let index = self.locate_thread(thread)?;
+        let tcb = self.thread_table[index]
+            .as_mut()
+            .ok_or(KernelError::UnknownThread)?;
+        if !old_mask.is_null() {
+            unsafe { old_mask.write(tcb.signal_mask) };
+        }
+        if !new_mask.is_null() {
+            let requested = unsafe { new_mask.read() };
+            let mask = match how {
+                0 => SignalMask::from_bits(tcb.signal_mask.bits() | requested.bits()),
+                1 => SignalMask::from_bits(tcb.signal_mask.bits() & !requested.bits()),
+                2 => requested,
+                _ => return Err(KernelError::InvalidArgument),
+            };
+            tcb.set_signal_mask(mask);
+        }
+        Ok(0)
+    }
+
+    fn syscall_kill(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.send_signal(context.arg(0) as i64, context.arg(1) as u8)
+    }
+
+    fn syscall_rt_sigreturn(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let thread = context.thread.ok_or(KernelError::UnknownThread)?;
+        let index = self.locate_thread(thread)?;
+        self.thread_table[index]
+            .as_mut()
+            .ok_or(KernelError::UnknownThread)?
+            .finish_signal();
+        Ok(0)
     }
 
     fn syscall_clock_gettime(&self, context: SyscallContext) -> KernelResult<u64> {
@@ -1505,6 +1639,212 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         core::str::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
     }
 
+    fn replace_process_image(
+        &mut self,
+        pid: ProcessId,
+        current_thread: Option<ThreadId>,
+        entry_point: u64,
+        stack_pointer: u64,
+    ) -> KernelResult<()> {
+        let index = self.locate_process(pid)?;
+        if let Some(pcb) = self.process_table[index].as_mut() {
+            pcb.set_exec_image(entry_point, 0);
+            pcb.thread_count = 0;
+        }
+
+        self.scheduler.remove_process(pid);
+        let mut kept_thread = current_thread;
+        if kept_thread.is_none() {
+            let mut idx = 0usize;
+            while idx < Self::THREAD_CAPACITY {
+                if let Some(thread) = self.thread_table[idx] {
+                    if thread.process == pid {
+                        kept_thread = Some(thread.id);
+                        break;
+                    }
+                }
+                idx += 1;
+            }
+        }
+
+        let mut idx = 0usize;
+        while idx < Self::THREAD_CAPACITY {
+            if let Some(thread) = self.thread_table[idx] {
+                if thread.process == pid && Some(thread.id) != kept_thread {
+                    self.thread_table[idx] = None;
+                }
+            }
+            idx += 1;
+        }
+
+        let thread_id = if let Some(thread_id) = kept_thread {
+            let thread_index = self.locate_thread(thread_id)?;
+            let priority = self.process_table[index]
+                .as_ref()
+                .ok_or(KernelError::UnknownProcess)?
+                .priority;
+            if let Some(tcb) = self.thread_table[thread_index].as_mut() {
+                tcb.replace_exec_image(entry_point, stack_pointer);
+                tcb.priority = priority;
+            }
+            thread_id
+        } else {
+            self.create_thread(
+                pid,
+                entry_point,
+                self.process_table[index]
+                    .as_ref()
+                    .ok_or(KernelError::UnknownProcess)?
+                    .priority,
+            )?
+        };
+
+        if let Some(pcb) = self.process_table[index].as_mut() {
+            pcb.thread_count = 1;
+            pcb.state = ProcessState::Ready;
+        }
+        let priority = self.process_table[index]
+            .as_ref()
+            .ok_or(KernelError::UnknownProcess)?
+            .priority;
+        self.scheduler
+            .enqueue(ScheduledThread::new(thread_id, pid, priority))
+            .map_err(|_| KernelError::SchedulerFull)
+    }
+
+    fn wait_for_child(
+        &mut self,
+        parent: ProcessId,
+        selector: i64,
+        status_out: *mut i32,
+        options: u64,
+    ) -> KernelResult<u64> {
+        const WNOHANG: u64 = 1;
+        let mut saw_child = false;
+        let parent_pgid = self.process_table[self.locate_process(parent)?]
+            .as_ref()
+            .ok_or(KernelError::UnknownProcess)?
+            .process_group;
+        let mut idx = 0usize;
+        while idx < MAX_PROC {
+            if let Some(pcb) = self.process_table[idx] {
+                if pcb.parent == Some(parent)
+                    && wait_selector_matches(selector, pcb.pid, pcb.process_group, parent_pgid)
+                {
+                    saw_child = true;
+                    if pcb.state == ProcessState::Zombie {
+                        let status = pcb.exit_status.unwrap_or(ExitStatus::exited(0));
+                        if !status_out.is_null() {
+                            unsafe { status_out.write(status.raw()) };
+                        }
+                        let pid = pcb.pid;
+                        self.reap_process_at(idx);
+                        return Ok(pid.raw());
+                    }
+                }
+            }
+            idx += 1;
+        }
+        if saw_child && (options & WNOHANG) != 0 {
+            Ok(0)
+        } else if saw_child {
+            Err(KernelError::MessageQueueEmpty)
+        } else {
+            Err(KernelError::UnknownProcess)
+        }
+    }
+
+    fn reap_process_at(&mut self, index: usize) {
+        if let Some(pcb) = self.process_table[index] {
+            self.security.revoke_task(pcb.pid);
+            self.process_table[index] = None;
+        }
+    }
+
+    fn queue_signal_to_parent(&mut self, child: ProcessId, signal: u8) -> KernelResult<()> {
+        let child_index = self.locate_process(child)?;
+        if let Some(parent) = self.process_table[child_index]
+            .as_ref()
+            .and_then(|pcb| pcb.parent)
+        {
+            self.queue_signal(parent, signal)?;
+        }
+        Ok(())
+    }
+
+    fn queue_signal(&mut self, pid: ProcessId, signal: u8) -> KernelResult<()> {
+        let index = self.locate_process(pid)?;
+        self.process_table[index]
+            .as_mut()
+            .ok_or(KernelError::UnknownProcess)?
+            .queue_signal(signal)
+            .map_err(|_| KernelError::InvalidArgument)
+    }
+
+    fn send_signal(&mut self, selector: i64, signal: u8) -> KernelResult<u64> {
+        if signal == 0 {
+            self.ensure_process_exists(ProcessId::new(selector as u64))?;
+            return Ok(0);
+        }
+        let mut delivered = 0u64;
+        if selector > 0 {
+            self.queue_signal(ProcessId::new(selector as u64), signal)?;
+            return Ok(0);
+        }
+        let target_group = if selector == 0 {
+            None
+        } else {
+            Some(ProcessGroupId::new((-selector) as u64))
+        };
+        let mut idx = 0usize;
+        while idx < MAX_PROC {
+            if let Some(pcb) = self.process_table[idx] {
+                let matches = target_group
+                    .map(|pgid| pcb.process_group == pgid)
+                    .unwrap_or(true);
+                if matches && pcb.state != ProcessState::Zombie {
+                    if self.queue_signal(pcb.pid, signal).is_ok() {
+                        delivered += 1;
+                    }
+                }
+            }
+            idx += 1;
+        }
+        if delivered == 0 {
+            Err(KernelError::UnknownProcess)
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn deliver_signal_checkpoint(&mut self, pid: ProcessId, thread: ThreadId) -> KernelResult<()> {
+        let thread_index = self.locate_thread(thread)?;
+        let mask = self.thread_table[thread_index]
+            .as_ref()
+            .ok_or(KernelError::UnknownThread)?
+            .signal_mask;
+        let process_index = self.locate_process(pid)?;
+        let Some(signal) = self.process_table[process_index]
+            .as_mut()
+            .ok_or(KernelError::UnknownProcess)?
+            .take_deliverable_signal(mask)
+        else {
+            return Ok(());
+        };
+        let action = self.process_table[process_index]
+            .as_ref()
+            .ok_or(KernelError::UnknownProcess)?
+            .signal_actions[signal as usize];
+        if action.handler == 0 && matches!(signal, SIGKILL | SIGTERM) {
+            self.exit_process(pid, ExitStatus::signaled(signal));
+            return Ok(());
+        }
+        if let Some(tcb) = self.thread_table[thread_index].as_mut() {
+            tcb.deliver_signal(signal, action.handler);
+        }
+        Ok(())
+    }
+
     fn process_files(
         &self,
         pid: ProcessId,
@@ -1691,6 +2031,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 return;
             }
 
+            let _ = self.deliver_signal_checkpoint(scheduled.process, scheduled.thread);
+            if self.locate_thread(scheduled.thread).is_err() {
+                self.core_states[core_index].idle_cycle();
+                return;
+            }
+
             self.core_states[core_index].start_thread(scheduled.thread);
 
             let mut terminated = false;
@@ -1727,6 +2073,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                         .handle_syscall(trap.number, context)
                         .unwrap_or_else(encode_syscall_error);
                     self.write_thread_syscall_result(trap.thread, result);
+                    let _ = self.deliver_signal_checkpoint(scheduled.process, trap.thread);
                 }
                 ThreadRunOutcome::TimerPreempted | ThreadRunOutcome::TimeSliceComplete => {}
             }
@@ -2412,5 +2759,22 @@ mod tests {
             libc::mmap(&mut kernel, user, None, 4096, protection),
             Err(KernelError::SecurityViolation(_))
         ));
+    }
+}
+
+fn wait_selector_matches(
+    selector: i64,
+    child_pid: ProcessId,
+    child_pgid: ProcessGroupId,
+    parent_pgid: ProcessGroupId,
+) -> bool {
+    if selector == -1 {
+        true
+    } else if selector == 0 {
+        child_pgid == parent_pgid
+    } else if selector > 0 {
+        child_pid.raw() == selector as u64
+    } else {
+        child_pgid.raw() == (-selector) as u64
     }
 }
