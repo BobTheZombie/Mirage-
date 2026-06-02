@@ -139,6 +139,14 @@ impl<const MAX: usize> FileTable<MAX> {
         Self { files: [None; MAX] }
     }
 
+    pub fn clear(&mut self) {
+        let mut idx = 0usize;
+        while idx < MAX {
+            self.files[idx] = None;
+            idx += 1;
+        }
+    }
+
     pub fn insert(&mut self, file: File) -> Result<usize, FileTableError> {
         let mut idx = 0usize;
         while idx < MAX {

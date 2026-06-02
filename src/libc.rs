@@ -8,12 +8,15 @@
 use core::ffi::c_void;
 
 use crate::kernel::device::{DeviceId, MirageDeviceDescriptor};
+use crate::kernel::fs::VfsError;
 use crate::kernel::ipc::Message;
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{ProcessId, ProcessPriority};
 use crate::kernel::syscall::{
-    SyscallContext, SyscallNumber, MIRAGE_EACCES, MIRAGE_EAGAIN, MIRAGE_EFAULT, MIRAGE_EINVAL,
-    MIRAGE_EIO, MIRAGE_ENOBUFS, MIRAGE_ENOMEM, MIRAGE_ENOSYS, MIRAGE_ESRCH, SYSCALL_MAX_ARGS,
+    SyscallContext, SyscallNumber, MIRAGE_EACCES, MIRAGE_EAGAIN, MIRAGE_EBADF, MIRAGE_EBUSY,
+    MIRAGE_EEXIST, MIRAGE_EFAULT, MIRAGE_EINVAL, MIRAGE_EIO, MIRAGE_EISDIR, MIRAGE_EMLINK,
+    MIRAGE_ENOBUFS, MIRAGE_ENOENT, MIRAGE_ENOMEM, MIRAGE_ENOSPC, MIRAGE_ENOSYS, MIRAGE_ENOTDIR,
+    MIRAGE_ENOTSUP, MIRAGE_EROFS, MIRAGE_ESRCH, MIRAGE_EXDEV, SYSCALL_MAX_ARGS,
 };
 use crate::kernel::thread::ThreadId;
 use crate::kernel::{Kernel, KernelError, KernelResult};
@@ -352,7 +355,8 @@ fn libc_errno(error: KernelError) -> i32 {
         KernelError::ProcessTableFull
         | KernelError::SchedulerFull
         | KernelError::ThreadTableFull
-        | KernelError::AllocationFailed => MIRAGE_ENOMEM,
+        | KernelError::AllocationFailed
+        | KernelError::FileTableFull => MIRAGE_ENOMEM,
         KernelError::UnknownProcess | KernelError::UnknownThread => MIRAGE_ESRCH,
         KernelError::MessageQueueFull => MIRAGE_ENOBUFS,
         KernelError::MessageQueueEmpty => MIRAGE_EAGAIN,
@@ -369,6 +373,27 @@ fn libc_errno(error: KernelError) -> i32 {
         KernelError::InvalidSyscall => MIRAGE_ENOSYS,
         KernelError::InvalidArgument => MIRAGE_EINVAL,
         KernelError::InvalidPointer => MIRAGE_EFAULT,
+        KernelError::Filesystem(error) => libc_vfs_errno(error),
+    }
+}
+
+fn libc_vfs_errno(error: VfsError) -> i32 {
+    match error {
+        VfsError::InvalidPath(_) | VfsError::NameTooLong | VfsError::InvalidArgument => {
+            MIRAGE_EINVAL
+        }
+        VfsError::NotFound => MIRAGE_ENOENT,
+        VfsError::NotDirectory => MIRAGE_ENOTDIR,
+        VfsError::IsDirectory => MIRAGE_EISDIR,
+        VfsError::AlreadyExists => MIRAGE_EEXIST,
+        VfsError::PermissionDenied => MIRAGE_EACCES,
+        VfsError::ReadOnly => MIRAGE_EROFS,
+        VfsError::NoSpace => MIRAGE_ENOSPC,
+        VfsError::InvalidHandle => MIRAGE_EBADF,
+        VfsError::Busy => MIRAGE_EBUSY,
+        VfsError::CrossDevice => MIRAGE_EXDEV,
+        VfsError::TooManyLinks => MIRAGE_EMLINK,
+        VfsError::Unsupported => MIRAGE_ENOTSUP,
     }
 }
 

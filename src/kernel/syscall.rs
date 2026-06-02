@@ -52,6 +52,17 @@ pub enum SyscallErrorCode {
     InvalidArgument = 13,
     BadAddress = 14,
     OutOfMemory = 15,
+    FileNotFound = 16,
+    BadFileDescriptor = 17,
+    NotDirectory = 18,
+    IsDirectory = 19,
+    AlreadyExists = 20,
+    ReadOnlyFilesystem = 21,
+    NoSpace = 22,
+    FilesystemBusy = 23,
+    CrossDevice = 24,
+    TooManyLinks = 25,
+    UnsupportedFilesystem = 26,
 }
 
 impl SyscallErrorCode {
@@ -72,8 +83,18 @@ pub const MIRAGE_EAGAIN: i32 = 11;
 pub const MIRAGE_ENOMEM: i32 = 12;
 pub const MIRAGE_EACCES: i32 = 13;
 pub const MIRAGE_EFAULT: i32 = 14;
+pub const MIRAGE_EBUSY: i32 = 16;
+pub const MIRAGE_EEXIST: i32 = 17;
+pub const MIRAGE_EXDEV: i32 = 18;
+pub const MIRAGE_ENODEV: i32 = 19;
+pub const MIRAGE_ENOTDIR: i32 = 20;
+pub const MIRAGE_EISDIR: i32 = 21;
 pub const MIRAGE_EINVAL: i32 = 22;
+pub const MIRAGE_ENOSPC: i32 = 28;
+pub const MIRAGE_EROFS: i32 = 30;
+pub const MIRAGE_EMLINK: i32 = 31;
 pub const MIRAGE_ENOSYS: i32 = 38;
+pub const MIRAGE_ENOTSUP: i32 = 95;
 pub const MIRAGE_ENOBUFS: i32 = 105;
 
 #[repr(u64)]
@@ -95,6 +116,22 @@ pub enum SyscallNumber {
     Realloc = 13,
     MallocAligned = 14,
     DeviceInfo = 15,
+    OpenAt = 16,
+    Close = 17,
+    Read = 18,
+    Write = 19,
+    Pread64 = 20,
+    Pwrite64 = 21,
+    Lseek = 22,
+    Statx = 23,
+    NewFstatAt = 24,
+    Getdents64 = 25,
+    MkdirAt = 26,
+    UnlinkAt = 27,
+    RenameAt2 = 28,
+    Ftruncate = 29,
+    Fsync = 30,
+    Mount = 31,
 }
 
 impl SyscallNumber {
@@ -120,6 +157,22 @@ impl SyscallNumber {
             13 => Some(Self::Realloc),
             14 => Some(Self::MallocAligned),
             15 => Some(Self::DeviceInfo),
+            16 => Some(Self::OpenAt),
+            17 => Some(Self::Close),
+            18 => Some(Self::Read),
+            19 => Some(Self::Write),
+            20 => Some(Self::Pread64),
+            21 => Some(Self::Pwrite64),
+            22 => Some(Self::Lseek),
+            23 => Some(Self::Statx),
+            24 => Some(Self::NewFstatAt),
+            25 => Some(Self::Getdents64),
+            26 => Some(Self::MkdirAt),
+            27 => Some(Self::UnlinkAt),
+            28 => Some(Self::RenameAt2),
+            29 => Some(Self::Ftruncate),
+            30 => Some(Self::Fsync),
+            31 => Some(Self::Mount),
             _ => None,
         }
     }
@@ -134,6 +187,22 @@ pub const MIRAGE_SYSCALL_ENUMERATE_DEVICES: u64 = SyscallNumber::EnumerateDevice
 pub const MIRAGE_SYSCALL_DEVICE_READ: u64 = SyscallNumber::DeviceRead.raw();
 pub const MIRAGE_SYSCALL_DEVICE_WRITE: u64 = SyscallNumber::DeviceWrite.raw();
 pub const MIRAGE_SYSCALL_DEVICE_INFO: u64 = SyscallNumber::DeviceInfo.raw();
+pub const MIRAGE_SYSCALL_OPENAT: u64 = SyscallNumber::OpenAt.raw();
+pub const MIRAGE_SYSCALL_CLOSE: u64 = SyscallNumber::Close.raw();
+pub const MIRAGE_SYSCALL_READ: u64 = SyscallNumber::Read.raw();
+pub const MIRAGE_SYSCALL_WRITE: u64 = SyscallNumber::Write.raw();
+pub const MIRAGE_SYSCALL_PREAD64: u64 = SyscallNumber::Pread64.raw();
+pub const MIRAGE_SYSCALL_PWRITE64: u64 = SyscallNumber::Pwrite64.raw();
+pub const MIRAGE_SYSCALL_LSEEK: u64 = SyscallNumber::Lseek.raw();
+pub const MIRAGE_SYSCALL_STATX: u64 = SyscallNumber::Statx.raw();
+pub const MIRAGE_SYSCALL_NEWFSTATAT: u64 = SyscallNumber::NewFstatAt.raw();
+pub const MIRAGE_SYSCALL_GETDENTS64: u64 = SyscallNumber::Getdents64.raw();
+pub const MIRAGE_SYSCALL_MKDIRAT: u64 = SyscallNumber::MkdirAt.raw();
+pub const MIRAGE_SYSCALL_UNLINKAT: u64 = SyscallNumber::UnlinkAt.raw();
+pub const MIRAGE_SYSCALL_RENAMEAT2: u64 = SyscallNumber::RenameAt2.raw();
+pub const MIRAGE_SYSCALL_FTRUNCATE: u64 = SyscallNumber::Ftruncate.raw();
+pub const MIRAGE_SYSCALL_FSYNC: u64 = SyscallNumber::Fsync.raw();
+pub const MIRAGE_SYSCALL_MOUNT: u64 = SyscallNumber::Mount.raw();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SyscallContext {

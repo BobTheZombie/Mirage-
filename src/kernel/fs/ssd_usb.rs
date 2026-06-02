@@ -293,7 +293,33 @@ impl FileSystem for SsdUsbFileSystem {
         flags: OpenFlags,
         credentials: Credentials,
     ) -> Result<File, FsError> {
-        let metadata = self.lookup(path)?;
+        let mut existed = true;
+        let metadata = match self.lookup(path) {
+            Ok(metadata) => metadata,
+            Err(FsError::NotFound) if flags.contains(OpenFlags::CREATE) => {
+                existed = false;
+                if self.read_only {
+                    return Err(FsError::ReadOnly);
+                }
+                let mut state = self.state.lock();
+                let (parent, name) = state.resolve_parent(path)?;
+                let inode = state.create_node(
+                    parent,
+                    name,
+                    InodeKind::RegularFile,
+                    Permissions::new(0o644, credentials.uid, credentials.gid),
+                    &[],
+                )?;
+                state
+                    .node_by_inode(inode)
+                    .ok_or(FsError::NotFound)?
+                    .metadata()
+            }
+            Err(error) => return Err(error),
+        };
+        if existed && flags.contains(OpenFlags::EXCLUSIVE) && flags.contains(OpenFlags::CREATE) {
+            return Err(FsError::AlreadyExists);
+        }
         if flags.contains(OpenFlags::DIRECTORY) && metadata.kind != InodeKind::Directory {
             return Err(FsError::NotDirectory);
         }
@@ -591,6 +617,30 @@ impl FileSystem for SsdUsbFileSystem {
         Ok(())
     }
 
+    fn ftruncate(&self, file: &File, size: u64, _credentials: Credentials) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        if size as usize > MAX_FILE_BYTES {
+            return Err(FsError::NoSpace);
+        }
+        let mut state = self.state.lock();
+        let index = state
+            .node_index_by_inode(file.inode())
+            .ok_or(FsError::InvalidHandle)?;
+        let mut updated = state.nodes[index].ok_or(FsError::InvalidHandle)?;
+        if updated.kind == InodeKind::Directory {
+            return Err(FsError::IsDirectory);
+        }
+        let new_size = size as usize;
+        if new_size > updated.size {
+            updated.data[updated.size..new_size].fill(0);
+        }
+        updated.size = new_size;
+        state.nodes[index] = Some(updated);
+        Ok(())
+    }
+
     fn readdir(
         &self,
         path: Path<'_>,
@@ -599,6 +649,35 @@ impl FileSystem for SsdUsbFileSystem {
     ) -> Result<usize, FsError> {
         let state = self.state.lock();
         let directory = state.resolve_inode(path)?;
+        if directory.kind != InodeKind::Directory {
+            return Err(FsError::NotDirectory);
+        }
+        let mut seen = 0usize;
+        let mut written = 0usize;
+        let mut idx = 0usize;
+        while idx < MAX_VOLUME_NODES && written < entries.len() {
+            if let Some(node) = state.nodes[idx] {
+                if node.parent == directory.inode && node.inode != directory.inode {
+                    if seen >= offset {
+                        entries[written] = DirEntry::new(node.inode, node.kind, node.name_str())?;
+                        written += 1;
+                    }
+                    seen += 1;
+                }
+            }
+            idx += 1;
+        }
+        Ok(written)
+    }
+
+    fn readdir_inode(
+        &self,
+        inode: InodeId,
+        offset: usize,
+        entries: &mut [DirEntry],
+    ) -> Result<usize, FsError> {
+        let state = self.state.lock();
+        let directory = state.node_by_inode(inode).ok_or(FsError::NotFound)?;
         if directory.kind != InodeKind::Directory {
             return Err(FsError::NotDirectory);
         }
