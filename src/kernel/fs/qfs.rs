@@ -2122,3 +2122,617 @@ fn decode_inode_kind(kind: u8) -> InodeKind {
         _ => InodeKind::RegularFile,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::kernel::fs::{file::FileMode, permissions::AccessMode};
+
+    struct MemBlockDevice {
+        sectors: Mutex<Vec<[u8; QFS_SECTOR_SIZE]>>,
+    }
+
+    impl MemBlockDevice {
+        fn new(sector_count: usize) -> Self {
+            Self {
+                sectors: Mutex::new(vec![[0; QFS_SECTOR_SIZE]; sector_count]),
+            }
+        }
+
+        fn read_sector_copy(&self, sector: u64) -> [u8; QFS_SECTOR_SIZE] {
+            self.sectors.lock().unwrap()[sector as usize]
+        }
+
+        fn write_sector_copy(&self, sector: u64, data: &[u8; QFS_SECTOR_SIZE]) {
+            self.sectors.lock().unwrap()[sector as usize] = *data;
+        }
+    }
+
+    impl BlockStorageDevice for MemBlockDevice {
+        fn sector_size(&self) -> usize {
+            QFS_SECTOR_SIZE
+        }
+
+        fn sector_count(&self) -> u64 {
+            self.sectors.lock().unwrap().len() as u64
+        }
+
+        fn read_sectors(&self, first_sector: u64, buffer: &mut [u8]) -> Result<usize, DeviceError> {
+            if buffer.len() % QFS_SECTOR_SIZE != 0 {
+                return Err(DeviceError::BufferTooSmall);
+            }
+            let sectors = buffer.len() / QFS_SECTOR_SIZE;
+            let guard = self.sectors.lock().unwrap();
+            if first_sector as usize + sectors > guard.len() {
+                return Err(DeviceError::NotFound);
+            }
+            let mut idx = 0usize;
+            while idx < sectors {
+                let start = idx * QFS_SECTOR_SIZE;
+                buffer[start..start + QFS_SECTOR_SIZE]
+                    .copy_from_slice(&guard[first_sector as usize + idx]);
+                idx += 1;
+            }
+            Ok(buffer.len())
+        }
+
+        fn write_sectors(&self, first_sector: u64, data: &[u8]) -> Result<usize, DeviceError> {
+            if data.len() % QFS_SECTOR_SIZE != 0 {
+                return Err(DeviceError::BufferTooSmall);
+            }
+            let sectors = data.len() / QFS_SECTOR_SIZE;
+            let mut guard = self.sectors.lock().unwrap();
+            if first_sector as usize + sectors > guard.len() {
+                return Err(DeviceError::NotFound);
+            }
+            let mut idx = 0usize;
+            while idx < sectors {
+                let start = idx * QFS_SECTOR_SIZE;
+                guard[first_sector as usize + idx]
+                    .copy_from_slice(&data[start..start + QFS_SECTOR_SIZE]);
+                idx += 1;
+            }
+            Ok(data.len())
+        }
+
+        fn flush(&self) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn discard(&self, first_sector: u64, sector_count: u64) -> Result<(), DeviceError> {
+            let mut zeroes = vec![0u8; sector_count as usize * QFS_SECTOR_SIZE];
+            self.write_sectors(first_sector, &mut zeroes).map(|_| ())
+        }
+    }
+
+    fn path(raw: &str) -> Path<'_> {
+        Path::new(raw).unwrap()
+    }
+
+    fn test_superblock(total_books: u32) -> QfsSuperblock {
+        QfsSuperblock {
+            total_books,
+            total_sectors: 1 + total_books as u64 * QFS_BOOK_PAGES as u64 * QFS_PAGE_SECTORS as u64,
+            free_sectors: 123,
+            inode_table: QfsPageLocation::new(0, 1),
+            journal: QfsPageLocation::new(0, 8),
+            free_space_bitmap: QfsPageLocation::new(0, 2),
+            flags: 0x55aa,
+            ..QfsSuperblock::empty()
+        }
+    }
+
+    fn named_inode(
+        inode: u64,
+        parent_inode: u64,
+        kind: InodeKind,
+        name: &str,
+        mode: u16,
+        uid: u16,
+        gid: u16,
+    ) -> QfsInodeRecord {
+        let mut record = QfsInodeRecord {
+            inode,
+            parent_inode,
+            kind: encode_inode_kind(kind),
+            name_len: name.len() as u8,
+            mode,
+            uid,
+            gid,
+            links: 1,
+            size: 0,
+            first_chapter: 0,
+            chapter_count: 0,
+            name: [0; QFS_NAME_BYTES],
+            inline_data_len: 0,
+            inline_data: [0; QFS_INLINE_DATA_BYTES],
+        };
+        record.name[..name.len()].copy_from_slice(name.as_bytes());
+        record
+    }
+
+    fn filesystem_with_device(
+        device: &'static dyn BlockStorageDevice,
+        superblock: QfsSuperblock,
+    ) -> QfsFileSystem {
+        let fs = QfsFileSystem::new_on_block_device(false, device);
+        {
+            let mut state = fs.state.lock();
+            state.mounted = true;
+            state.superblock = superblock;
+        }
+        fs
+    }
+
+    fn format_device_with_inode(
+        device: &dyn BlockStorageDevice,
+        superblock: QfsSuperblock,
+        inode: QfsInodeRecord,
+    ) {
+        let mut sector = [0u8; QFS_SECTOR_SIZE];
+        superblock.write_sector(&mut sector).unwrap();
+        device
+            .write_sectors(QFS_SUPERBLOCK_SECTOR, &sector)
+            .unwrap();
+
+        let mut header = QfsBookHeader::empty();
+        header.book_id = 0;
+        header.chapter_count = 2;
+        header.index_entry_count = 2;
+        header.write_sector(&mut sector).unwrap();
+        device
+            .write_sectors(book_start_sector(&superblock, 0), &sector)
+            .unwrap();
+
+        sector.fill(0);
+        QfsBookIndexEntry {
+            chapter_id: 1,
+            first_page: 1,
+            page_count: 1,
+            role: QfsBookRole::Inode,
+            flags: 0,
+            reserved: [0; 6],
+        }
+        .write(&mut sector[0..QFS_BOOK_INDEX_ENTRY_BYTES])
+        .unwrap();
+        QfsBookIndexEntry {
+            chapter_id: 2,
+            first_page: 3,
+            page_count: 2,
+            role: QfsBookRole::Data,
+            flags: 0,
+            reserved: [0; 6],
+        }
+        .write(&mut sector[QFS_BOOK_INDEX_ENTRY_BYTES..QFS_BOOK_INDEX_ENTRY_BYTES * 2])
+        .unwrap();
+        device
+            .write_sectors(
+                book_start_sector(&superblock, 0) + QFS_BOOK_HEADER_SECTORS,
+                &sector,
+            )
+            .unwrap();
+
+        let mut inodes = [None; QFS_MAX_INODE_RECORDS];
+        inodes[0] = Some(QfsInodeRecord::root());
+        inodes[1] = Some(inode);
+        serialize_inode_records(&inodes, &mut sector).unwrap();
+        device
+            .write_sectors(
+                page_location_sector(&superblock, superblock.inode_table).unwrap(),
+                &sector,
+            )
+            .unwrap();
+        device.flush().unwrap();
+    }
+
+    fn add_data_mapping(fs: &QfsFileSystem, inode: InodeId) {
+        let mut state = fs.state.lock();
+        state.chapter_index[0] = Some(QfsChapterIndexEntry {
+            inode: inode.raw(),
+            logical_page: 0,
+            book_id: 0,
+            first_page: 3,
+            page_count: 2,
+            flags: 0,
+        });
+        state.chapter_index[1] = Some(QfsChapterIndexEntry {
+            inode: inode.raw(),
+            logical_page: 2,
+            book_id: 1,
+            first_page: 3,
+            page_count: 2,
+            flags: 0,
+        });
+        if let Some(slot) = state.inode_slot_by_id(inode) {
+            let mut record = state.inodes[slot].unwrap();
+            record.first_chapter = 0;
+            record.chapter_count = 2;
+            state.inodes[slot] = Some(record);
+        }
+    }
+
+    #[test]
+    fn superblock_parse_serialize_round_trip() {
+        let mut superblock = test_superblock(3);
+        superblock.root_inode = 42;
+        superblock.reserved[0] = 0xab;
+        superblock.reserved[63] = 0xcd;
+
+        let mut sector = [0u8; QFS_SECTOR_SIZE];
+        superblock.write_sector(&mut sector).unwrap();
+        let parsed = QfsSuperblock::parse_sector(&sector).unwrap();
+
+        assert_eq!(parsed, superblock);
+    }
+
+    #[test]
+    fn book_header_round_trip_and_chapter_index_lookup() {
+        let mut header = QfsBookHeader::empty();
+        header.book_id = 7;
+        header.chapter_count = 3;
+        header.index_entry_count = 1;
+        header.checksum = 0xdead_beef;
+        header.generation = 9;
+        header.reserved[0] = 0x5a;
+
+        let mut sector = [0u8; QFS_SECTOR_SIZE];
+        header.write_sector(&mut sector).unwrap();
+        assert_eq!(QfsBookHeader::parse_sector(&sector).unwrap(), header);
+
+        let entry = QfsBookIndexEntry {
+            chapter_id: 77,
+            first_page: 4,
+            page_count: 6,
+            role: QfsBookRole::Data,
+            flags: 0x80,
+            reserved: [1, 2, 3, 4, 5, 6],
+        };
+        sector.fill(0);
+        entry
+            .write(&mut sector[..QFS_BOOK_INDEX_ENTRY_BYTES])
+            .unwrap();
+        let mut parsed_entries = [None; QFS_MAX_BOOK_INDEX_ENTRIES];
+        parse_book_index_entries(&sector, 1, &mut parsed_entries).unwrap();
+        assert_eq!(parsed_entries[0], Some(entry));
+
+        let fs = QfsFileSystem::new(false);
+        let inode = InodeId::new(12);
+        {
+            let mut state = fs.state.lock();
+            state.superblock = test_superblock(2);
+            state.inodes[1] = Some(named_inode(
+                inode.raw(),
+                InodeId::ROOT.raw(),
+                InodeKind::RegularFile,
+                "data",
+                0o644,
+                0,
+                0,
+            ));
+            state.chapter_index[0] = Some(QfsChapterIndexEntry {
+                inode: inode.raw(),
+                logical_page: 2,
+                book_id: 1,
+                first_page: 5,
+                page_count: 3,
+                flags: 0,
+            });
+        }
+        let state = fs.state.lock();
+        let record = state.inode_by_id(inode).unwrap();
+        assert_eq!(
+            QfsFileSystem::data_sector_for_offset(&state, record, QFS_SECTOR_SIZE as u64 * 2),
+            Some((
+                book_start_sector(&state.superblock, 1) + 5 * QFS_PAGE_SECTORS as u64,
+                0
+            ))
+        );
+    }
+
+    #[test]
+    fn file_offset_translates_to_book_chapter_page_and_sector() {
+        let fs = QfsFileSystem::new(false);
+        let inode = InodeId::new(20);
+        {
+            let mut state = fs.state.lock();
+            state.superblock = QfsSuperblock {
+                total_books: 3,
+                page_sectors: 2,
+                book_pages: 8,
+                ..QfsSuperblock::empty()
+            };
+            state.inodes[1] = Some(named_inode(
+                inode.raw(),
+                InodeId::ROOT.raw(),
+                InodeKind::RegularFile,
+                "mapped",
+                0o644,
+                0,
+                0,
+            ));
+            state.chapter_index[3] = Some(QfsChapterIndexEntry {
+                inode: inode.raw(),
+                logical_page: 4,
+                book_id: 2,
+                first_page: 6,
+                page_count: 2,
+                flags: 0,
+            });
+            let mut record = state.inodes[1].unwrap();
+            record.first_chapter = 3;
+            record.chapter_count = 1;
+            state.inodes[1] = Some(record);
+        }
+
+        let state = fs.state.lock();
+        let record = state.inode_by_id(inode).unwrap();
+        let offset = 5 * (2 * QFS_SECTOR_SIZE) as u64 + QFS_SECTOR_SIZE as u64 + 17;
+        let expected_sector = book_start_sector(&state.superblock, 2) + 7 * 2 + 1;
+        assert_eq!(
+            QfsFileSystem::data_sector_for_offset(&state, record, offset),
+            Some((expected_sector, 17))
+        );
+    }
+
+    #[test]
+    fn inode_allocation_and_lookup() {
+        let fs = QfsFileSystem::new(false);
+        fs.mkdir(
+            path("/docs"),
+            Permissions::new(0o755, 0, 0),
+            Credentials::kernel(),
+        )
+        .unwrap();
+        fs.symlink(path("/docs"), path("/docs-link"), Credentials::kernel())
+            .unwrap();
+
+        let docs = fs.lookup(path("/docs")).unwrap();
+        let link = fs.lookup(path("/docs-link")).unwrap();
+
+        assert_eq!(docs.kind, InodeKind::Directory);
+        assert_eq!(link.kind, InodeKind::Symlink);
+        assert_eq!(fs.lookup_inode(docs.id).unwrap().id, docs.id);
+        assert!(docs.id.raw() > InodeId::ROOT.raw());
+        assert!(link.id.raw() > docs.id.raw());
+    }
+
+    #[test]
+    fn directory_create_remove_and_rename_operations() {
+        let fs = QfsFileSystem::new(false);
+        fs.mkdir(
+            path("/alpha"),
+            Permissions::new(0o755, 0, 0),
+            Credentials::kernel(),
+        )
+        .unwrap();
+        fs.rename(path("/alpha"), path("/beta"), Credentials::kernel())
+            .unwrap();
+
+        assert_eq!(fs.lookup(path("/alpha")), Err(FsError::NotFound));
+        assert_eq!(fs.lookup(path("/beta")).unwrap().kind, InodeKind::Directory);
+
+        fs.rmdir(path("/beta"), Credentials::kernel()).unwrap();
+        assert_eq!(fs.lookup(path("/beta")), Err(FsError::NotFound));
+    }
+
+    #[test]
+    fn journal_replay_ignores_begin_without_commit() {
+        let device = Box::leak(Box::new(MemBlockDevice::new(256)));
+        let superblock = test_superblock(1);
+        let target_sector = 20;
+        let original = [0x11u8; QFS_SECTOR_SIZE];
+        let replacement = [0x22u8; QFS_SECTOR_SIZE];
+        device.write_sector_copy(target_sector, &original);
+
+        let fs = filesystem_with_device(device, superblock);
+        let tx = fs.begin_transaction().unwrap();
+        fs.journal_write(
+            tx,
+            QfsJournalRecordKind::MetadataWrite,
+            0,
+            target_sector,
+            &replacement,
+        )
+        .unwrap();
+
+        let replay = filesystem_with_device(device, superblock);
+        replay.replay_journal().unwrap();
+
+        assert_eq!(device.read_sector_copy(target_sector), original);
+    }
+
+    #[test]
+    fn journal_replay_completes_committed_transaction_with_incomplete_home_writes() {
+        let device = Box::leak(Box::new(MemBlockDevice::new(256)));
+        let superblock = test_superblock(1);
+        let target_sector = 21;
+        let partial = [0x33u8; QFS_SECTOR_SIZE];
+        let committed = [0x44u8; QFS_SECTOR_SIZE];
+        device.write_sector_copy(target_sector, &partial);
+
+        let fs = filesystem_with_device(device, superblock);
+        let tx = fs.begin_transaction().unwrap();
+        fs.journal_write(
+            tx,
+            QfsJournalRecordKind::MetadataWrite,
+            0,
+            target_sector,
+            &committed,
+        )
+        .unwrap();
+        fs.append_journal_record(
+            QfsJournalRecord {
+                sequence: tx,
+                record_type: QfsJournalRecordKind::Commit as u16,
+                target_inode: 0,
+                sector: 0,
+                sector_count: 0,
+                checksum: 0,
+                flags: 0,
+            },
+            None,
+        )
+        .unwrap();
+
+        let replay = filesystem_with_device(device, superblock);
+        replay.replay_journal().unwrap();
+
+        assert_eq!(device.read_sector_copy(target_sector), committed);
+    }
+
+    #[test]
+    fn pread_pwrite_cross_page_and_book_boundaries() {
+        let device = Box::leak(Box::new(MemBlockDevice::new(256)));
+        let inode = InodeId::new(30);
+        let superblock = QfsSuperblock {
+            total_books: 2,
+            page_sectors: 1,
+            book_pages: 32,
+            inode_table: QfsPageLocation::new(0, 1),
+            journal: QfsPageLocation::new(0, 8),
+            total_sectors: 65,
+            ..QfsSuperblock::empty()
+        };
+        let fs = filesystem_with_device(device, superblock);
+        {
+            let mut state = fs.state.lock();
+            state.inodes[1] = Some(named_inode(
+                inode.raw(),
+                InodeId::ROOT.raw(),
+                InodeKind::RegularFile,
+                "big",
+                0o666,
+                0,
+                0,
+            ));
+        }
+        add_data_mapping(&fs, inode);
+        let file = File::new(inode, FileMode::ReadWrite);
+
+        let page_boundary_offset = QFS_SECTOR_SIZE as u64 - 5;
+        let page_data = *b"page-boundary-write";
+        assert_eq!(
+            fs.pwrite(&file, &page_data, page_boundary_offset).unwrap(),
+            page_data.len()
+        );
+        let mut page_read = [0u8; 19];
+        assert_eq!(
+            fs.pread(&file, &mut page_read, page_boundary_offset)
+                .unwrap(),
+            page_read.len()
+        );
+        assert_eq!(page_read, page_data);
+
+        let book_boundary_offset = QFS_SECTOR_SIZE as u64 * 2 - 7;
+        let book_data = *b"book-boundary-write";
+        assert_eq!(
+            fs.pwrite(&file, &book_data, book_boundary_offset).unwrap(),
+            book_data.len()
+        );
+        let mut book_read = [0u8; 19];
+        assert_eq!(
+            fs.pread(&file, &mut book_read, book_boundary_offset)
+                .unwrap(),
+            book_read.len()
+        );
+        assert_eq!(book_read, book_data);
+    }
+
+    #[test]
+    fn permission_checks_use_permissions_and_credentials() {
+        let fs = QfsFileSystem::new(false);
+        let owner = Credentials::user(1000, 1000);
+        let stranger = Credentials::user(2000, 2000);
+        let group_member = Credentials::user(2001, 1000);
+        let perms = Permissions::new(0o640, owner.uid, owner.gid);
+
+        assert!(perms.allows(owner, AccessMode::ReadWrite));
+        assert!(perms.allows(group_member, AccessMode::Read));
+        assert!(!perms.allows(group_member, AccessMode::Write));
+        assert!(!perms.allows(stranger, AccessMode::Read));
+        assert!(perms.allows(Credentials::kernel(), AccessMode::ReadWrite));
+
+        fs.chmod(path("/"), 0o555, Credentials::kernel()).unwrap();
+        assert_eq!(
+            fs.mkdir(
+                path("/blocked"),
+                Permissions::new(0o755, 2000, 2000),
+                stranger
+            ),
+            Err(FsError::PermissionDenied)
+        );
+        fs.mkdir(
+            path("/allowed"),
+            Permissions::new(0o755, 0, 0),
+            Credentials::kernel(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "qfs-std")]
+    #[test]
+    fn host_backed_qfs_image_persists_inline_file_data_across_remount() {
+        use std::fs::OpenOptions;
+        use std::path::PathBuf;
+
+        use crate::kernel::fs::qfs_std::StdQfsBlockDevice;
+
+        fn image_path() -> PathBuf {
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "mirage_qfs_mount_{}_{}.img",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            path
+        }
+
+        let image = image_path();
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&image)
+            .unwrap();
+        let device = Box::leak(Box::new(
+            StdQfsBlockDevice::create_sized(file, QFS_SECTOR_SIZE, 256).unwrap(),
+        ));
+        let file_inode = named_inode(
+            2,
+            InodeId::ROOT.raw(),
+            InodeKind::RegularFile,
+            "persist",
+            0o666,
+            0,
+            0,
+        );
+        let superblock = test_superblock(1);
+        format_device_with_inode(device, superblock, file_inode);
+
+        let fs = QfsFileSystem::new_on_block_device(false, device);
+        fs.refresh_from_block_device().unwrap();
+        let metadata = fs.lookup(path("/persist")).unwrap();
+        let file = File::new(metadata.id, FileMode::ReadWrite);
+        let payload = b"persistent qfs inline payload";
+        assert_eq!(fs.pwrite(&file, payload, 0).unwrap(), payload.len());
+
+        let remounted = QfsFileSystem::new_on_block_device(false, device);
+        remounted.refresh_from_block_device().unwrap();
+        let metadata = remounted.lookup(path("/persist")).unwrap();
+        let file = File::new(metadata.id, FileMode::ReadOnly);
+        let mut read_back = [0u8; 29];
+        assert_eq!(
+            remounted.pread(&file, &mut read_back, 0).unwrap(),
+            payload.len()
+        );
+        assert_eq!(&read_back[..payload.len()], payload);
+
+        std::fs::remove_file(image).ok();
+    }
+}
