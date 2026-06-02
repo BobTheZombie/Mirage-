@@ -97,6 +97,27 @@ Install the Rust source component with:
 rustup component add rust-src
 ```
 
+## Makefile targets and overrides
+
+| Target | Description |
+| --- | --- |
+| `make rust-src` | Installs the Rust `rust-src` component for the active toolchain. |
+| `make kernel` | Builds `target/x86_64-mirage/release/mirage-kernel`. |
+| `make limine` | Downloads and builds the pinned Limine release into `build/limine`. |
+| `make iso` | Builds the kernel and packages `build/mirage.iso`. |
+| `make run-qemu` | Boots the ISO in QEMU. |
+| `make clean` | Removes Cargo and build artifacts. |
+
+The Makefile exposes a few variables for local environments and reproducible builds:
+
+* `LIMINE_VERSION=v12.3.2` selects the pinned Limine binary release used by `make limine` and
+  `make iso`; override it on the command line to test a different Limine release.
+* `RUSTC_BOOTSTRAP=1` enables the nightly-only Cargo `-Z build-std` flags used for the custom
+  freestanding target; override it only if your toolchain setup provides another path for those
+  flags.
+* `CARGO` and `RUSTUP` select the Cargo and Rustup executables used by `make kernel` and
+  `make rust-src`, which is useful for wrappers or non-default toolchain locations.
+
 ## Build the kernel ELF
 
 The Makefile invokes Cargo with `-Z build-std` because a custom freestanding target needs `core` and
@@ -148,6 +169,18 @@ To use a different Limine release, override the variable:
 ```sh
 make iso LIMINE_VERSION=v12.3.2
 ```
+
+## Host QFS tooling
+
+The host-side QFS utility lives in `src/bin/qfsprogs.rs` and is gated behind the `qfs-std`
+feature so it can use host/testing filesystem adapters. Build it with:
+
+```sh
+cargo build --features qfs-std --bin qfsprogs
+```
+
+The `qfs-std` feature is intended for host tools and tests only; it is not part of the default
+`no_std` kernel build path used by `make kernel` or `make iso`.
 
 ## Emulator smoke test
 
