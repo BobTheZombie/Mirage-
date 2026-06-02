@@ -172,6 +172,12 @@ pub enum SyscallNumber {
     Readlinkat = 39,
     Linkat = 40,
 
+    // Service registry and service-routed IPC syscalls (41-59).
+    RegisterService = 41,
+    SendServiceIpc = 42,
+    ClaimDevice = 43,
+    ReleaseDevice = 44,
+
     // Process lifecycle syscalls (100-119).
     Fork = 100,
     Execve = 101,
@@ -281,6 +287,10 @@ impl SyscallNumber {
             38 => Some(Self::Symlinkat),
             39 => Some(Self::Readlinkat),
             40 => Some(Self::Linkat),
+            41 => Some(Self::RegisterService),
+            42 => Some(Self::SendServiceIpc),
+            43 => Some(Self::ClaimDevice),
+            44 => Some(Self::ReleaseDevice),
             100 => Some(Self::Fork),
             101 => Some(Self::Execve),
             102 => Some(Self::Exit),
@@ -364,6 +374,10 @@ pub const MIRAGE_SYSCALL_FCHOWNAT: u64 = SyscallNumber::Fchownat.raw();
 pub const MIRAGE_SYSCALL_SYMLINKAT: u64 = SyscallNumber::Symlinkat.raw();
 pub const MIRAGE_SYSCALL_READLINKAT: u64 = SyscallNumber::Readlinkat.raw();
 pub const MIRAGE_SYSCALL_LINKAT: u64 = SyscallNumber::Linkat.raw();
+pub const MIRAGE_SYSCALL_REGISTER_SERVICE: u64 = SyscallNumber::RegisterService.raw();
+pub const MIRAGE_SYSCALL_SEND_SERVICE_IPC: u64 = SyscallNumber::SendServiceIpc.raw();
+pub const MIRAGE_SYSCALL_CLAIM_DEVICE: u64 = SyscallNumber::ClaimDevice.raw();
+pub const MIRAGE_SYSCALL_RELEASE_DEVICE: u64 = SyscallNumber::ReleaseDevice.raw();
 
 pub const MIRAGE_SYSCALL_FORK: u64 = SyscallNumber::Fork.raw();
 pub const MIRAGE_SYSCALL_EXECVE: u64 = SyscallNumber::Execve.raw();

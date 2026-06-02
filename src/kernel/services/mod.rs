@@ -10,10 +10,12 @@ pub mod device;
 pub mod fs;
 pub mod memory;
 pub mod process;
+pub mod registry;
 pub mod time;
 
 pub use device::DeviceService;
 pub use fs::FileSystemService;
 pub use memory::{KernelMemoryService, MemoryService};
 pub use process::ProcessService;
+pub use registry::{ServiceId, ServiceRegistry};
 pub use time::TimeService;
