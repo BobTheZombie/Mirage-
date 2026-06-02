@@ -3,6 +3,38 @@
 use crate::kernel::fs::{DescriptorFlags, FileDescriptionId, Path, Permissions, MAX_PATH_BYTES};
 use crate::subkernel::SecurityLabel;
 
+pub const MAX_PENDING_SIGNALS: usize = 32;
+pub const MAX_SIGNAL_NUMBER: usize = 64;
+pub const SIGKILL: u8 = 9;
+pub const SIGTERM: u8 = 15;
+pub const SIGCHLD: u8 = 17;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProcessGroupId(u64);
+
+impl ProcessGroupId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn raw(&self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SessionId(u64);
+
+impl SessionId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn raw(&self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProcessId(u64);
 
@@ -21,6 +53,8 @@ pub enum ProcessState {
     Ready,
     Running,
     Blocked,
+    /// The process has exited but is still waitable by its parent.
+    Zombie,
     Terminated,
 }
 
@@ -255,10 +289,141 @@ impl<const MAX: usize> ProcessFileTable<MAX> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExitStatus {
+    raw: i32,
+}
+
+impl ExitStatus {
+    pub const fn exited(code: i32) -> Self {
+        Self {
+            raw: (code & 0xff) << 8,
+        }
+    }
+
+    pub const fn signaled(signal: u8) -> Self {
+        Self {
+            raw: (signal as i32) & 0x7f,
+        }
+    }
+
+    pub const fn raw(self) -> i32 {
+        self.raw
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalMask {
+    bits: u64,
+}
+
+impl SignalMask {
+    pub const EMPTY: Self = Self { bits: 0 };
+
+    pub const fn from_bits(bits: u64) -> Self {
+        Self { bits }
+    }
+
+    pub const fn bits(self) -> u64 {
+        self.bits
+    }
+
+    pub const fn contains(self, signal: u8) -> bool {
+        signal > 0
+            && signal as usize <= MAX_SIGNAL_NUMBER
+            && (self.bits & (1u64 << (signal - 1))) != 0
+    }
+
+    pub fn insert(&mut self, signal: u8) {
+        if signal > 0 && signal as usize <= MAX_SIGNAL_NUMBER {
+            self.bits |= 1u64 << (signal - 1);
+        }
+    }
+
+    pub fn remove(&mut self, signal: u8) {
+        if signal > 0 && signal as usize <= MAX_SIGNAL_NUMBER {
+            self.bits &= !(1u64 << (signal - 1));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignalAction {
+    pub handler: u64,
+    pub mask: SignalMask,
+    pub flags: u64,
+}
+
+impl SignalAction {
+    pub const DEFAULT: Self = Self {
+        handler: 0,
+        mask: SignalMask::EMPTY,
+        flags: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignalQueueError {
+    InvalidSignal,
+    Full,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PendingSignalQueue {
+    signals: [Option<u8>; MAX_PENDING_SIGNALS],
+}
+
+impl PendingSignalQueue {
+    pub const fn new() -> Self {
+        Self {
+            signals: [None; MAX_PENDING_SIGNALS],
+        }
+    }
+
+    pub fn push(&mut self, signal: u8) -> Result<(), SignalQueueError> {
+        if signal == 0 || signal as usize > MAX_SIGNAL_NUMBER {
+            return Err(SignalQueueError::InvalidSignal);
+        }
+        let mut idx = 0usize;
+        while idx < MAX_PENDING_SIGNALS {
+            if self.signals[idx].is_none() {
+                self.signals[idx] = Some(signal);
+                return Ok(());
+            }
+            idx += 1;
+        }
+        Err(SignalQueueError::Full)
+    }
+
+    pub fn take_unmasked(&mut self, mask: SignalMask) -> Option<u8> {
+        let mut idx = 0usize;
+        while idx < MAX_PENDING_SIGNALS {
+            if let Some(signal) = self.signals[idx] {
+                if signal == SIGKILL || !mask.contains(signal) {
+                    self.signals[idx] = None;
+                    return Some(signal);
+                }
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    pub fn clear(&mut self) {
+        let mut idx = 0usize;
+        while idx < MAX_PENDING_SIGNALS {
+            self.signals[idx] = None;
+            idx += 1;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ProcessControlBlock<const MAX_FD: usize> {
     pub pid: ProcessId,
     pub parent: Option<ProcessId>,
+    pub process_group: ProcessGroupId,
+    pub session: SessionId,
     pub state: ProcessState,
     pub priority: ProcessPriority,
     pub entry_point: u64,
@@ -266,7 +431,10 @@ pub struct ProcessControlBlock<const MAX_FD: usize> {
     pub cpu_time: u128,
     pub security_label: SecurityLabel,
     pub thread_count: u16,
+    pub exit_status: Option<ExitStatus>,
     pub files: ProcessFileTable<MAX_FD>,
+    pub signal_actions: [SignalAction; MAX_SIGNAL_NUMBER + 1],
+    pub pending_signals: PendingSignalQueue,
 }
 
 impl<const MAX_FD: usize> ProcessControlBlock<MAX_FD> {
@@ -279,6 +447,11 @@ impl<const MAX_FD: usize> ProcessControlBlock<MAX_FD> {
         Self {
             pid,
             parent,
+            process_group: ProcessGroupId::new(pid.raw()),
+            session: match parent {
+                Some(parent_pid) => SessionId::new(parent_pid.raw()),
+                None => SessionId::new(pid.raw()),
+            },
             state: ProcessState::Ready,
             priority,
             entry_point,
@@ -286,7 +459,10 @@ impl<const MAX_FD: usize> ProcessControlBlock<MAX_FD> {
             cpu_time: 0,
             security_label: SecurityLabel::public(),
             thread_count: 0,
+            exit_status: None,
             files: ProcessFileTable::new(),
+            signal_actions: [SignalAction::DEFAULT; MAX_SIGNAL_NUMBER + 1],
+            pending_signals: PendingSignalQueue::new(),
         }
     }
 
@@ -296,6 +472,33 @@ impl<const MAX_FD: usize> ProcessControlBlock<MAX_FD> {
 
     pub fn increment_thread_count(&mut self) {
         self.thread_count = self.thread_count.saturating_add(1);
+    }
+
+    pub fn mark_zombie(&mut self, status: ExitStatus) {
+        self.state = ProcessState::Zombie;
+        self.exit_status = Some(status);
+    }
+
+    pub fn set_exec_image(&mut self, entry_point: u64, address_space_root: u64) {
+        self.entry_point = entry_point;
+        self.address_space_root = address_space_root;
+        self.pending_signals.clear();
+    }
+
+    pub fn set_process_group(&mut self, pgid: ProcessGroupId) {
+        self.process_group = pgid;
+    }
+
+    pub fn set_session(&mut self, sid: SessionId) {
+        self.session = sid;
+    }
+
+    pub fn queue_signal(&mut self, signal: u8) -> Result<(), SignalQueueError> {
+        self.pending_signals.push(signal)
+    }
+
+    pub fn take_deliverable_signal(&mut self, mask: SignalMask) -> Option<u8> {
+        self.pending_signals.take_unmasked(mask)
     }
 
     pub fn decrement_thread_count(&mut self) {

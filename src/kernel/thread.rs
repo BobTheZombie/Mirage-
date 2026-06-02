@@ -1,6 +1,6 @@
 //! Thread management primitives used by the Mirage kernel scheduler.
 
-use crate::kernel::process::{ProcessId, ProcessPriority};
+use crate::kernel::process::{ProcessId, ProcessPriority, SignalMask};
 use crate::kernel::syscall::SYSCALL_MAX_ARGS;
 
 pub const THREADS_PER_PROCESS: usize = 4;
@@ -154,6 +154,8 @@ pub struct ThreadControlBlock {
     pub stack_pointer: u64,
     pub context: CpuContext,
     pub cpu_time: u128,
+    pub signal_mask: SignalMask,
+    pub active_signal: Option<u8>,
 }
 
 impl ThreadControlBlock {
@@ -173,6 +175,8 @@ impl ThreadControlBlock {
             stack_pointer,
             context: CpuContext::new(entry_point, stack_pointer, PrivilegeMode::User),
             cpu_time: 0,
+            signal_mask: SignalMask::EMPTY,
+            active_signal: None,
         }
     }
 
@@ -198,6 +202,32 @@ impl ThreadControlBlock {
 
     pub fn terminate(&mut self) {
         self.state = ThreadState::Terminated;
+    }
+
+    pub fn replace_exec_image(&mut self, entry_point: u64, stack_pointer: u64) {
+        self.entry_point = entry_point;
+        self.stack_pointer = stack_pointer;
+        self.context = CpuContext::new(entry_point, stack_pointer, PrivilegeMode::User);
+        self.state = ThreadState::Ready;
+        self.active_signal = None;
+    }
+
+    pub fn set_signal_mask(&mut self, mask: SignalMask) -> SignalMask {
+        let previous = self.signal_mask;
+        self.signal_mask = mask;
+        previous
+    }
+
+    pub fn deliver_signal(&mut self, signal: u8, handler: u64) {
+        self.active_signal = Some(signal);
+        self.context.rdi = signal as u64;
+        if handler != 0 {
+            self.context.rip = handler;
+        }
+    }
+
+    pub fn finish_signal(&mut self) {
+        self.active_signal = None;
     }
 
     pub fn accumulate_cpu_time(&mut self, ticks: u64) {
