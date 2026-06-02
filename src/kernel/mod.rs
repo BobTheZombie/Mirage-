@@ -103,7 +103,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             scheduler: Scheduler::new(),
             security: SecurityKernel::new(),
             devices: DeviceManager::new(),
-            root_fs: SsdUsbFileSystem::new(false),
+            root_fs: SsdUsbFileSystem::new_on_block_device(
+                false,
+                crate::kernel::device::built_in_block_storage(),
+            ),
             open_files: FileTable::new(),
             core_states: [CpuCoreState::new(); cpu::MAX_CORES],
             thread_table: [None; MAX_THREADS],
