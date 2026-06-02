@@ -45,12 +45,66 @@ pub const QFS_INLINE_DATA_BYTES: usize = 128;
 
 /// Maximum byte length of a QFS inode name.
 pub const QFS_NAME_BYTES: usize = 32;
+/// Sector containing the QFS superblock.
 const QFS_SUPERBLOCK_SECTOR: u64 = 0;
-const QFS_BOOK_HEADER_SECTOR: u64 = 1;
-const QFS_INODE_TABLE_SECTOR: u64 = 2;
+/// QFS books begin immediately after the standalone sector-zero superblock.
+const QFS_FIRST_BOOK_SECTOR: u64 = 1;
+/// One sector is reserved for each book header.
+const QFS_BOOK_HEADER_SECTORS: u64 = 1;
+/// Fixed sector count reserved for each book's inline index.
+pub const QFS_BOOK_INDEX_SECTORS: u64 = 1;
+const QFS_SUPERBLOCK_RESERVED_BYTES: usize = 64;
+const QFS_BOOK_HEADER_RESERVED_BYTES: usize = 496;
+const QFS_BOOK_INDEX_ENTRY_BYTES: usize = 16;
+const QFS_INODE_RECORD_BYTES: usize = 192;
+
+/// Book/page address used by sector-zero metadata pointers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QfsPageLocation {
+    pub book_id: u32,
+    pub page: u16,
+}
+
+impl QfsPageLocation {
+    pub const fn new(book_id: u32, page: u16) -> Self {
+        Self { book_id, page }
+    }
+
+    pub const fn empty() -> Self {
+        Self {
+            book_id: 0,
+            page: 0,
+        }
+    }
+}
+
+/// Logical role assigned to a run of pages in a book index entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum QfsBookRole {
+    Free = 0,
+    Inode = 1,
+    Data = 2,
+    Journal = 3,
+    FreeMap = 4,
+}
+
+impl QfsBookRole {
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Inode,
+            2 => Self::Data,
+            3 => Self::Journal,
+            4 => Self::FreeMap,
+            _ => Self::Free,
+        }
+    }
+}
 
 /// QFS sector-zero superblock.
-#[repr(C)]
+///
+/// The on-disk image is always little-endian and exactly one logical sector.
+/// Fields are parsed explicitly instead of by transmuting this host struct.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QfsSuperblock {
     pub magic: [u8; 8],
@@ -58,14 +112,15 @@ pub struct QfsSuperblock {
     pub sector_size: u16,
     pub page_sectors: u16,
     pub book_pages: u16,
+    pub total_books: u32,
     pub root_inode: u64,
+    pub inode_table: QfsPageLocation,
+    pub journal: QfsPageLocation,
+    pub free_space_bitmap: QfsPageLocation,
+    pub flags: u16,
     pub total_sectors: u64,
     pub free_sectors: u64,
-    pub book_count: u32,
-    pub inode_count: u32,
-    pub journal_head: u64,
-    pub flags: u32,
-    pub reserved: [u8; 48],
+    pub reserved: [u8; QFS_SUPERBLOCK_RESERVED_BYTES],
 }
 
 impl QfsSuperblock {
@@ -76,65 +131,91 @@ impl QfsSuperblock {
             sector_size: QFS_SECTOR_SIZE as u16,
             page_sectors: QFS_PAGE_SECTORS,
             book_pages: QFS_BOOK_PAGES,
+            total_books: 0,
             root_inode: InodeId::ROOT.raw(),
+            inode_table: QfsPageLocation::empty(),
+            journal: QfsPageLocation::empty(),
+            free_space_bitmap: QfsPageLocation::empty(),
+            flags: 0,
             total_sectors: 0,
             free_sectors: 0,
-            book_count: 0,
-            inode_count: 1,
-            journal_head: 0,
-            flags: 0,
-            reserved: [0; 48],
+            reserved: [0; QFS_SUPERBLOCK_RESERVED_BYTES],
         }
+    }
+
+    pub fn parse_sector(sector: &[u8; QFS_SECTOR_SIZE]) -> Result<Self, FsError> {
+        parse_superblock(sector)
+    }
+
+    pub fn write_sector(&self, sector: &mut [u8; QFS_SECTOR_SIZE]) -> Result<(), FsError> {
+        serialize_superblock(self, sector)
     }
 }
 
 /// Cached header for one QFS book (a large allocation group).
-#[repr(C)]
+///
+/// This occupies the first sector of each book on disk; all integer fields are
+/// encoded little-endian.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QfsBookHeader {
     pub book_id: u32,
-    pub first_sector: u64,
-    pub page_count: u16,
-    pub free_pages: u16,
-    pub index_sector: u64,
+    pub chapter_count: u16,
+    pub index_entry_count: u16,
     pub checksum: u32,
-    pub flags: u32,
+    pub generation: u32,
+    pub reserved: [u8; QFS_BOOK_HEADER_RESERVED_BYTES],
 }
 
 impl QfsBookHeader {
     pub const fn empty() -> Self {
         Self {
             book_id: 0,
-            first_sector: 0,
-            page_count: 0,
-            free_pages: 0,
-            index_sector: 0,
+            chapter_count: 0,
+            index_entry_count: 0,
             checksum: 0,
-            flags: 0,
+            generation: 0,
+            reserved: [0; QFS_BOOK_HEADER_RESERVED_BYTES],
         }
+    }
+
+    pub fn parse_sector(sector: &[u8; QFS_SECTOR_SIZE]) -> Result<Self, FsError> {
+        parse_book_header(sector)
+    }
+
+    pub fn write_sector(&self, sector: &mut [u8; QFS_SECTOR_SIZE]) -> Result<(), FsError> {
+        serialize_book_header(self, sector)
     }
 }
 
-/// Fixed-width book index entry describing page ownership inside a book.
-#[repr(C)]
+/// Fixed-width book index entry describing chapter page ownership inside a book.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QfsBookIndexEntry {
-    pub book_id: u32,
+    pub chapter_id: u32,
     pub first_page: u16,
     pub page_count: u16,
-    pub owner_inode: u64,
-    pub flags: u32,
+    pub role: QfsBookRole,
+    pub flags: u8,
+    pub reserved: [u8; 6],
 }
 
 impl QfsBookIndexEntry {
     pub const fn empty() -> Self {
         Self {
-            book_id: 0,
+            chapter_id: 0,
             first_page: 0,
             page_count: 0,
-            owner_inode: 0,
+            role: QfsBookRole::Free,
             flags: 0,
+            reserved: [0; 6],
         }
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, FsError> {
+        parse_book_index_entry(bytes, 0)
+    }
+
+    pub fn write(&self, bytes: &mut [u8]) -> Result<(), FsError> {
+        serialize_book_index_entry(self, bytes, 0)
     }
 }
 
@@ -381,6 +462,21 @@ impl QfsFileSystem {
         self.state.lock().cached_counts()
     }
 
+    pub fn write_superblock_to_block_device(&self) -> Result<(), FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let Some(device) = self.block_device else {
+            return Ok(());
+        };
+        if device.sector_size() != QFS_SECTOR_SIZE {
+            return Err(FsError::Unsupported);
+        }
+        let mut sector = [0u8; QFS_SECTOR_SIZE];
+        self.state.lock().superblock.write_sector(&mut sector)?;
+        write_sector(device, QFS_SUPERBLOCK_SECTOR, &sector)
+    }
+
     pub fn refresh_from_block_device(&self) -> Result<(), FsError> {
         let Some(device) = self.block_device else {
             return Ok(());
@@ -399,15 +495,41 @@ impl QfsFileSystem {
         next.mounted = true;
         next.superblock = superblock;
 
-        if device.sector_count() > QFS_BOOK_HEADER_SECTOR {
-            sector.fill(0);
-            read_sector(device, QFS_BOOK_HEADER_SECTOR, &mut sector)?;
-            parse_book_headers(&sector, &mut next.book_headers);
+        let books_to_cache = min(superblock.total_books as usize, QFS_MAX_BOOKS);
+        let mut book_idx = 0usize;
+        while book_idx < books_to_cache {
+            let book_start = book_start_sector(&superblock, book_idx as u32);
+            if book_start < device.sector_count() {
+                sector.fill(0);
+                read_sector(device, book_start, &mut sector)?;
+                let header = parse_book_header(&sector)?;
+                if header.book_id == book_idx as u32 {
+                    next.book_headers[book_idx] = Some(header);
+
+                    let index_sector = book_start + QFS_BOOK_HEADER_SECTORS;
+                    if index_sector < device.sector_count() {
+                        sector.fill(0);
+                        read_sector(device, index_sector, &mut sector)?;
+                        parse_book_index_entries(
+                            &sector,
+                            min(
+                                header.index_entry_count as usize,
+                                QFS_MAX_BOOK_INDEX_ENTRIES,
+                            ),
+                            &mut next.book_index,
+                        )?;
+                    }
+                }
+            }
+            book_idx += 1;
         }
-        if device.sector_count() > QFS_INODE_TABLE_SECTOR {
-            sector.fill(0);
-            read_sector(device, QFS_INODE_TABLE_SECTOR, &mut sector)?;
-            parse_inode_records(&sector, &mut next.inodes);
+
+        if let Some(inode_sector) = page_location_sector(&superblock, superblock.inode_table) {
+            if inode_sector < device.sector_count() {
+                sector.fill(0);
+                read_sector(device, inode_sector, &mut sector)?;
+                parse_inode_records(&sector, &mut next.inodes)?;
+            }
         }
         if next.inode_by_id(InodeId::ROOT).is_none() {
             next.inodes[0] = Some(QfsInodeRecord::root());
@@ -563,100 +685,290 @@ fn read_sector(
     }
 }
 
+fn write_sector(
+    device: &dyn BlockStorageDevice,
+    sector: u64,
+    buffer: &[u8; QFS_SECTOR_SIZE],
+) -> Result<(), FsError> {
+    let bytes = device
+        .write_sectors(sector, buffer)
+        .map_err(map_device_error)?;
+    if bytes == QFS_SECTOR_SIZE {
+        Ok(())
+    } else {
+        Err(FsError::Unsupported)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LeCursor<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> LeCursor<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+
+    fn u8_at(self, offset: usize) -> Result<u8, FsError> {
+        self.bytes.get(offset).copied().ok_or(FsError::Unsupported)
+    }
+
+    fn u16_at(self, offset: usize) -> Result<u16, FsError> {
+        let bytes = self
+            .bytes
+            .get(offset..offset.saturating_add(2))
+            .ok_or(FsError::Unsupported)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn u32_at(self, offset: usize) -> Result<u32, FsError> {
+        let bytes = self
+            .bytes
+            .get(offset..offset.saturating_add(4))
+            .ok_or(FsError::Unsupported)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn u64_at(self, offset: usize) -> Result<u64, FsError> {
+        let bytes = self
+            .bytes
+            .get(offset..offset.saturating_add(8))
+            .ok_or(FsError::Unsupported)?;
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+}
+
+fn put_u16(out: &mut [u8], offset: usize, value: u16) -> Result<(), FsError> {
+    let dst = out
+        .get_mut(offset..offset.saturating_add(2))
+        .ok_or(FsError::Unsupported)?;
+    dst.copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn put_u32(out: &mut [u8], offset: usize, value: u32) -> Result<(), FsError> {
+    let dst = out
+        .get_mut(offset..offset.saturating_add(4))
+        .ok_or(FsError::Unsupported)?;
+    dst.copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn put_u64(out: &mut [u8], offset: usize, value: u64) -> Result<(), FsError> {
+    let dst = out
+        .get_mut(offset..offset.saturating_add(8))
+        .ok_or(FsError::Unsupported)?;
+    dst.copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn book_size_sectors(superblock: &QfsSuperblock) -> u64 {
+    superblock.page_sectors as u64 * superblock.book_pages as u64
+}
+
+fn book_start_sector(superblock: &QfsSuperblock, book_id: u32) -> u64 {
+    QFS_FIRST_BOOK_SECTOR + book_id as u64 * book_size_sectors(superblock)
+}
+
+fn page_location_sector(superblock: &QfsSuperblock, location: QfsPageLocation) -> Option<u64> {
+    if location.book_id >= superblock.total_books || location.page >= superblock.book_pages {
+        return None;
+    }
+    Some(
+        book_start_sector(superblock, location.book_id)
+            + location.page as u64 * superblock.page_sectors as u64,
+    )
+}
+
 fn parse_superblock(sector: &[u8; QFS_SECTOR_SIZE]) -> Result<QfsSuperblock, FsError> {
+    let cur = LeCursor::new(sector);
     let mut magic = [0u8; 8];
     magic.copy_from_slice(&sector[0..8]);
     if magic != QFS_MAGIC {
         return Err(FsError::InvalidArgument);
     }
-    let version = read_u16(sector, 8);
+    let version = cur.u16_at(8)?;
     if version != QFS_VERSION {
         return Err(FsError::Unsupported);
     }
-    let sector_size = read_u16(sector, 10);
+    let sector_size = cur.u16_at(10)?;
     if sector_size as usize != QFS_SECTOR_SIZE {
         return Err(FsError::Unsupported);
     }
+    let page_sectors = cur.u16_at(12)?;
+    let book_pages = cur.u16_at(14)?;
+    if page_sectors == 0 || book_pages == 0 {
+        return Err(FsError::InvalidArgument);
+    }
 
-    let mut reserved = [0u8; 48];
-    reserved.copy_from_slice(&sector[64..112]);
+    let mut reserved = [0u8; QFS_SUPERBLOCK_RESERVED_BYTES];
+    reserved.copy_from_slice(&sector[64..64 + QFS_SUPERBLOCK_RESERVED_BYTES]);
     Ok(QfsSuperblock {
         magic,
         version,
         sector_size,
-        page_sectors: read_u16(sector, 12),
-        book_pages: read_u16(sector, 14),
-        root_inode: read_u64(sector, 16),
-        total_sectors: read_u64(sector, 24),
-        free_sectors: read_u64(sector, 32),
-        book_count: read_u32(sector, 40),
-        inode_count: read_u32(sector, 44),
-        journal_head: read_u64(sector, 48),
-        flags: read_u32(sector, 56),
+        page_sectors,
+        book_pages,
+        total_books: cur.u32_at(16)?,
+        root_inode: cur.u64_at(20)?,
+        inode_table: QfsPageLocation::new(cur.u32_at(28)?, cur.u16_at(32)?),
+        journal: QfsPageLocation::new(cur.u32_at(34)?, cur.u16_at(38)?),
+        free_space_bitmap: QfsPageLocation::new(cur.u32_at(40)?, cur.u16_at(44)?),
+        flags: cur.u16_at(46)?,
+        total_sectors: cur.u64_at(48)?,
+        free_sectors: cur.u64_at(56)?,
         reserved,
     })
 }
 
-fn parse_book_headers(sector: &[u8; QFS_SECTOR_SIZE], headers: &mut [Option<QfsBookHeader>]) {
-    let mut idx = 0usize;
-    let mut offset = 0usize;
-    while idx < headers.len() && offset + 32 <= QFS_SECTOR_SIZE {
-        let book_id = read_u32(sector, offset);
-        let first_sector = read_u64(sector, offset + 4);
-        let page_count = read_u16(sector, offset + 12);
-        let free_pages = read_u16(sector, offset + 14);
-        if book_id != 0 || first_sector != 0 || page_count != 0 || free_pages != 0 {
-            headers[idx] = Some(QfsBookHeader {
-                book_id,
-                first_sector,
-                page_count,
-                free_pages,
-                index_sector: read_u64(sector, offset + 16),
-                checksum: read_u32(sector, offset + 24),
-                flags: read_u32(sector, offset + 28),
-            });
-        }
-        idx += 1;
-        offset += 32;
-    }
+fn serialize_superblock(
+    superblock: &QfsSuperblock,
+    sector: &mut [u8; QFS_SECTOR_SIZE],
+) -> Result<(), FsError> {
+    sector.fill(0);
+    sector[0..8].copy_from_slice(&superblock.magic);
+    put_u16(sector, 8, superblock.version)?;
+    put_u16(sector, 10, superblock.sector_size)?;
+    put_u16(sector, 12, superblock.page_sectors)?;
+    put_u16(sector, 14, superblock.book_pages)?;
+    put_u32(sector, 16, superblock.total_books)?;
+    put_u64(sector, 20, superblock.root_inode)?;
+    put_u32(sector, 28, superblock.inode_table.book_id)?;
+    put_u16(sector, 32, superblock.inode_table.page)?;
+    put_u32(sector, 34, superblock.journal.book_id)?;
+    put_u16(sector, 38, superblock.journal.page)?;
+    put_u32(sector, 40, superblock.free_space_bitmap.book_id)?;
+    put_u16(sector, 44, superblock.free_space_bitmap.page)?;
+    put_u16(sector, 46, superblock.flags)?;
+    put_u64(sector, 48, superblock.total_sectors)?;
+    put_u64(sector, 56, superblock.free_sectors)?;
+    sector[64..64 + QFS_SUPERBLOCK_RESERVED_BYTES].copy_from_slice(&superblock.reserved);
+    Ok(())
 }
 
-fn parse_inode_records(sector: &[u8; QFS_SECTOR_SIZE], inodes: &mut [Option<QfsInodeRecord>]) {
+fn parse_book_header(sector: &[u8; QFS_SECTOR_SIZE]) -> Result<QfsBookHeader, FsError> {
+    let cur = LeCursor::new(sector);
+    let mut reserved = [0u8; QFS_BOOK_HEADER_RESERVED_BYTES];
+    reserved.copy_from_slice(&sector[16..16 + QFS_BOOK_HEADER_RESERVED_BYTES]);
+    Ok(QfsBookHeader {
+        book_id: cur.u32_at(0)?,
+        chapter_count: cur.u16_at(4)?,
+        index_entry_count: cur.u16_at(6)?,
+        checksum: cur.u32_at(8)?,
+        generation: cur.u32_at(12)?,
+        reserved,
+    })
+}
+
+fn serialize_book_header(
+    header: &QfsBookHeader,
+    sector: &mut [u8; QFS_SECTOR_SIZE],
+) -> Result<(), FsError> {
+    sector.fill(0);
+    put_u32(sector, 0, header.book_id)?;
+    put_u16(sector, 4, header.chapter_count)?;
+    put_u16(sector, 6, header.index_entry_count)?;
+    put_u32(sector, 8, header.checksum)?;
+    put_u32(sector, 12, header.generation)?;
+    sector[16..16 + QFS_BOOK_HEADER_RESERVED_BYTES].copy_from_slice(&header.reserved);
+    Ok(())
+}
+
+fn parse_book_index_entries(
+    sector: &[u8; QFS_SECTOR_SIZE],
+    entry_count: usize,
+    entries: &mut [Option<QfsBookIndexEntry>],
+) -> Result<(), FsError> {
+    let mut idx = 0usize;
+    let max_entries = min(
+        min(entry_count, entries.len()),
+        QFS_SECTOR_SIZE / QFS_BOOK_INDEX_ENTRY_BYTES,
+    );
+    while idx < max_entries {
+        let offset = idx * QFS_BOOK_INDEX_ENTRY_BYTES;
+        let entry = parse_book_index_entry(sector, offset)?;
+        if entry.chapter_id != 0 || entry.page_count != 0 || entry.role != QfsBookRole::Free {
+            entries[idx] = Some(entry);
+        }
+        idx += 1;
+    }
+    Ok(())
+}
+
+fn parse_book_index_entry(bytes: &[u8], offset: usize) -> Result<QfsBookIndexEntry, FsError> {
+    let cur = LeCursor::new(bytes);
+    let mut reserved = [0u8; 6];
+    let reserved_src = bytes
+        .get(offset.saturating_add(10)..offset.saturating_add(16))
+        .ok_or(FsError::Unsupported)?;
+    reserved.copy_from_slice(reserved_src);
+    Ok(QfsBookIndexEntry {
+        chapter_id: cur.u32_at(offset)?,
+        first_page: cur.u16_at(offset + 4)?,
+        page_count: cur.u16_at(offset + 6)?,
+        role: QfsBookRole::from_u8(cur.u8_at(offset + 8)?),
+        flags: cur.u8_at(offset + 9)?,
+        reserved,
+    })
+}
+
+fn serialize_book_index_entry(
+    entry: &QfsBookIndexEntry,
+    bytes: &mut [u8],
+    offset: usize,
+) -> Result<(), FsError> {
+    put_u32(bytes, offset, entry.chapter_id)?;
+    put_u16(bytes, offset + 4, entry.first_page)?;
+    put_u16(bytes, offset + 6, entry.page_count)?;
+    *bytes.get_mut(offset + 8).ok_or(FsError::Unsupported)? = entry.role as u8;
+    *bytes.get_mut(offset + 9).ok_or(FsError::Unsupported)? = entry.flags;
+    let reserved_dst = bytes
+        .get_mut(offset.saturating_add(10)..offset.saturating_add(16))
+        .ok_or(FsError::Unsupported)?;
+    reserved_dst.copy_from_slice(&entry.reserved);
+    Ok(())
+}
+
+fn parse_inode_records(
+    sector: &[u8; QFS_SECTOR_SIZE],
+    inodes: &mut [Option<QfsInodeRecord>],
+) -> Result<(), FsError> {
+    let cur = LeCursor::new(sector);
     let mut idx = 0usize;
     let mut offset = 0usize;
-    while idx < inodes.len() && offset + 64 <= QFS_SECTOR_SIZE {
-        let inode = read_u64(sector, offset);
+    while idx < inodes.len() && offset + QFS_INODE_RECORD_BYTES <= QFS_SECTOR_SIZE {
+        let inode = cur.u64_at(offset)?;
         if inode != 0 {
             let mut name = [0u8; QFS_NAME_BYTES];
             name.copy_from_slice(&sector[offset + 48..offset + 80]);
             let mut inline_data = [0u8; QFS_INLINE_DATA_BYTES];
-            let inline_len = min(
-                read_u16(sector, offset + 80) as usize,
-                QFS_INLINE_DATA_BYTES,
-            );
-            let available = QFS_SECTOR_SIZE.saturating_sub(offset + 82);
-            let copy_len = min(inline_len, available);
-            inline_data[..copy_len].copy_from_slice(&sector[offset + 82..offset + 82 + copy_len]);
+            let inline_len = min(cur.u16_at(offset + 80)? as usize, QFS_INLINE_DATA_BYTES);
+            inline_data[..inline_len]
+                .copy_from_slice(&sector[offset + 82..offset + 82 + inline_len]);
             inodes[idx] = Some(QfsInodeRecord {
                 inode,
-                parent_inode: read_u64(sector, offset + 8),
-                kind: sector[offset + 16],
-                name_len: sector[offset + 17],
-                mode: read_u16(sector, offset + 18),
-                uid: read_u16(sector, offset + 20),
-                gid: read_u16(sector, offset + 22),
-                links: read_u16(sector, offset + 24),
-                size: read_u64(sector, offset + 32),
-                first_chapter: read_u32(sector, offset + 40),
-                chapter_count: read_u32(sector, offset + 44),
+                parent_inode: cur.u64_at(offset + 8)?,
+                kind: cur.u8_at(offset + 16)?,
+                name_len: cur.u8_at(offset + 17)?,
+                mode: cur.u16_at(offset + 18)?,
+                uid: cur.u16_at(offset + 20)?,
+                gid: cur.u16_at(offset + 22)?,
+                links: cur.u16_at(offset + 24)?,
+                size: cur.u64_at(offset + 32)?,
+                first_chapter: cur.u32_at(offset + 40)?,
+                chapter_count: cur.u32_at(offset + 44)?,
                 name,
                 inline_data_len: inline_len as u16,
                 inline_data,
             });
         }
         idx += 1;
-        offset += 192;
+        offset += QFS_INODE_RECORD_BYTES;
     }
+    Ok(())
 }
 
 fn map_device_error(error: DeviceError) -> FsError {
@@ -690,30 +1002,4 @@ fn decode_inode_kind(kind: u8) -> InodeKind {
         7 => InodeKind::Socket,
         _ => InodeKind::RegularFile,
     }
-}
-
-fn read_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
-}
-
-fn read_u64(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-        bytes[offset + 4],
-        bytes[offset + 5],
-        bytes[offset + 6],
-        bytes[offset + 7],
-    ])
 }
