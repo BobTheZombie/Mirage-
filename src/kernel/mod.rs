@@ -57,6 +57,13 @@ fn is_supported_root_filesystem(filesystem_type: &[u8]) -> bool {
     matches!(filesystem_type, b"qfs" | b"ext4" | b"ssd_usb" | b"ssd-usb")
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MirageTimespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum KernelError {
     ProcessTableFull,
@@ -422,7 +429,241 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             SyscallNumber::Ftruncate => self.syscall_ftruncate(context),
             SyscallNumber::Fsync => self.syscall_fsync(context),
             SyscallNumber::Mount => self.syscall_mount(context),
+            SyscallNumber::Fork => self.syscall_fork(context),
+            SyscallNumber::Execve => self.syscall_execve(context),
+            SyscallNumber::Exit => self.syscall_exit(context),
+            SyscallNumber::Wait4 => self.syscall_wait4(context),
+            SyscallNumber::GetPpid => self.syscall_getppid(context),
+            SyscallNumber::SetPgid => self.syscall_setpgid(context),
+            SyscallNumber::Setsid => self.syscall_setsid(context),
+            SyscallNumber::GetUid => Ok(context.caller.raw()),
+            SyscallNumber::GetEuid => Ok(context.caller.raw()),
+            SyscallNumber::SetUid => self.syscall_setuid(context),
+            SyscallNumber::GetGid => Ok(0),
+            SyscallNumber::SetGid => self.syscall_setgid(context),
+            SyscallNumber::GetGroups => self.syscall_getgroups(context),
+            SyscallNumber::SetGroups => self.syscall_setgroups(context),
+            SyscallNumber::RtSigaction => self.syscall_rt_sigaction(context),
+            SyscallNumber::RtSigprocmask => self.syscall_rt_sigprocmask(context),
+            SyscallNumber::Kill => self.syscall_kill(context),
+            SyscallNumber::RtSigreturn => self.syscall_rt_sigreturn(context),
+            SyscallNumber::ClockGettime => self.syscall_clock_gettime(context),
+            SyscallNumber::Nanosleep => self.syscall_nanosleep(context),
+            SyscallNumber::TimerCreate => self.syscall_timer_create(context),
+            SyscallNumber::TimerSettime => self.syscall_timer_settime(context),
+            SyscallNumber::TimerGettime => self.syscall_timer_gettime(context),
+            SyscallNumber::TimerDelete => self.syscall_timer_delete(context),
+            SyscallNumber::Dup => self.syscall_dup(context),
+            SyscallNumber::Dup2 => self.syscall_dup2(context),
+            SyscallNumber::Dup3 => self.syscall_dup3(context),
+            SyscallNumber::Fcntl => self.syscall_fcntl(context),
+            SyscallNumber::Ioctl => self.syscall_ioctl(context),
+            SyscallNumber::Pipe2 => self.syscall_pipe2(context),
+            SyscallNumber::Poll => self.syscall_poll(context),
+            SyscallNumber::Pselect => self.syscall_pselect(context),
+            SyscallNumber::Eventfd => self.syscall_eventfd(context),
+            SyscallNumber::Socket => self.syscall_socket(context),
+            SyscallNumber::Bind => self.syscall_bind(context),
+            SyscallNumber::Listen => self.syscall_listen(context),
+            SyscallNumber::Accept => self.syscall_accept(context),
+            SyscallNumber::Connect => self.syscall_connect(context),
+            SyscallNumber::Sendmsg => self.syscall_sendmsg(context),
+            SyscallNumber::Recvmsg => self.syscall_recvmsg(context),
+            SyscallNumber::Clone => self.syscall_clone(context),
+            SyscallNumber::Futex => self.syscall_futex(context),
+            SyscallNumber::SetThreadArea => self.syscall_set_thread_area(context),
+            SyscallNumber::ArchPrctl => self.syscall_arch_prctl(context),
         }
+    }
+
+    fn syscall_fork(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.syscall_spawn(context)
+    }
+
+    fn syscall_execve(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_exit(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.terminate_process(context.caller);
+        Ok(0)
+    }
+
+    fn syscall_wait4(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_getppid(&self, context: SyscallContext) -> KernelResult<u64> {
+        let index = self.locate_process(context.caller)?;
+        Ok(self.process_table[index]
+            .as_ref()
+            .and_then(|pcb| pcb.parent)
+            .map(|pid| pid.raw())
+            .unwrap_or(0))
+    }
+
+    fn syscall_setpgid(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_setsid(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_setuid(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_setgid(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_getgroups(&self, context: SyscallContext) -> KernelResult<u64> {
+        if context.arg(0) == 0 {
+            return Ok(1);
+        }
+        let groups = user_slice_mut_typed::<u32>(context.arg(1), context.arg(0) as usize)?;
+        if groups.is_empty() {
+            return Ok(0);
+        }
+        groups[0] = 0;
+        Ok(1)
+    }
+
+    fn syscall_setgroups(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_rt_sigaction(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_rt_sigprocmask(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_kill(&self, context: SyscallContext) -> KernelResult<u64> {
+        self.ensure_process_exists(ProcessId::new(context.arg(0)))?;
+        Ok(0)
+    }
+
+    fn syscall_rt_sigreturn(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_clock_gettime(&self, context: SyscallContext) -> KernelResult<u64> {
+        let out = user_out_ptr::<MirageTimespec>(context.arg(1))?;
+        let nanos = KERNEL_TIME.now().as_nanos();
+        unsafe {
+            out.write(MirageTimespec {
+                tv_sec: (nanos / 1_000_000_000) as i64,
+                tv_nsec: (nanos % 1_000_000_000) as i64,
+            });
+        }
+        Ok(0)
+    }
+
+    fn syscall_nanosleep(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_timer_create(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_timer_settime(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_timer_gettime(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_timer_delete(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_dup(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_dup2(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_dup3(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_fcntl(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_ioctl(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_pipe2(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_poll(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_pselect(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_eventfd(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_socket(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_bind(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_listen(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_accept(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_connect(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_sendmsg(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_recvmsg(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_clone(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let entry_point = context.arg(0);
+        let priority = decode_priority(context.arg(1))?;
+        self.spawn_thread(context.caller, entry_point, priority)
+            .map(|thread| thread.raw())
+    }
+
+    fn syscall_futex(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_set_thread_area(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
+    }
+
+    fn syscall_arch_prctl(&mut self, _context: SyscallContext) -> KernelResult<u64> {
+        Err(KernelError::InvalidSyscall)
     }
 
     fn syscall_spawn(&mut self, context: SyscallContext) -> KernelResult<u64> {

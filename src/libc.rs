@@ -13,15 +13,12 @@ use crate::kernel::ipc::Message;
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{ProcessId, ProcessPriority};
 use crate::kernel::syscall::{
-    SyscallContext, SyscallNumber, MIRAGE_EACCES, MIRAGE_EAGAIN, MIRAGE_EFAULT, MIRAGE_EINVAL,
-    MIRAGE_EIO, MIRAGE_ENOBUFS, MIRAGE_ENOMEM, MIRAGE_ENOSYS, MIRAGE_ESRCH, MIRAGE_SYSCALL_CLOSE,
-    MIRAGE_SYSCALL_FSYNC, MIRAGE_SYSCALL_FTRUNCATE, MIRAGE_SYSCALL_GETDENTS64,
-    MIRAGE_SYSCALL_LSEEK, MIRAGE_SYSCALL_MKDIRAT, MIRAGE_SYSCALL_NEWFSTATAT, MIRAGE_SYSCALL_OPENAT,
-    MIRAGE_SYSCALL_READ, MIRAGE_SYSCALL_RENAMEAT2, MIRAGE_SYSCALL_STATX, MIRAGE_SYSCALL_UNLINKAT,
-    MIRAGE_SYSCALL_WRITE, SYSCALL_MAX_ARGS,
+    self, SyscallContext, SyscallNumber, MIRAGE_EACCES, MIRAGE_EAGAIN, MIRAGE_EFAULT,
+    MIRAGE_EINVAL, MIRAGE_EIO, MIRAGE_ENOBUFS, MIRAGE_ENOMEM, MIRAGE_ENOSYS, MIRAGE_ESRCH,
+    SYSCALL_MAX_ARGS,
 };
 use crate::kernel::thread::ThreadId;
-use crate::kernel::{Kernel, KernelError, KernelResult};
+use crate::kernel::{Kernel, KernelError, KernelResult, MirageTimespec};
 use crate::subkernel::{IsolationError, SecurityClass};
 
 type DefaultKernel = Kernel<{ crate::kernel::MAX_PROCESSES }, { crate::kernel::MESSAGE_DEPTH }>;
@@ -43,7 +40,7 @@ pub fn queue_syscall_trap<const MAX_PROC: usize, const MSG_DEPTH: usize>(
     kernel.queue_thread_syscall(thread, number.raw(), args)
 }
 
-pub fn getpid<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+pub fn getpid_syscall<const MAX_PROC: usize, const MSG_DEPTH: usize>(
     kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
     caller: ProcessId,
     thread: Option<ThreadId>,
@@ -56,6 +53,108 @@ pub fn getpid<const MAX_PROC: usize, const MSG_DEPTH: usize>(
         [0; SYSCALL_MAX_ARGS],
     )
     .map(ProcessId::new)
+}
+
+pub fn getppid_syscall<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
+    caller: ProcessId,
+    thread: Option<ThreadId>,
+) -> KernelResult<ProcessId> {
+    syscall(
+        kernel,
+        caller,
+        thread,
+        SyscallNumber::GetPpid,
+        [0; SYSCALL_MAX_ARGS],
+    )
+    .map(ProcessId::new)
+}
+
+pub fn exit<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
+    caller: ProcessId,
+    thread: Option<ThreadId>,
+    status: i32,
+) -> KernelResult<()> {
+    syscall(
+        kernel,
+        caller,
+        thread,
+        SyscallNumber::Exit,
+        [status as u64, 0, 0, 0, 0, 0],
+    )
+    .map(|_| ())
+}
+
+pub fn getuid_syscall<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
+    caller: ProcessId,
+    thread: Option<ThreadId>,
+) -> KernelResult<u32> {
+    syscall(
+        kernel,
+        caller,
+        thread,
+        SyscallNumber::GetUid,
+        [0; SYSCALL_MAX_ARGS],
+    )
+    .map(|uid| uid as u32)
+}
+
+pub fn getgid_syscall<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
+    caller: ProcessId,
+    thread: Option<ThreadId>,
+) -> KernelResult<u32> {
+    syscall(
+        kernel,
+        caller,
+        thread,
+        SyscallNumber::GetGid,
+        [0; SYSCALL_MAX_ARGS],
+    )
+    .map(|gid| gid as u32)
+}
+
+pub fn clock_gettime_syscall<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
+    caller: ProcessId,
+    thread: Option<ThreadId>,
+    clock_id: i32,
+    out: &mut MirageTimespec,
+) -> KernelResult<()> {
+    syscall(
+        kernel,
+        caller,
+        thread,
+        SyscallNumber::ClockGettime,
+        [
+            clock_id as u64,
+            out as *mut MirageTimespec as u64,
+            0,
+            0,
+            0,
+            0,
+        ],
+    )
+    .map(|_| ())
+}
+
+pub fn clone_thread<const MAX_PROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<MAX_PROC, MSG_DEPTH>,
+    caller: ProcessId,
+    thread: Option<ThreadId>,
+    entry_point: u64,
+    priority: ProcessPriority,
+) -> KernelResult<ThreadId> {
+    syscall(
+        kernel,
+        caller,
+        thread,
+        SyscallNumber::Clone,
+        [entry_point, encode_priority(priority), 0, 0, 0, 0],
+    )
+    .map(ThreadId::new)
 }
 
 pub fn spawn<const MAX_PROC: usize, const MSG_DEPTH: usize>(
@@ -278,7 +377,7 @@ fn raw_syscall_default(
     }
 }
 
-/// Mirage `openat(2)`-style wrapper over `MIRAGE_SYSCALL_OPENAT`.
+/// Mirage `openat(2)`-style wrapper over `syscall::MIRAGE_SYSCALL_OPENAT`.
 #[no_mangle]
 pub unsafe extern "C" fn mirage_openat(
     kernel: *mut DefaultKernel,
@@ -294,7 +393,7 @@ pub unsafe extern "C" fn mirage_openat(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_OPENAT,
+        syscall::MIRAGE_SYSCALL_OPENAT,
         [dirfd as u64, path as u64, flags as u64, mode as u64, 0, 0],
     )
 }
@@ -316,7 +415,7 @@ pub unsafe extern "C" fn mirage_close(kernel: *mut DefaultKernel, caller: u64, f
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_CLOSE,
+        syscall::MIRAGE_SYSCALL_CLOSE,
         [fd as u64, 0, 0, 0, 0, 0],
     )
 }
@@ -335,7 +434,7 @@ pub unsafe extern "C" fn mirage_read(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_READ,
+        syscall::MIRAGE_SYSCALL_READ,
         [fd as u64, buffer as u64, len as u64, 0, 0, 0],
     )
 }
@@ -354,7 +453,7 @@ pub unsafe extern "C" fn mirage_write(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_WRITE,
+        syscall::MIRAGE_SYSCALL_WRITE,
         [fd as u64, data as u64, len as u64, 0, 0, 0],
     )
 }
@@ -370,7 +469,7 @@ pub unsafe extern "C" fn mirage_lseek(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_LSEEK,
+        syscall::MIRAGE_SYSCALL_LSEEK,
         [fd as u64, offset as u64, whence as u64, 0, 0, 0],
     )
 }
@@ -392,7 +491,7 @@ pub unsafe extern "C" fn mirage_statx(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_STATX,
+        syscall::MIRAGE_SYSCALL_STATX,
         [dirfd as u64, path as u64, out as u64, 0, 0, 0],
     )
 }
@@ -413,7 +512,7 @@ pub unsafe extern "C" fn mirage_newfstatat(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_NEWFSTATAT,
+        syscall::MIRAGE_SYSCALL_NEWFSTATAT,
         [dirfd as u64, path_arg, out as u64, flags as u64, 0, 0],
     )
 }
@@ -452,7 +551,7 @@ pub unsafe extern "C" fn mirage_mkdirat(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_MKDIRAT,
+        syscall::MIRAGE_SYSCALL_MKDIRAT,
         [dirfd as u64, path as u64, mode as u64, 0, 0, 0],
     )
 }
@@ -481,7 +580,7 @@ pub unsafe extern "C" fn mirage_unlinkat(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_UNLINKAT,
+        syscall::MIRAGE_SYSCALL_UNLINKAT,
         [dirfd as u64, path as u64, flags as u64, 0, 0, 0],
     )
 }
@@ -511,7 +610,7 @@ pub unsafe extern "C" fn mirage_renameat2(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_RENAMEAT2,
+        syscall::MIRAGE_SYSCALL_RENAMEAT2,
         [
             old_dirfd as u64,
             old_path as u64,
@@ -558,7 +657,7 @@ pub unsafe extern "C" fn mirage_fsync(kernel: *mut DefaultKernel, caller: u64, f
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_FSYNC,
+        syscall::MIRAGE_SYSCALL_FSYNC,
         [fd as u64, 0, 0, 0, 0, 0],
     )
 }
@@ -573,7 +672,7 @@ pub unsafe extern "C" fn mirage_ftruncate(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_FTRUNCATE,
+        syscall::MIRAGE_SYSCALL_FTRUNCATE,
         [fd as u64, size, 0, 0, 0, 0],
     )
 }
@@ -592,8 +691,168 @@ pub unsafe extern "C" fn mirage_getdents64(
     raw_syscall_default(
         kernel,
         caller,
-        MIRAGE_SYSCALL_GETDENTS64,
+        syscall::MIRAGE_SYSCALL_GETDENTS64,
         [fd as u64, entries as u64, count as u64, 0, 0, 0],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_getpid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_GETPID,
+        [0; SYSCALL_MAX_ARGS],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_getppid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_GETPPID,
+        [0; SYSCALL_MAX_ARGS],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_getuid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_GETUID,
+        [0; SYSCALL_MAX_ARGS],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_geteuid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_GETEUID,
+        [0; SYSCALL_MAX_ARGS],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_getgid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_GETGID,
+        [0; SYSCALL_MAX_ARGS],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_getegid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_GETGID,
+        [0; SYSCALL_MAX_ARGS],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_setuid(kernel: *mut DefaultKernel, caller: u64, uid: u32) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_SETUID,
+        [uid as u64, 0, 0, 0, 0, 0],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_setgid(kernel: *mut DefaultKernel, caller: u64, gid: u32) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_SETGID,
+        [gid as u64, 0, 0, 0, 0, 0],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_getgroups(
+    kernel: *mut DefaultKernel,
+    caller: u64,
+    size: usize,
+    groups: *mut u32,
+) -> isize {
+    if size > 0 && groups.is_null() {
+        return -(MIRAGE_EFAULT as isize);
+    }
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_GETGROUPS,
+        [size as u64, groups as u64, 0, 0, 0, 0],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_exit(
+    kernel: *mut DefaultKernel,
+    caller: u64,
+    status: i32,
+) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_EXIT,
+        [status as u64, 0, 0, 0, 0, 0],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_clock_gettime(
+    kernel: *mut DefaultKernel,
+    caller: u64,
+    clock_id: i32,
+    out: *mut MirageTimespec,
+) -> isize {
+    if out.is_null() {
+        return -(MIRAGE_EFAULT as isize);
+    }
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_CLOCK_GETTIME,
+        [clock_id as u64, out as u64, 0, 0, 0, 0],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_kill(
+    kernel: *mut DefaultKernel,
+    caller: u64,
+    pid: u64,
+    signal: i32,
+) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_KILL,
+        [pid, signal as u64, 0, 0, 0, 0],
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_clone(
+    kernel: *mut DefaultKernel,
+    caller: u64,
+    entry_point: u64,
+    priority: u64,
+) -> isize {
+    raw_syscall_default(
+        kernel,
+        caller,
+        syscall::MIRAGE_SYSCALL_CLONE,
+        [entry_point, priority, 0, 0, 0, 0],
     )
 }
 
@@ -789,6 +1048,46 @@ pub unsafe extern "C" fn getdents64(
     count: usize,
 ) -> isize {
     mirage_getdents64(kernel, caller, fd, entries, count)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn getpid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    mirage_getpid(kernel, caller)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn getppid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    mirage_getppid(kernel, caller)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn getuid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    mirage_getuid(kernel, caller)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn geteuid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    mirage_geteuid(kernel, caller)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn getgid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    mirage_getgid(kernel, caller)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn getegid(kernel: *mut DefaultKernel, caller: u64) -> isize {
+    mirage_getegid(kernel, caller)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn clock_gettime(
+    kernel: *mut DefaultKernel,
+    caller: u64,
+    clock_id: i32,
+    out: *mut MirageTimespec,
+) -> isize {
+    mirage_clock_gettime(kernel, caller, clock_id, out)
 }
 
 #[no_mangle]
