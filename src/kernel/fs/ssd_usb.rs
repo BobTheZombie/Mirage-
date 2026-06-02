@@ -869,3 +869,45 @@ impl FileSystem for SsdUsbFileSystem {
         Ok(written)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(raw: &str) -> Path<'_> {
+        Path::new(raw).expect("test paths must be valid")
+    }
+
+    #[test]
+    fn open_with_create_creates_missing_file() {
+        let fs = SsdUsbFileSystem::new(false);
+        let credentials = Credentials::user(1000, 1000);
+        let flags = OpenFlags::CREATE.union(OpenFlags::RDWR);
+
+        let file = fs
+            .open(path("/created"), flags, credentials)
+            .expect("CREATE should create a missing file");
+        let metadata = fs
+            .lookup(path("/created"))
+            .expect("created file should be lookup-able");
+
+        assert_eq!(file.inode(), metadata.id);
+        assert_eq!(metadata.kind, InodeKind::RegularFile);
+        assert_eq!(metadata.permissions.owner(), credentials.uid);
+        assert_eq!(metadata.permissions.group(), credentials.gid);
+    }
+
+    #[test]
+    fn open_with_create_and_exclusive_rejects_existing_file() {
+        let fs = SsdUsbFileSystem::new(false);
+        let credentials = Credentials::user(1000, 1000);
+        let create_flags = OpenFlags::CREATE.union(OpenFlags::RDWR);
+        fs.open(path("/exclusive"), create_flags, credentials)
+            .expect("initial CREATE should create the file");
+
+        let exclusive_flags = create_flags.union(OpenFlags::EXCLUSIVE);
+        let result = fs.open(path("/exclusive"), exclusive_flags, credentials);
+
+        assert_eq!(result, Err(FsError::AlreadyExists));
+    }
+}
