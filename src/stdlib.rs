@@ -1,12 +1,28 @@
-//! POSIX-style no-alloc runtime exports for Mirage user code.
+//! POSIX-style no-alloc runtime facade for Mirage user code.
 //!
-//! This module re-exports the C ABI filesystem shims implemented in
-//! [`crate::libc`] so consumers can import a stdlib-shaped namespace while the
-//! exported symbols remain single definitions in `libc`.
+//! This module keeps a stable Rust-facing namespace over the focused libc ABI
+//! modules. Exported C symbols remain single definitions in [`crate::libc`].
 
-pub use crate::libc::{
-    close, fstat, fsync, ftruncate, getdents64, lseek, mkdir, mkdirat, open, openat, read, rename,
-    renameat, renameat2, stat, statx, unlink, unlinkat, write,
+pub use crate::libc::stdlib as alloc;
+pub use crate::libc::{dirent, errno, fcntl, pthread, socket, string, sys_stat, time, unistd};
+
+pub use crate::libc::dirent::getdents64;
+pub use crate::libc::fcntl::{open, openat};
+pub use crate::libc::stdlib::{
+    aligned_alloc, calloc, free, malloc, memalign, mmap, munmap, posix_memalign, realloc,
+    reallocarray,
+};
+pub use crate::libc::string::{
+    bcmp, bcopy, bzero, memchr, memcmp, memcpy, memmove, memset, strcat, strchr, strcmp, strcpy,
+    strdup, strlen, strncat, strncmp, strncpy, strndup, strnlen, strrchr, strstr,
+};
+pub use crate::libc::sys_stat::{
+    fstat, fsync, ftruncate, mkdir, mkdirat, rename, renameat, renameat2, stat, statx, unlink,
+    unlinkat,
+};
+pub use crate::libc::time::clock_gettime;
+pub use crate::libc::unistd::{
+    close, getegid, geteuid, getgid, getpid, getppid, getuid, lseek, read, write,
 };
 
 /// Filesystem ABI constants and C-compatible payloads shared with libc wrappers.
