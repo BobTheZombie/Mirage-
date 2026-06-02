@@ -162,6 +162,15 @@ pub enum SyscallNumber {
     Ftruncate = 29,
     Fsync = 30,
     Mount = 31,
+    Chdir = 32,
+    Fchdir = 33,
+    Getcwd = 34,
+    Faccessat = 35,
+    Fchmodat = 36,
+    Fchownat = 37,
+    Symlinkat = 38,
+    Readlinkat = 39,
+    Linkat = 40,
 
     // Process lifecycle syscalls (100-119).
     Fork = 100,
@@ -263,6 +272,15 @@ impl SyscallNumber {
             29 => Some(Self::Ftruncate),
             30 => Some(Self::Fsync),
             31 => Some(Self::Mount),
+            32 => Some(Self::Chdir),
+            33 => Some(Self::Fchdir),
+            34 => Some(Self::Getcwd),
+            35 => Some(Self::Faccessat),
+            36 => Some(Self::Fchmodat),
+            37 => Some(Self::Fchownat),
+            38 => Some(Self::Symlinkat),
+            39 => Some(Self::Readlinkat),
+            40 => Some(Self::Linkat),
             100 => Some(Self::Fork),
             101 => Some(Self::Execve),
             102 => Some(Self::Exit),
@@ -337,6 +355,15 @@ pub const MIRAGE_SYSCALL_RENAMEAT2: u64 = SyscallNumber::RenameAt2.raw();
 pub const MIRAGE_SYSCALL_FTRUNCATE: u64 = SyscallNumber::Ftruncate.raw();
 pub const MIRAGE_SYSCALL_FSYNC: u64 = SyscallNumber::Fsync.raw();
 pub const MIRAGE_SYSCALL_MOUNT: u64 = SyscallNumber::Mount.raw();
+pub const MIRAGE_SYSCALL_CHDIR: u64 = SyscallNumber::Chdir.raw();
+pub const MIRAGE_SYSCALL_FCHDIR: u64 = SyscallNumber::Fchdir.raw();
+pub const MIRAGE_SYSCALL_GETCWD: u64 = SyscallNumber::Getcwd.raw();
+pub const MIRAGE_SYSCALL_FACCESSAT: u64 = SyscallNumber::Faccessat.raw();
+pub const MIRAGE_SYSCALL_FCHMODAT: u64 = SyscallNumber::Fchmodat.raw();
+pub const MIRAGE_SYSCALL_FCHOWNAT: u64 = SyscallNumber::Fchownat.raw();
+pub const MIRAGE_SYSCALL_SYMLINKAT: u64 = SyscallNumber::Symlinkat.raw();
+pub const MIRAGE_SYSCALL_READLINKAT: u64 = SyscallNumber::Readlinkat.raw();
+pub const MIRAGE_SYSCALL_LINKAT: u64 = SyscallNumber::Linkat.raw();
 
 pub const MIRAGE_SYSCALL_FORK: u64 = SyscallNumber::Fork.raw();
 pub const MIRAGE_SYSCALL_EXECVE: u64 = SyscallNumber::Execve.raw();

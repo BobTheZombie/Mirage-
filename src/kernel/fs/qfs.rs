@@ -1333,14 +1333,14 @@ impl FileSystem for QfsFileSystem {
 
     fn symlink(
         &self,
-        target: Path<'_>,
+        target: &str,
         link_path: Path<'_>,
         credentials: Credentials,
     ) -> Result<(), FsError> {
         if self.read_only {
             return Err(FsError::ReadOnly);
         }
-        let target_bytes = target.as_str().as_bytes();
+        let target_bytes = target.as_bytes();
         let (parent, name, name_len) = self.parent_and_name(link_path)?;
         let transaction_id = self.begin_transaction()?;
         let record = {
@@ -2485,7 +2485,7 @@ mod tests {
             Credentials::kernel(),
         )
         .unwrap();
-        fs.symlink(path("/docs"), path("/docs-link"), Credentials::kernel())
+        fs.symlink("/docs", path("/docs-link"), Credentials::kernel())
             .unwrap();
 
         let docs = fs.lookup(path("/docs")).unwrap();

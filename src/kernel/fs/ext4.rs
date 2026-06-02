@@ -1565,7 +1565,7 @@ impl<'a> FileSystem for Ext4Backend<'a> {
         if !metadata.permissions.allows(credentials, AccessMode::Read) {
             return Err(VfsError::PermissionDenied);
         }
-        Ok(File::with_flags(metadata.id, flags))
+        Ok(File::with_flags(metadata.id, flags).with_path(path))
     }
 
     fn pread(&self, file: &File, buffer: &mut [u8], offset: u64) -> Result<usize, VfsError> {
@@ -1673,7 +1673,7 @@ impl<'a> FileSystem for Ext4Backend<'a> {
 
     fn symlink(
         &self,
-        _target: Path<'_>,
+        _target: &str,
         _link_path: Path<'_>,
         _credentials: Credentials,
     ) -> Result<(), VfsError> {

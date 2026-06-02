@@ -1,6 +1,6 @@
 //! Process control structures for the Mirage kernel.
 
-use crate::kernel::fs::{DescriptorFlags, FileDescriptionId, Permissions, MAX_PATH_BYTES};
+use crate::kernel::fs::{DescriptorFlags, FileDescriptionId, Path, Permissions, MAX_PATH_BYTES};
 use crate::subkernel::SecurityLabel;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -71,8 +71,18 @@ impl ProcessPath {
         self.len
     }
 
+    pub fn from_path(path: Path<'_>) -> Self {
+        let mut bytes = [0u8; MAX_PATH_BYTES];
+        let raw = path.as_str().as_bytes();
+        bytes[..raw.len()].copy_from_slice(raw);
+        Self {
+            bytes,
+            len: raw.len(),
+        }
+    }
+
     pub fn as_str(&self) -> &str {
-        // ProcessPath is only built from validated ASCII kernel paths.
+        // ProcessPath is only built from validated UTF-8 kernel paths.
         unsafe { core::str::from_utf8_unchecked(&self.bytes[..self.len]) }
     }
 }
@@ -134,6 +144,14 @@ impl<const MAX: usize> ProcessFileTable<MAX> {
         self.root
     }
 
+    pub fn set_cwd(&mut self, cwd: ProcessPath) {
+        self.cwd = cwd;
+    }
+
+    pub fn set_root(&mut self, root: ProcessPath) {
+        self.root = root;
+    }
+
     pub const fn umask(&self) -> Permissions {
         self.umask
     }
@@ -149,7 +167,16 @@ impl<const MAX: usize> ProcessFileTable<MAX> {
         description: FileDescriptionId,
         flags: DescriptorFlags,
     ) -> Result<usize, ProcessFileTableError> {
-        let mut fd = 0usize;
+        self.open_at_or_above(description, flags, 0)
+    }
+
+    pub fn open_at_or_above(
+        &mut self,
+        description: FileDescriptionId,
+        flags: DescriptorFlags,
+        min_fd: usize,
+    ) -> Result<usize, ProcessFileTableError> {
+        let mut fd = min_fd;
         while fd < MAX {
             if self.descriptors[fd].is_none() {
                 self.descriptors[fd] = Some(FileDescriptor::new(description, flags));
@@ -158,6 +185,20 @@ impl<const MAX: usize> ProcessFileTable<MAX> {
             fd += 1;
         }
         Err(ProcessFileTableError::Full)
+    }
+
+    pub fn duplicate_to(
+        &mut self,
+        fd: usize,
+        description: FileDescriptionId,
+        flags: DescriptorFlags,
+    ) -> Result<Option<FileDescriptor>, ProcessFileTableError> {
+        let slot = self
+            .descriptors
+            .get_mut(fd)
+            .ok_or(ProcessFileTableError::InvalidDescriptor)?;
+        let previous = slot.replace(FileDescriptor::new(description, flags));
+        Ok(previous)
     }
 
     pub fn get(&self, fd: usize) -> Result<FileDescriptor, ProcessFileTableError> {
