@@ -15,12 +15,17 @@ use crate::kernel::thread::{
 
 pub mod boot;
 pub mod clock;
+pub mod device;
 pub mod gdt;
 pub mod idt;
 pub mod interrupts;
+pub mod io;
+pub mod limine_block;
 pub mod msr;
 pub mod paging;
 pub mod pic;
+pub mod ps2_keyboard;
+pub mod uart16550;
 
 pub use clock::{HardwareClock, HARDWARE_CLOCK};
 

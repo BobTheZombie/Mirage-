@@ -20,7 +20,7 @@ pub mod timer;
 
 use crate::arch::x86_64::{
     self,
-    boot::{BootModules, FramebufferInfo},
+    boot::{BootInfo, BootModules, FramebufferInfo},
     clock, ThreadRunOutcome,
 };
 use crate::kernel::cpu::CpuCoreState;
@@ -70,7 +70,7 @@ use core::ptr::NonNull;
 
 pub const MAX_PROCESSES: usize = 64;
 pub const MESSAGE_DEPTH: usize = 16;
-pub const MAX_DEVICES: usize = 8;
+pub const MAX_DEVICES: usize = 12;
 pub const MAX_OPEN_FILES: usize = 64;
 pub const MAX_KERNEL_PIPES: usize = 32;
 pub const MAX_KERNEL_EVENTFDS: usize = 32;
@@ -728,6 +728,18 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     pub fn bootstrap_with_framebuffer(&mut self, framebuffer: Option<FramebufferInfo>) {
+        self.bootstrap_with_boot_info_and_framebuffer(None, framebuffer);
+    }
+
+    pub fn bootstrap_with_boot_info(&mut self, boot_info: &BootInfo) {
+        self.bootstrap_with_boot_info_and_framebuffer(Some(boot_info), boot_info.framebuffer);
+    }
+
+    fn bootstrap_with_boot_info_and_framebuffer(
+        &mut self,
+        boot_info: Option<&BootInfo>,
+        framebuffer: Option<FramebufferInfo>,
+    ) {
         self.scheduler.reset();
         self.security.reset();
         self.devices.reset();
@@ -765,8 +777,13 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.core_states[0].online();
         }
 
-        self.devices
-            .install_core_devices_with_framebuffer(framebuffer);
+        if let Some(boot_info) = boot_info {
+            self.devices
+                .install_core_devices_with_boot_info(Some(boot_info));
+        } else {
+            self.devices
+                .install_core_devices_with_framebuffer(framebuffer);
+        }
     }
 
     pub fn mount_root_from_boot_sources(
@@ -792,6 +809,24 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 }
             }
             index += 1;
+        }
+
+        let mut descriptors = [EMPTY_DEVICE_DESCRIPTOR; MAX_DEVICES];
+        let count = self.devices.enumerate(&mut descriptors);
+        let mut device_index = 0usize;
+        while device_index < count {
+            let descriptor = descriptors[device_index];
+            if descriptor.kind == DeviceKind::BlockStorage {
+                if let Ok(device) = self.devices.block_storage_static(descriptor.id) {
+                    if self.root_fs.mount_qfs(false, device).is_ok() {
+                        return Ok(RootMountSource::DiscoveredBlockQfs);
+                    }
+                    if self.root_fs.mount_ext4(device).is_ok() {
+                        return Ok(RootMountSource::DiscoveredBlockExt4);
+                    }
+                }
+            }
+            device_index += 1;
         }
 
         let built_in = crate::kernel::device::built_in_block_storage();

@@ -1,7 +1,7 @@
 use core::cmp::min;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::arch::x86_64::boot::FramebufferInfo;
+use crate::arch::x86_64::boot::{BootInfo, FramebufferInfo};
 use crate::kernel::sync::SpinLock;
 use crate::subkernel::{DeviceSecurity, SecurityClass};
 
@@ -293,7 +293,10 @@ pub struct MirageInputEvent {
     pub timestamp_ns: u64,
 }
 
-fn copy_c_abi_metadata<T>(metadata: &T, buffer: &mut [u8]) -> Result<usize, DeviceError> {
+pub(crate) fn copy_c_abi_metadata<T>(
+    metadata: &T,
+    buffer: &mut [u8],
+) -> Result<usize, DeviceError> {
     let len = core::mem::size_of::<T>();
     if buffer.len() < len {
         return Err(DeviceError::BufferTooSmall);
@@ -301,6 +304,13 @@ fn copy_c_abi_metadata<T>(metadata: &T, buffer: &mut [u8]) -> Result<usize, Devi
     let bytes = unsafe { core::slice::from_raw_parts(metadata as *const T as *const u8, len) };
     buffer[..len].copy_from_slice(bytes);
     Ok(len)
+}
+
+pub(crate) fn copy_input_event_to_bytes(
+    event: &MirageInputEvent,
+    buffer: &mut [u8],
+) -> Result<usize, DeviceError> {
+    copy_c_abi_metadata(event, buffer)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -416,17 +426,27 @@ impl<const MAX: usize> DeviceManager<MAX> {
     }
 
     pub fn install_core_devices(&mut self) {
-        self.install_core_devices_with_framebuffer(None);
+        self.install_core_devices_with_boot_info(None);
     }
 
     pub fn install_core_devices_with_framebuffer(&mut self, framebuffer: Option<FramebufferInfo>) {
         configure_graphics_devices(framebuffer);
-        let _ = self.register_driver(&SERIAL_CONSOLE_DRIVER);
+        self.install_core_devices_after_graphics(None);
+    }
+
+    pub fn install_core_devices_with_boot_info(&mut self, boot_info: Option<&BootInfo>) {
+        configure_graphics_devices(boot_info.and_then(|info| info.framebuffer));
+        self.install_core_devices_after_graphics(boot_info);
+    }
+
+    fn install_core_devices_after_graphics(&mut self, boot_info: Option<&BootInfo>) {
+        let _ = crate::arch::x86_64::device::register_real_drivers(self, boot_info);
         let _ = self.register_driver(&SYSTEM_TIMER_DRIVER);
-        let _ = self.register_driver(&BLOCK_STORAGE_DRIVER);
         let _ = self.register_driver(&FRAMEBUFFER_DRIVER);
         let _ = self.register_driver(&GPU_CAPABILITY_DRIVER);
         let _ = self.register_driver(&LOOPBACK_NETWORK_DRIVER);
+        let _ = self.register_driver(&BLOCK_STORAGE_DRIVER);
+        let _ = self.register_driver(&SERIAL_CONSOLE_DRIVER);
         let _ = self.register_driver(&INPUT_CONTROLLER_DRIVER);
     }
 
@@ -473,6 +493,13 @@ impl<const MAX: usize> DeviceManager<MAX> {
     }
 
     pub fn block_storage(&self, id: DeviceId) -> Result<&dyn BlockStorageDevice, DeviceError> {
+        self.block_storage_static(id)
+    }
+
+    pub fn block_storage_static(
+        &self,
+        id: DeviceId,
+    ) -> Result<&'static dyn BlockStorageDevice, DeviceError> {
         let entry = self.find_device(id).ok_or(DeviceError::NotFound)?;
         if entry.driver.kind() != DeviceKind::BlockStorage {
             return Err(DeviceError::Unsupported);
@@ -618,7 +645,7 @@ impl DeviceDriver for SerialConsoleDriver {
     }
 
     fn name(&self) -> &'static str {
-        "serial-console"
+        "serial-buffer-fallback"
     }
 
     fn security(&self) -> DeviceSecurity {
@@ -927,7 +954,7 @@ impl DeviceDriver for InputControllerDriver {
     }
 
     fn name(&self) -> &'static str {
-        "input-controller0"
+        "empty-input-fallback"
     }
 
     fn security(&self) -> DeviceSecurity {
