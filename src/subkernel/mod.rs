@@ -1,7 +1,7 @@
 //! The Mirage L2 security kernel responsible for authentication and isolation.
 
 use crate::kernel::memory::MemoryProtection;
-use crate::kernel::process::{ExecRequest, ProcessId};
+use crate::kernel::process::{ExecRequest, ProcessId, MAX_SUPPLEMENTARY_GROUPS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecurityLevel {
@@ -135,6 +135,12 @@ pub struct Credentials {
     label: SecurityLabel,
     capabilities: CapabilitySet,
     isolation: IsolationLevel,
+    uid: u16,
+    euid: u16,
+    gid: u16,
+    egid: u16,
+    supplementary_groups: [u16; MAX_SUPPLEMENTARY_GROUPS],
+    supplementary_group_count: usize,
 }
 
 impl Credentials {
@@ -143,26 +149,72 @@ impl Credentials {
         capabilities: CapabilitySet,
         isolation: IsolationLevel,
     ) -> Self {
+        let uid = match label.level() {
+            SecurityLevel::System => 0,
+            _ => 1000,
+        };
+        Self::with_unix_credentials(
+            label,
+            capabilities,
+            isolation,
+            uid,
+            uid,
+            uid,
+            uid,
+            [0; MAX_SUPPLEMENTARY_GROUPS],
+            0,
+        )
+    }
+
+    pub const fn with_unix_credentials(
+        label: SecurityLabel,
+        capabilities: CapabilitySet,
+        isolation: IsolationLevel,
+        uid: u16,
+        euid: u16,
+        gid: u16,
+        egid: u16,
+        supplementary_groups: [u16; MAX_SUPPLEMENTARY_GROUPS],
+        supplementary_group_count: usize,
+    ) -> Self {
         Self {
             label,
             capabilities,
             isolation,
+            uid,
+            euid,
+            gid,
+            egid,
+            supplementary_groups,
+            supplementary_group_count,
         }
     }
 
     pub const fn system() -> Self {
-        Self::new(
+        Self::with_unix_credentials(
             SecurityLabel::system(),
             CapabilitySet::full(),
             IsolationLevel::Process,
+            0,
+            0,
+            0,
+            0,
+            [0; MAX_SUPPLEMENTARY_GROUPS],
+            0,
         )
     }
 
     pub const fn user() -> Self {
-        Self::new(
+        Self::with_unix_credentials(
             SecurityLabel::internal(),
             CapabilitySet::ipc(),
             IsolationLevel::None,
+            1000,
+            1000,
+            1000,
+            1000,
+            [0; MAX_SUPPLEMENTARY_GROUPS],
+            0,
         )
     }
 
@@ -177,6 +229,30 @@ impl Credentials {
     pub const fn isolation(&self) -> IsolationLevel {
         self.isolation
     }
+
+    pub const fn uid(&self) -> u16 {
+        self.uid
+    }
+
+    pub const fn euid(&self) -> u16 {
+        self.euid
+    }
+
+    pub const fn gid(&self) -> u16 {
+        self.gid
+    }
+
+    pub const fn egid(&self) -> u16 {
+        self.egid
+    }
+
+    pub const fn supplementary_groups(&self) -> [u16; MAX_SUPPLEMENTARY_GROUPS] {
+        self.supplementary_groups
+    }
+
+    pub const fn supplementary_group_count(&self) -> usize {
+        self.supplementary_group_count
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -185,6 +261,12 @@ pub struct TaskDomain {
     label: SecurityLabel,
     capabilities: CapabilitySet,
     isolation: IsolationLevel,
+    uid: u16,
+    euid: u16,
+    gid: u16,
+    egid: u16,
+    supplementary_groups: [u16; MAX_SUPPLEMENTARY_GROUPS],
+    supplementary_group_count: usize,
     quarantine_events: u32,
 }
 
@@ -195,6 +277,12 @@ impl TaskDomain {
             label: creds.label(),
             capabilities: creds.capabilities(),
             isolation: creds.isolation(),
+            uid: creds.uid(),
+            euid: creds.euid(),
+            gid: creds.gid(),
+            egid: creds.egid(),
+            supplementary_groups: creds.supplementary_groups(),
+            supplementary_group_count: creds.supplementary_group_count(),
             quarantine_events: 0,
         }
     }
@@ -362,6 +450,16 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         }
     }
 
+    /// Authorize changes to mutable Unix credential state (uid/gid/groups).
+    pub fn authorize_credential_update(&self, pid: ProcessId) -> Result<(), IsolationError> {
+        let domain = self.domain(pid)?;
+        if domain.has_system_privilege() {
+            Ok(())
+        } else {
+            Err(IsolationError::CapabilityMissing)
+        }
+    }
+
     /// Authorize a task domain to own a service advertised at the given class.
     pub fn authorize_service_registration(
         &self,
@@ -457,10 +555,16 @@ impl<const MAX: usize> SecurityKernel<MAX> {
 
     pub fn credentials(&self, pid: ProcessId) -> Result<Credentials, IsolationError> {
         let domain = self.domain(pid)?;
-        Ok(Credentials::new(
+        Ok(Credentials::with_unix_credentials(
             domain.label,
             domain.capabilities,
             domain.isolation,
+            domain.uid,
+            domain.euid,
+            domain.gid,
+            domain.egid,
+            domain.supplementary_groups,
+            domain.supplementary_group_count,
         ))
     }
 

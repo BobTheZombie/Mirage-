@@ -35,7 +35,7 @@ use crate::kernel::process::{
     ExecImageMetadata, ExecRequest, ExecServiceDaemon, ExecSignatureMetadata, ExecVectorMetadata,
     ExitStatus, ProcessControlBlock, ProcessFileTableError, ProcessGroupId, ProcessId, ProcessPath,
     ProcessPriority, ProcessState, SessionId, SignalAction, SignalMask, MAX_EXEC_ARGS,
-    MAX_EXEC_ENVS, SIGCHLD, SIGKILL, SIGTERM,
+    MAX_EXEC_ENVS, MAX_SUPPLEMENTARY_GROUPS, SIGCHLD, SIGKILL, SIGTERM,
 };
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
 use crate::kernel::services::registry::{
@@ -698,10 +698,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             SyscallNumber::GetPpid => self.syscall_getppid(context),
             SyscallNumber::SetPgid => self.syscall_setpgid(context),
             SyscallNumber::Setsid => self.syscall_setsid(context),
-            SyscallNumber::GetUid => Ok(context.caller.raw()),
-            SyscallNumber::GetEuid => Ok(context.caller.raw()),
+            SyscallNumber::GetUid => self.syscall_getuid(context),
+            SyscallNumber::GetEuid => self.syscall_geteuid(context),
             SyscallNumber::SetUid => self.syscall_setuid(context),
-            SyscallNumber::GetGid => Ok(0),
+            SyscallNumber::GetGid => self.syscall_getgid(context),
             SyscallNumber::SetGid => self.syscall_setgid(context),
             SyscallNumber::GetGroups => self.syscall_getgroups(context),
             SyscallNumber::SetGroups => self.syscall_setgroups(context),
@@ -750,9 +750,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if stat.kind != InodeKind::RegularFile {
             return Err(KernelError::Filesystem(VfsError::PermissionDenied));
         }
-        if !crate::kernel::fs::Permissions::new(stat.mode, stat.uid, stat.gid)
-            .allows(fs_credentials_for(context.caller), AccessMode::Execute)
-        {
+        if !crate::kernel::fs::Permissions::new(stat.mode, stat.uid, stat.gid).allows(
+            self.fs_credentials_for(context.caller)?,
+            AccessMode::Execute,
+        ) {
             return Err(KernelError::Filesystem(VfsError::PermissionDenied));
         }
 
@@ -839,28 +840,76 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Ok(sid.raw())
     }
 
-    fn syscall_setuid(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_getuid(&self, context: SyscallContext) -> KernelResult<u64> {
+        Ok(self.process_credentials(context.caller)?.uid as u64)
     }
 
-    fn syscall_setgid(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_geteuid(&self, context: SyscallContext) -> KernelResult<u64> {
+        Ok(self.process_credentials(context.caller)?.euid as u64)
+    }
+
+    fn syscall_getgid(&self, context: SyscallContext) -> KernelResult<u64> {
+        Ok(self.process_credentials(context.caller)?.gid as u64)
+    }
+
+    fn syscall_setuid(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_credential_update(context.caller)
+            .map_err(KernelError::SecurityViolation)?;
+        let uid = u16::try_from(context.arg(0)).map_err(|_| KernelError::InvalidArgument)?;
+        self.process_credentials_mut(context.caller)?.set_uid(uid);
+        Ok(0)
+    }
+
+    fn syscall_setgid(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_credential_update(context.caller)
+            .map_err(KernelError::SecurityViolation)?;
+        let gid = u16::try_from(context.arg(0)).map_err(|_| KernelError::InvalidArgument)?;
+        self.process_credentials_mut(context.caller)?.set_gid(gid);
+        Ok(0)
     }
 
     fn syscall_getgroups(&self, context: SyscallContext) -> KernelResult<u64> {
+        let credentials = self.process_credentials(context.caller)?;
+        let group_count = credentials.supplementary_group_count();
         if context.arg(0) == 0 {
-            return Ok(1);
+            return Ok(group_count as u64);
         }
-        let groups = user_slice_mut_typed::<u32>(context.arg(1), context.arg(0) as usize)?;
-        if groups.is_empty() {
-            return Ok(0);
+        let capacity = context.arg(0) as usize;
+        if capacity < group_count {
+            return Err(KernelError::InvalidArgument);
         }
-        groups[0] = 0;
-        Ok(1)
+        let groups = user_slice_mut_typed::<u32>(context.arg(1), capacity)?;
+        let stored = credentials.supplementary_groups();
+        let mut idx = 0usize;
+        while idx < group_count {
+            groups[idx] = stored[idx] as u32;
+            idx += 1;
+        }
+        Ok(group_count as u64)
     }
 
-    fn syscall_setgroups(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_setgroups(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.security
+            .authorize_credential_update(context.caller)
+            .map_err(KernelError::SecurityViolation)?;
+        let count = context.arg(0) as usize;
+        if count > MAX_SUPPLEMENTARY_GROUPS {
+            return Err(KernelError::InvalidArgument);
+        }
+        let user_groups = user_slice_typed::<u32>(context.arg(1), count)?;
+        let mut groups = [0u16; MAX_SUPPLEMENTARY_GROUPS];
+        let mut idx = 0usize;
+        while idx < count {
+            groups[idx] =
+                u16::try_from(user_groups[idx]).map_err(|_| KernelError::InvalidArgument)?;
+            idx += 1;
+        }
+        self.process_credentials_mut(context.caller)?
+            .set_supplementary_groups(&groups[..count])
+            .map_err(|_| KernelError::InvalidArgument)?;
+        Ok(0)
     }
 
     fn syscall_rt_sigaction(&mut self, context: SyscallContext) -> KernelResult<u64> {
@@ -1378,7 +1427,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let path = path_buf.as_path()?;
         let raw_flags = open_flags_from_libc(context.arg(2) as u32);
         let descriptor_flags = DescriptorFlags::from_open_flags(raw_flags);
-        let credentials = fs_credentials_for(context.caller);
+        let credentials = self.fs_credentials_for(context.caller)?;
         let file = self
             .root_fs
             .open(path, raw_flags.without_descriptor_flags(), credentials)
@@ -1549,9 +1598,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let path = path_buf.as_path()?;
         let requested = context.arg(2) as u32;
         let umask = self.process_files(context.caller)?.umask().bits() as u32;
-        let mode = permissions_from_libc_mode(requested & !umask, context.caller.raw() as u16, 0);
+        let credentials = self.fs_credentials_for(context.caller)?;
+        let mode = permissions_from_libc_mode(requested & !umask, credentials.uid, credentials.gid);
         self.root_fs
-            .mkdir(path, mode, fs_credentials_for(context.caller))
+            .mkdir(path, mode, credentials)
             .map(|_| 0)
             .map_err(KernelError::Filesystem)
     }
@@ -1561,10 +1611,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let path = path_buf.as_path()?;
         let flags = context.arg(2);
         let result = if (flags & AT_REMOVEDIR) != 0 {
-            self.root_fs.rmdir(path, fs_credentials_for(context.caller))
+            self.root_fs
+                .rmdir(path, self.fs_credentials_for(context.caller)?)
         } else {
             self.root_fs
-                .unlink(path, fs_credentials_for(context.caller))
+                .unlink(path, self.fs_credentials_for(context.caller)?)
         };
         result.map(|_| 0).map_err(KernelError::Filesystem)
     }
@@ -1585,7 +1636,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .rename(
                 old_path_buf.as_path()?,
                 new_path_buf.as_path()?,
-                fs_credentials_for(context.caller),
+                self.fs_credentials_for(context.caller)?,
             )
             .map(|_| 0)
             .map_err(KernelError::Filesystem)
@@ -1598,7 +1649,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .get(description)
             .map_err(map_file_table_error)?;
         self.root_fs
-            .ftruncate(&file, context.arg(1), fs_credentials_for(context.caller))
+            .ftruncate(
+                &file,
+                context.arg(1),
+                self.fs_credentials_for(context.caller)?,
+            )
             .map(|_| 0)
             .map_err(KernelError::Filesystem)
     }
@@ -1692,7 +1747,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             return Ok(0);
         }
         let permissions = crate::kernel::fs::Permissions::new(stat.mode, stat.uid, stat.gid);
-        let credentials = fs_credentials_for(context.caller);
+        let credentials = self.fs_credentials_for(context.caller)?;
         let allowed = match (
             mode & crate::kernel::fs::stdlib::R_OK != 0,
             mode & crate::kernel::fs::stdlib::W_OK != 0,
@@ -1729,7 +1784,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .chmod(
                 path_buf.as_path()?,
                 context.arg(2) as u16,
-                fs_credentials_for(context.caller),
+                self.fs_credentials_for(context.caller)?,
             )
             .map(|_| 0)
             .map_err(KernelError::Filesystem)
@@ -1742,7 +1797,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 path_buf.as_path()?,
                 context.arg(2) as u16,
                 context.arg(3) as u16,
-                fs_credentials_for(context.caller),
+                self.fs_credentials_for(context.caller)?,
             )
             .map(|_| 0)
             .map_err(KernelError::Filesystem)
@@ -1757,7 +1812,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .symlink(
                 target,
                 link_path_buf.as_path()?,
-                fs_credentials_for(context.caller),
+                self.fs_credentials_for(context.caller)?,
             )
             .map(|_| 0)
             .map_err(KernelError::Filesystem)
@@ -1785,7 +1840,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .link(
                 old_path_buf.as_path()?,
                 new_path_buf.as_path()?,
-                fs_credentials_for(context.caller),
+                self.fs_credentials_for(context.caller)?,
             )
             .map(|_| 0)
             .map_err(KernelError::Filesystem)
@@ -2077,6 +2132,38 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             tcb.deliver_signal(signal, action.handler);
         }
         Ok(())
+    }
+
+    fn process_credentials(
+        &self,
+        pid: ProcessId,
+    ) -> KernelResult<&crate::kernel::process::ProcessCredentials> {
+        let index = self.locate_process(pid)?;
+        Ok(&self.process_table[index]
+            .as_ref()
+            .ok_or(KernelError::UnknownProcess)?
+            .credentials)
+    }
+
+    fn process_credentials_mut(
+        &mut self,
+        pid: ProcessId,
+    ) -> KernelResult<&mut crate::kernel::process::ProcessCredentials> {
+        let index = self.locate_process(pid)?;
+        Ok(&mut self.process_table[index]
+            .as_mut()
+            .ok_or(KernelError::UnknownProcess)?
+            .credentials)
+    }
+
+    fn fs_credentials_for(&self, pid: ProcessId) -> KernelResult<FsCredentials> {
+        let credentials = self.process_credentials(pid)?;
+        Ok(FsCredentials::user_with_groups(
+            credentials.euid,
+            credentials.egid,
+            credentials.supplementary_groups(),
+            credentials.supplementary_group_count(),
+        ))
     }
 
     fn process_files(
@@ -2708,10 +2795,6 @@ fn startup_service_to_registry(
         crate::kernel::spawn::ServiceId::Inputd => Some(RegistryServiceId::Inputd),
         crate::kernel::spawn::ServiceId::L2Subkernel => None,
     }
-}
-
-fn fs_credentials_for(pid: ProcessId) -> FsCredentials {
-    FsCredentials::user(pid.raw() as u16, 0)
 }
 
 fn validate_user_range(ptr: u64, len: usize) -> KernelResult<()> {
