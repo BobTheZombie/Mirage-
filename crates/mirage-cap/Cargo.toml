@@ -1,0 +1,9 @@
+[package]
+name = "mirage-cap"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Capability tokens and authority checks for Mirage services"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
