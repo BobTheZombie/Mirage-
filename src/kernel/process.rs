@@ -4,10 +4,78 @@ use crate::kernel::fs::{DescriptorFlags, FileDescriptionId, Path, Permissions, M
 use crate::subkernel::{Credentials, SecurityLabel};
 
 pub const MAX_PENDING_SIGNALS: usize = 32;
+pub const MAX_SUPPLEMENTARY_GROUPS: usize = 16;
 pub const MAX_SIGNAL_NUMBER: usize = 64;
 pub const SIGKILL: u8 = 9;
 pub const SIGTERM: u8 = 15;
 pub const SIGCHLD: u8 = 17;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessCredentials {
+    pub uid: u16,
+    pub euid: u16,
+    pub gid: u16,
+    pub egid: u16,
+    supplementary_groups: [u16; MAX_SUPPLEMENTARY_GROUPS],
+    supplementary_group_count: usize,
+}
+
+impl ProcessCredentials {
+    pub const fn new(uid: u16, euid: u16, gid: u16, egid: u16) -> Self {
+        Self {
+            uid,
+            euid,
+            gid,
+            egid,
+            supplementary_groups: [0; MAX_SUPPLEMENTARY_GROUPS],
+            supplementary_group_count: 0,
+        }
+    }
+
+    pub const fn from_credentials(credentials: Credentials) -> Self {
+        Self {
+            uid: credentials.uid(),
+            euid: credentials.euid(),
+            gid: credentials.gid(),
+            egid: credentials.egid(),
+            supplementary_groups: credentials.supplementary_groups(),
+            supplementary_group_count: credentials.supplementary_group_count(),
+        }
+    }
+
+    pub const fn supplementary_group_count(&self) -> usize {
+        self.supplementary_group_count
+    }
+
+    pub const fn supplementary_groups(&self) -> [u16; MAX_SUPPLEMENTARY_GROUPS] {
+        self.supplementary_groups
+    }
+
+    pub fn set_uid(&mut self, uid: u16) {
+        self.uid = uid;
+        self.euid = uid;
+    }
+
+    pub fn set_gid(&mut self, gid: u16) {
+        self.gid = gid;
+        self.egid = gid;
+    }
+
+    pub fn set_supplementary_groups(&mut self, groups: &[u16]) -> Result<(), ()> {
+        if groups.len() > MAX_SUPPLEMENTARY_GROUPS {
+            return Err(());
+        }
+        let mut next = [0u16; MAX_SUPPLEMENTARY_GROUPS];
+        let mut idx = 0usize;
+        while idx < groups.len() {
+            next[idx] = groups[idx];
+            idx += 1;
+        }
+        self.supplementary_groups = next;
+        self.supplementary_group_count = groups.len();
+        Ok(())
+    }
+}
 
 /// Maximum argument pointers recorded for one exec request.
 pub const MAX_EXEC_ARGS: usize = 64;
@@ -564,6 +632,7 @@ pub struct ProcessControlBlock<const MAX_FD: usize> {
     pub address_space_root: u64,
     pub cpu_time: u128,
     pub security_label: SecurityLabel,
+    pub credentials: ProcessCredentials,
     pub thread_count: u16,
     pub exit_status: Option<ExitStatus>,
     pub files: ProcessFileTable<MAX_FD>,
@@ -592,6 +661,7 @@ impl<const MAX_FD: usize> ProcessControlBlock<MAX_FD> {
             address_space_root: 0,
             cpu_time: 0,
             security_label: SecurityLabel::public(),
+            credentials: ProcessCredentials::new(0, 0, 0, 0),
             thread_count: 0,
             exit_status: None,
             files: ProcessFileTable::new(),
@@ -602,6 +672,11 @@ impl<const MAX_FD: usize> ProcessControlBlock<MAX_FD> {
 
     pub fn update_security_label(&mut self, label: SecurityLabel) {
         self.security_label = label;
+    }
+
+    pub fn update_credentials(&mut self, credentials: Credentials) {
+        self.security_label = credentials.label();
+        self.credentials = ProcessCredentials::from_credentials(credentials);
     }
 
     pub fn increment_thread_count(&mut self) {

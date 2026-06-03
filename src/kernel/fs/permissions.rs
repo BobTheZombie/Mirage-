@@ -3,6 +3,7 @@
 pub const READ: u16 = 0o4;
 pub const WRITE: u16 = 0o2;
 pub const EXECUTE: u16 = 0o1;
+pub const MAX_SUPPLEMENTARY_GROUPS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessMode {
@@ -16,6 +17,8 @@ pub enum AccessMode {
 pub struct Credentials {
     pub uid: u16,
     pub gid: u16,
+    pub supplementary_groups: [u16; MAX_SUPPLEMENTARY_GROUPS],
+    pub supplementary_group_count: usize,
     pub is_kernel: bool,
 }
 
@@ -24,6 +27,8 @@ impl Credentials {
         Self {
             uid: 0,
             gid: 0,
+            supplementary_groups: [0; MAX_SUPPLEMENTARY_GROUPS],
+            supplementary_group_count: 0,
             is_kernel: true,
         }
     }
@@ -32,8 +37,39 @@ impl Credentials {
         Self {
             uid,
             gid,
+            supplementary_groups: [0; MAX_SUPPLEMENTARY_GROUPS],
+            supplementary_group_count: 0,
             is_kernel: false,
         }
+    }
+
+    pub const fn user_with_groups(
+        uid: u16,
+        gid: u16,
+        supplementary_groups: [u16; MAX_SUPPLEMENTARY_GROUPS],
+        supplementary_group_count: usize,
+    ) -> Self {
+        Self {
+            uid,
+            gid,
+            supplementary_groups,
+            supplementary_group_count,
+            is_kernel: false,
+        }
+    }
+
+    pub const fn is_member_of(self, gid: u16) -> bool {
+        if self.gid == gid {
+            return true;
+        }
+        let mut idx = 0usize;
+        while idx < self.supplementary_group_count {
+            if self.supplementary_groups[idx] == gid {
+                return true;
+            }
+            idx += 1;
+        }
+        false
     }
 }
 
@@ -84,7 +120,7 @@ impl Permissions {
 
         let shift = if credentials.uid == self.owner {
             6
-        } else if credentials.gid == self.group {
+        } else if credentials.is_member_of(self.group) {
             3
         } else {
             0

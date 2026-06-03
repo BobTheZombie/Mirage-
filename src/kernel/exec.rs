@@ -166,7 +166,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             .register_task(request.caller, request.requested_credentials)
             .map_err(KernelError::SecurityViolation)?;
         if let Some(pcb) = self.process_table[self.locate_process(request.caller)?].as_mut() {
-            pcb.update_security_label(request.requested_credentials.label());
+            pcb.update_credentials(request.requested_credentials);
         }
         Ok(())
     }
@@ -249,9 +249,26 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
     }
 
     fn current_credentials(&self, pid: ProcessId) -> KernelResult<Credentials> {
-        self.security
+        let domain_credentials = self
+            .security
             .credentials(pid)
-            .map_err(KernelError::SecurityViolation)
+            .map_err(KernelError::SecurityViolation)?;
+        let process_index = self.locate_process(pid)?;
+        let process_credentials = &self.process_table[process_index]
+            .as_ref()
+            .ok_or(KernelError::UnknownProcess)?
+            .credentials;
+        Ok(Credentials::with_unix_credentials(
+            domain_credentials.label(),
+            domain_credentials.capabilities(),
+            domain_credentials.isolation(),
+            process_credentials.uid,
+            process_credentials.euid,
+            process_credentials.gid,
+            process_credentials.egid,
+            process_credentials.supplementary_groups(),
+            process_credentials.supplementary_group_count(),
+        ))
     }
 
     fn create_process_task(
@@ -265,7 +282,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
         let slot = self.find_free_slot().ok_or(KernelError::ProcessTableFull)?;
         let pid = self.allocate_pid();
         let mut pcb = ProcessControlBlock::new(pid, entry_point, priority, parent);
-        pcb.update_security_label(creds.label());
+        pcb.update_credentials(creds);
         if let Some(parent_pid) = parent {
             pcb.files = self.inherit_process_file_table(parent_pid)?;
             let parent_index = self.locate_process(parent_pid)?;
@@ -337,7 +354,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
         let parent_address_space_root = parent_pcb.address_space_root;
         let mut pcb =
             ProcessControlBlock::new(pid, context.rip, request.priority, Some(request.caller));
-        pcb.update_security_label(creds.label());
+        pcb.update_credentials(creds);
         pcb.files = self.inherit_process_file_table(request.caller)?;
         pcb.process_group = parent_process_group;
         pcb.session = parent_session;
