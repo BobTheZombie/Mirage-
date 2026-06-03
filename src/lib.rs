@@ -1,17 +1,20 @@
 #![cfg_attr(not(test), no_std)]
 
-//! Mirage is a conceptual 64-bit, Rust-based kernel split into two cooperative layers.
+//! Mirage is a conceptual 64-bit, Rust-based GNU/Mirage kernel organized around a
+//! mechanism/policy split.
 //!
-//! * The **L1 core** (the _main kernel_) is responsible for CPU scheduling, process lifecycle
-//!   management and inter-process communication primitives that resemble a traditional
-//!   Unix-like microkernel.
-//! * The **L2 security core** (the _sub-kernel_) enforces isolation domains and authenticates
-//!   every task and message before they interact with the core services.
+//! * The **mechanism-only kernel layer** provides CPU scheduling primitives, process
+//!   lifecycle mechanics, message-based IPC, filesystem mechanisms and syscall entry
+//!   points without making POSIX or Linux conventions part of the internal architecture.
+//! * The **supervisor and security broker layers** own service policy, recovery,
+//!   signed-manifest validation and security adjudication through isolation domains,
+//!   credentials, capabilities and message authorization. Supervised driver services are
+//!   the preferred driver model.
 //!
-//! The code in this crate is designed to illustrate the internal structure of such a kernel
-//! without relying on the standard library. While the implementation is intentionally lean,
-//! it captures the essential mechanics one would expect from a Linux-like 64-bit kernel
-//! written in Rust.
+//! The code in this crate is designed to illustrate that GNU/Mirage structure without relying
+//! on the standard library. POSIX/GNU compatibility is documented as an external ABI surface;
+//! internally, QFS is treated as the native indexed object filesystem and boot assumptions are
+//! expressed as a signed boot module set rather than compatibility-driven startup conventions.
 
 #[cfg(feature = "qfs-std")]
 extern crate std;
