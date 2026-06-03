@@ -4,6 +4,9 @@ pub const IA32_EFER: u32 = 0xc000_0080;
 pub const IA32_STAR: u32 = 0xc000_0081;
 pub const IA32_LSTAR: u32 = 0xc000_0082;
 pub const IA32_FMASK: u32 = 0xc000_0084;
+pub const IA32_FS_BASE: u32 = 0xc000_0100;
+pub const IA32_GS_BASE: u32 = 0xc000_0101;
+pub const IA32_KERNEL_GS_BASE: u32 = 0xc000_0102;
 
 const EFER_SYSCALL_ENABLE: u64 = 1;
 const RFLAGS_INTERRUPT_ENABLE: u64 = 1 << 9;
@@ -32,6 +35,36 @@ pub unsafe fn write(msr: u32, value: u64) {
         in("edx") (value >> 32) as u32,
         options(nomem, nostack, preserves_flags),
     );
+}
+
+pub fn write_fs_base(base: u64) {
+    #[cfg(not(test))]
+    unsafe {
+        write(IA32_FS_BASE, base);
+    }
+
+    #[cfg(test)]
+    let _ = base;
+}
+
+pub fn write_gs_base(base: u64) {
+    #[cfg(not(test))]
+    unsafe {
+        write(IA32_GS_BASE, base);
+    }
+
+    #[cfg(test)]
+    let _ = base;
+}
+
+pub fn write_kernel_gs_base(base: u64) {
+    #[cfg(not(test))]
+    unsafe {
+        write(IA32_KERNEL_GS_BASE, base);
+    }
+
+    #[cfg(test)]
+    let _ = base;
 }
 
 /// Enable the `syscall` instruction and point it at the supplied kernel entry stub.

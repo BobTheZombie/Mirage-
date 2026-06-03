@@ -151,6 +151,10 @@ __mirage_interrupt_entry:
         ret
 
 4:
+        cmp qword ptr [rsp + 200], 0x5cca11
+        jne 5f
+        swapgs
+5:
         mov rax, [rsp + 0]
         mov rbx, [rsp + 8]
         mov rcx, [rsp + 16]
@@ -173,12 +177,15 @@ __mirage_interrupt_entry:
     .type __mirage_syscall_entry,@function
 __mirage_syscall_entry:
         swapgs
+        mov gs:[8], rsp
+        mov rsp, gs:[0]
+        cld
         push 0x23
-        push rsp
+        push qword ptr gs:[8]
         push r11
         push 0x1b
         push rcx
-        push 0
+        push 0x5cca11
         push 128
         jmp __mirage_interrupt_entry
 
@@ -230,6 +237,59 @@ __mirage_context_save:
 __mirage_context_restore:
         lea rax, [rip + __mirage_scheduler_rsp]
         mov [rax], rsp
+
+        mov rax, [rdi + 176]
+        mov rdx, rax
+        shr rdx, 32
+        mov ecx, 0xc0000100
+        wrmsr
+
+        mov rax, [rdi + 184]
+        mov rdx, rax
+        shr rdx, 32
+        mov ecx, 0xc0000102
+        wrmsr
+
+        mov rax, [rdi + 208]
+        and rax, 3
+        cmp rax, 3
+        jne 1f
+        cmp qword ptr [rdi + 200], 0x5cca11
+        jne 2f
+        mov rax, [rdi + 120]
+        mov rdx, rax
+        shl rdx, 16
+        sar rdx, 16
+        cmp rdx, rax
+        jne 2f
+        jmp 3f
+
+1:
+        mov rax, [rdi + 152]
+        push rax
+        mov rax, [rdi + 144]
+        push rax
+        mov rax, [rdi + 136]
+        push rax
+        mov rax, [rdi + 128]
+        push rax
+        mov rax, [rdi + 120]
+        push rax
+        jmp 4f
+
+2:
+        mov rax, [rdi + 152]
+        push rax
+        mov rax, [rdi + 144]
+        push rax
+        mov rax, [rdi + 136]
+        push rax
+        mov rax, [rdi + 128]
+        push rax
+        mov rax, [rdi + 120]
+        push rax
+        swapgs
+4:
         mov rbx, [rdi + 8]
         mov rcx, [rdi + 16]
         mov rdx, [rdi + 24]
@@ -243,19 +303,29 @@ __mirage_context_restore:
         mov r13, [rdi + 96]
         mov r14, [rdi + 104]
         mov r15, [rdi + 112]
-        mov rax, [rdi + 152]
-        push rax
-        mov rax, [rdi + 144]
-        push rax
-        mov rax, [rdi + 136]
-        push rax
-        mov rax, [rdi + 128]
-        push rax
-        mov rax, [rdi + 120]
-        push rax
         mov rax, [rdi + 0]
         mov rdi, [rdi + 40]
         iretq
+
+3:
+        mov rbx, [rdi + 8]
+        mov rdx, [rdi + 24]
+        mov rsi, [rdi + 32]
+        mov rbp, [rdi + 48]
+        mov r8,  [rdi + 56]
+        mov r9,  [rdi + 64]
+        mov r10, [rdi + 72]
+        mov r12, [rdi + 88]
+        mov r13, [rdi + 96]
+        mov r14, [rdi + 104]
+        mov r15, [rdi + 112]
+        mov rsp, [rdi + 144]
+        mov rcx, [rdi + 120]
+        mov r11, [rdi + 136]
+        mov rax, [rdi + 0]
+        mov rdi, [rdi + 40]
+        swapgs
+        sysretq
 
     .global __mirage_return_to_user_mode
     .type __mirage_return_to_user_mode,@function

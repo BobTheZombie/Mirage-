@@ -773,6 +773,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.core_states[idx] = CpuCoreState::new();
             idx += 1;
         }
+        idx = 0;
+        while idx < cpu::MAX_CORES {
+            self.core_states[idx].set_kernel_stack_top(x86_64::kernel_stack_top(idx));
+            idx += 1;
+        }
         if cpu::MAX_CORES > 0 {
             self.core_states[0].online();
         }
@@ -3729,6 +3734,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 return;
             }
 
+            self.core_states[core_index].set_kernel_stack_top(x86_64::kernel_stack_top(core_index));
             self.core_states[core_index].start_thread(scheduled.thread);
 
             let mut terminated = false;
