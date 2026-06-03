@@ -11,6 +11,7 @@ pub enum CapabilityObject {
     PciDevice(u64),
     MmioRegion { base: u64, length: u64 },
     DmaRegion(u64),
+    MemoryObject(u64),
     IrqLine(u16),
     IpcEndpoint(u64),
 }
