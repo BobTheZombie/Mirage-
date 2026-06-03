@@ -208,18 +208,107 @@ impl FileDescriptionId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PipeId(usize);
+
+impl PipeId {
+    pub const fn new(raw: usize) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PipeDirection {
+    Read,
+    Write,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PipeEndpoint {
+    id: PipeId,
+    direction: PipeDirection,
+}
+
+impl PipeEndpoint {
+    pub const fn new(id: PipeId, direction: PipeDirection) -> Self {
+        Self { id, direction }
+    }
+
+    pub const fn id(self) -> PipeId {
+        self.id
+    }
+
+    pub const fn direction(self) -> PipeDirection {
+        self.direction
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventFdId(usize);
+
+impl EventFdId {
+    pub const fn new(raw: usize) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceHandle {
+    id: crate::kernel::device::DeviceId,
+}
+
+impl DeviceHandle {
+    pub const fn new(id: crate::kernel::device::DeviceId) -> Self {
+        Self { id }
+    }
+
+    pub const fn id(self) -> crate::kernel::device::DeviceId {
+        self.id
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DescriptorObject {
+    Regular(File),
+    Pipe(PipeEndpoint),
+    EventFd(EventFdId),
+    Device(DeviceHandle),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenFileDescription {
-    file: File,
+    object: DescriptorObject,
     ref_count: u16,
 }
 
 impl OpenFileDescription {
     pub const fn new(file: File) -> Self {
-        Self { file, ref_count: 1 }
+        Self::new_object(DescriptorObject::Regular(file))
     }
 
-    pub const fn file(self) -> File {
-        self.file
+    pub const fn new_object(object: DescriptorObject) -> Self {
+        Self {
+            object,
+            ref_count: 1,
+        }
+    }
+
+    pub const fn file(self) -> Option<File> {
+        match self.object {
+            DescriptorObject::Regular(file) => Some(file),
+            _ => None,
+        }
+    }
+
+    pub const fn object(self) -> DescriptorObject {
+        self.object
     }
 
     pub const fn ref_count(self) -> u16 {
@@ -261,10 +350,17 @@ impl<const MAX: usize> FileTable<MAX> {
     }
 
     pub fn insert(&mut self, file: File) -> Result<FileDescriptionId, FileTableError> {
+        self.insert_object(DescriptorObject::Regular(file))
+    }
+
+    pub fn insert_object(
+        &mut self,
+        object: DescriptorObject,
+    ) -> Result<FileDescriptionId, FileTableError> {
         let mut idx = 0usize;
         while idx < MAX {
             if self.descriptions[idx].is_none() {
-                self.descriptions[idx] = Some(OpenFileDescription::new(file));
+                self.descriptions[idx] = Some(OpenFileDescription::new_object(object));
                 return Ok(FileDescriptionId::new(idx));
             }
             idx += 1;
@@ -276,7 +372,15 @@ impl<const MAX: usize> FileTable<MAX> {
         self.descriptions
             .get(id.raw())
             .and_then(|entry| *entry)
-            .map(OpenFileDescription::file)
+            .and_then(OpenFileDescription::file)
+            .ok_or(FileTableError::InvalidDescriptor)
+    }
+
+    pub fn get_object(&self, id: FileDescriptionId) -> Result<DescriptorObject, FileTableError> {
+        self.descriptions
+            .get(id.raw())
+            .and_then(|entry| *entry)
+            .map(OpenFileDescription::object)
             .ok_or(FileTableError::InvalidDescriptor)
     }
 
@@ -284,7 +388,10 @@ impl<const MAX: usize> FileTable<MAX> {
         self.descriptions
             .get_mut(id.raw())
             .and_then(Option::as_mut)
-            .map(|description| &mut description.file)
+            .and_then(|description| match &mut description.object {
+                DescriptorObject::Regular(file) => Some(file),
+                _ => None,
+            })
             .ok_or(FileTableError::InvalidDescriptor)
     }
 
@@ -308,14 +415,17 @@ impl<const MAX: usize> FileTable<MAX> {
 
     /// Drops one descriptor reference. Returns the underlying file only when
     /// this was the last reference and the VFS should close the description.
-    pub fn close(&mut self, id: FileDescriptionId) -> Result<Option<File>, FileTableError> {
+    pub fn close(
+        &mut self,
+        id: FileDescriptionId,
+    ) -> Result<Option<DescriptorObject>, FileTableError> {
         let slot = self
             .descriptions
             .get_mut(id.raw())
             .ok_or(FileTableError::InvalidDescriptor)?;
         let description = slot.as_mut().ok_or(FileTableError::InvalidDescriptor)?;
         if description.decrement_ref_count() == 0 {
-            Ok(slot.take().map(OpenFileDescription::file))
+            Ok(slot.take().map(OpenFileDescription::object))
         } else {
             Ok(None)
         }
