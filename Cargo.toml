@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/mirage-block"]
+resolver = "2"
+
 [package]
 name = "mirage"
 version = "0.1.0"
