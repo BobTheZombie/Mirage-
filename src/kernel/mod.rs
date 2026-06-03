@@ -56,8 +56,8 @@ use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId, ThreadStat
 use crate::kernel::time::KERNEL_TIME;
 use crate::kernel::timer::{TimerError, TimerManager, MAX_PROCESS_TIMERS, MAX_SLEEP_ENTRIES};
 use crate::subkernel::{
-    CapabilityObject, CapabilityRight, Credentials, DeviceSecurity, IsolationError, SecurityClass,
-    SecurityKernel,
+    CapabilityId, CapabilityObject, CapabilityRight, CapabilityRights, Credentials, DeviceSecurity,
+    IsolationError, SecurityClass, SecurityKernel,
 };
 use core::cmp::min;
 use core::ptr::NonNull;
@@ -307,6 +307,12 @@ pub enum KernelError {
 
 pub type KernelResult<T> = core::result::Result<T, KernelError>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessExitReport {
+    pub pid: ProcessId,
+    pub status: ExitStatus,
+}
+
 const EMPTY_DEVICE_DESCRIPTOR: DeviceDescriptor = DeviceDescriptor::new(
     DeviceId::new(0),
     DeviceKind::SerialConsole,
@@ -474,11 +480,15 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.exit_process(pid, ExitStatus::signaled(SIGTERM));
     }
 
-    pub fn exit_process(&mut self, pid: ProcessId, status: ExitStatus) {
+    pub fn exit_process(
+        &mut self,
+        pid: ProcessId,
+        status: ExitStatus,
+    ) -> Option<ProcessExitReport> {
         if let Ok(index) = self.locate_process(pid) {
             if let Some(pcb) = self.process_table[index].as_ref() {
                 if pcb.state == ProcessState::Zombie {
-                    return;
+                    return None;
                 }
             }
             if let Some(mut pcb) = self.process_table[index].take() {
@@ -491,11 +501,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.remove_threads_for_process(pid);
             memory::release_process(pid);
             self.security.revoke_task(pid);
-            self.service_registry.revoke_owner(pid);
             self.timers.release_process(pid);
             self.futexes.remove_owner(self.futex_owner_for_process(pid));
             let _ = self.queue_signal_to_parent(pid, SIGCHLD);
+            return Some(ProcessExitReport { pid, status });
         }
+        None
     }
 
     pub fn terminate_thread(&mut self, thread: ThreadId) {
@@ -539,6 +550,27 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
     pub fn revoke_task(&mut self, pid: ProcessId) {
         self.security.revoke_task(pid);
+    }
+
+    pub fn grant_task_capability(
+        &mut self,
+        owner: ProcessId,
+        object: CapabilityObject,
+        rights: CapabilityRights,
+    ) -> KernelResult<CapabilityId> {
+        self.security
+            .grant_capability(owner, object, rights)
+            .map_err(KernelError::SecurityViolation)
+    }
+
+    pub fn revoke_task_capability(&mut self, capability: CapabilityId) -> KernelResult<()> {
+        self.security
+            .revoke_capability(capability)
+            .map_err(KernelError::SecurityViolation)
+    }
+
+    pub fn revoke_service_owner(&mut self, owner: ProcessId) {
+        self.service_registry.revoke_owner(owner);
     }
 
     pub fn check_service_control_capability(&self, pid: ProcessId) -> KernelResult<()> {
@@ -4256,7 +4288,7 @@ mod tests {
     }
 
     #[test]
-    fn service_registry_revokes_registration_and_claims_on_exit() {
+    fn kernel_exit_reports_without_registry_policy_cleanup() {
         let mut kernel = boot_kernel();
         let l2 = kernel.spawn_initial_process(Credentials::system()).unwrap();
         let networkd = kernel
@@ -4278,14 +4310,17 @@ mod tests {
         kernel
             .claim_service_device(networkd, RegistryServiceId::Networkd, DeviceId::new(6))
             .unwrap();
+
+        let exit = kernel
+            .exit_process(networkd, ExitStatus::exited(0))
+            .unwrap();
+
+        assert_eq!(exit.pid, networkd);
+        assert_eq!(exit.status.raw(), ExitStatus::exited(0).raw());
         assert_eq!(
             kernel.service_owner(RegistryServiceId::Networkd),
             Some(networkd)
         );
-
-        kernel.exit_process(networkd, ExitStatus::exited(0));
-
-        assert_eq!(kernel.service_owner(RegistryServiceId::Networkd), None);
         assert!(matches!(
             kernel.device_write(networkd, DeviceId::new(6), b"ping"),
             Err(KernelError::SecurityViolation(IsolationError::UnknownTask))

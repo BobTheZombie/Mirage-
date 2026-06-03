@@ -6,13 +6,17 @@
 //! fixed-size manifest and startup progress is captured in a same-capacity
 //! report.
 
+use crate::kernel::device::DeviceId;
 use crate::kernel::exec::SpawnTaskRequest;
 use crate::kernel::process::{
     ExecServiceDaemon, ExecSignatureMetadata, ProcessId, ProcessPriority,
 };
 use crate::kernel::services::registry::ServiceId as RegistryServiceId;
-use crate::kernel::{Kernel, KernelError};
-use crate::subkernel::{CapabilitySet, Credentials, IsolationError, IsolationLevel, SecurityLabel};
+use crate::kernel::{Kernel, KernelError, ProcessExitReport};
+use crate::subkernel::{
+    CapabilityId, CapabilityObject, CapabilityRights, CapabilitySet, Credentials, IsolationError,
+    IsolationLevel, SecurityLabel,
+};
 
 /// Number of services in the built-in L1 startup manifest.
 pub const MAX_STARTUP_SERVICES: usize = 4;
@@ -107,13 +111,91 @@ impl<const CAP: usize> ServiceManifest<CAP> {
     }
 }
 
-/// Per-service startup outcome recorded by the L1 supervisor.
+/// Maximum number of supervisor-managed capabilities recorded per service.
+pub const MAX_SERVICE_CAPABILITIES: usize = 8;
+
+/// Maximum number of supervisor-managed device claims recorded per service.
+pub const MAX_SERVICE_DEVICE_CLAIMS: usize = 4;
+
+/// Maximum number of supervisor-managed IPC endpoints recorded per service.
+pub const MAX_SERVICE_ENDPOINTS: usize = 2;
+
+/// Policy the supervisor applies after a managed service exits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestartPolicy {
+    Never,
+    Always,
+}
+
+/// Capability assignment owned by a supervisor runtime record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServiceCapabilityAssignment {
+    pub object: CapabilityObject,
+    pub rights: CapabilityRights,
+    pub id: Option<CapabilityId>,
+}
+
+impl ServiceCapabilityAssignment {
+    pub const fn new(object: CapabilityObject, rights: CapabilityRights) -> Self {
+        Self {
+            object,
+            rights,
+            id: None,
+        }
+    }
+
+    const fn assigned(self, id: CapabilityId) -> Self {
+        Self {
+            object: self.object,
+            rights: self.rights,
+            id: Some(id),
+        }
+    }
+
+    const fn unassigned(self) -> Self {
+        Self {
+            object: self.object,
+            rights: self.rights,
+            id: None,
+        }
+    }
+}
+
+/// Device claim that must be released before restart and restored afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServiceDeviceClaim {
+    pub service: RegistryServiceId,
+    pub device: DeviceId,
+}
+
+/// IPC endpoint registration that must be restored after restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServiceEndpointClaim {
+    pub service: RegistryServiceId,
+}
+
+/// Result of supervisor crash/exit handling for one kernel exit report.
+#[derive(Clone, Copy, Debug)]
+pub enum ServiceRecoveryState {
+    NotSupervised,
+    Restarted(ProcessId),
+    Stopped,
+    Failed(KernelError),
+}
+
+/// Per-service startup and recovery state recorded by the L1 supervisor.
 #[derive(Clone, Copy, Debug)]
 pub struct ServiceRuntime {
     pub descriptor: ServiceDescriptor,
     pub state: StartupState,
     pub pid: Option<ProcessId>,
+    pub assigned_capabilities: [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES],
+    pub claimed_devices: [Option<ServiceDeviceClaim>; MAX_SERVICE_DEVICE_CLAIMS],
+    pub claimed_endpoints: [Option<ServiceEndpointClaim>; MAX_SERVICE_ENDPOINTS],
+    pub restart_policy: RestartPolicy,
+    pub last_exit_status: Option<crate::kernel::process::ExitStatus>,
     pub failure: Option<KernelError>,
+    pub restart_generation: u64,
 }
 
 impl ServiceRuntime {
@@ -122,8 +204,49 @@ impl ServiceRuntime {
             descriptor,
             state: StartupState::Pending,
             pid: None,
+            assigned_capabilities: [None; MAX_SERVICE_CAPABILITIES],
+            claimed_devices: [None; MAX_SERVICE_DEVICE_CLAIMS],
+            claimed_endpoints: [None; MAX_SERVICE_ENDPOINTS],
+            restart_policy: RestartPolicy::Always,
+            last_exit_status: None,
             failure: None,
+            restart_generation: 0,
         }
+    }
+
+    fn with_default_capability_specs(mut self) -> Self {
+        self.assigned_capabilities = default_capability_specs(self.descriptor);
+        self
+    }
+
+    fn record_device_claim(&mut self, service: RegistryServiceId, device: DeviceId) -> bool {
+        let mut idx = 0usize;
+        while idx < MAX_SERVICE_DEVICE_CLAIMS {
+            if self.claimed_devices[idx] == Some(ServiceDeviceClaim { service, device }) {
+                return true;
+            }
+            if self.claimed_devices[idx].is_none() {
+                self.claimed_devices[idx] = Some(ServiceDeviceClaim { service, device });
+                return true;
+            }
+            idx += 1;
+        }
+        false
+    }
+
+    fn record_endpoint_claim(&mut self, service: RegistryServiceId) -> bool {
+        let mut idx = 0usize;
+        while idx < MAX_SERVICE_ENDPOINTS {
+            if self.claimed_endpoints[idx] == Some(ServiceEndpointClaim { service }) {
+                return true;
+            }
+            if self.claimed_endpoints[idx].is_none() {
+                self.claimed_endpoints[idx] = Some(ServiceEndpointClaim { service });
+                return true;
+            }
+            idx += 1;
+        }
+        false
     }
 }
 
@@ -147,7 +270,8 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
         let mut idx = 0usize;
         while idx < manifest.len() {
             if let Some(descriptor) = manifest.descriptor(idx) {
-                report.records[idx] = Some(ServiceRuntime::pending(descriptor));
+                report.records[idx] =
+                    Some(ServiceRuntime::pending(descriptor).with_default_capability_specs());
                 report.len += 1;
             }
             idx += 1;
@@ -173,6 +297,84 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
 
     pub fn pid(&self, service: ServiceId) -> Option<ProcessId> {
         self.find(service).and_then(|record| record.pid)
+    }
+
+    pub fn generation(&self, service: ServiceId) -> Option<u64> {
+        self.find(service).map(|record| record.restart_generation)
+    }
+
+    pub fn last_exit_status(
+        &self,
+        service: ServiceId,
+    ) -> Option<crate::kernel::process::ExitStatus> {
+        self.find(service)
+            .and_then(|record| record.last_exit_status)
+    }
+
+    pub fn record_device_claim(
+        &mut self,
+        service: ServiceId,
+        registry_service: RegistryServiceId,
+        device: DeviceId,
+    ) -> bool {
+        if let Some(index) = self.find_index(service) {
+            if let Some(mut record) = self.records[index] {
+                let recorded = record.record_device_claim(registry_service, device);
+                self.records[index] = Some(record);
+                return recorded;
+            }
+        }
+        false
+    }
+
+    pub fn record_endpoint_claim(
+        &mut self,
+        service: ServiceId,
+        registry_service: RegistryServiceId,
+    ) -> bool {
+        if let Some(index) = self.find_index(service) {
+            if let Some(mut record) = self.records[index] {
+                let recorded = record.record_endpoint_claim(registry_service);
+                self.records[index] = Some(record);
+                return recorded;
+            }
+        }
+        false
+    }
+
+    pub fn handle_process_exit<const NPROC: usize, const MSG_DEPTH: usize>(
+        &mut self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        report: ProcessExitReport,
+    ) -> ServiceRecoveryState {
+        let Some(index) = self.find_pid_index(report.pid) else {
+            return ServiceRecoveryState::NotSupervised;
+        };
+
+        self.revoke_record_capabilities(kernel, index);
+        kernel.revoke_task(report.pid);
+        kernel.revoke_service_owner(report.pid);
+
+        if let Some(mut record) = self.records[index] {
+            record.pid = None;
+            record.state = StartupState::Failed;
+            record.last_exit_status = Some(report.status);
+            record.failure = None;
+            self.records[index] = Some(record);
+        }
+
+        let record = self.records[index].unwrap();
+        if record.restart_policy == RestartPolicy::Never {
+            return ServiceRecoveryState::Stopped;
+        }
+
+        match self.respawn_record(kernel, index) {
+            Ok(pid) => ServiceRecoveryState::Restarted(pid),
+            Err(error) => {
+                self.set_failed(index, error);
+                ServiceRecoveryState::Failed(error)
+            }
+        }
     }
 
     pub fn all_running(&self) -> bool {
@@ -220,6 +422,155 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
 
     fn dependency_pid(&self, service: ServiceId) -> Option<ProcessId> {
         self.pid(service)
+    }
+
+    fn find_index(&self, service: ServiceId) -> Option<usize> {
+        let mut idx = 0usize;
+        while idx < self.len {
+            if let Some(record) = self.records[idx] {
+                if record.descriptor.id == service {
+                    return Some(idx);
+                }
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    fn find_pid_index(&self, pid: ProcessId) -> Option<usize> {
+        let mut idx = 0usize;
+        while idx < self.len {
+            if self.records[idx]
+                .and_then(|record| record.pid)
+                .map(|owner| owner == pid)
+                .unwrap_or(false)
+            {
+                return Some(idx);
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    fn parent_for(&self, descriptor: ServiceDescriptor) -> Option<ProcessId> {
+        let mut dep_idx = 0usize;
+        while dep_idx < MAX_SERVICE_DEPENDENCIES {
+            if let Some(dependency) = descriptor.dependencies[dep_idx] {
+                if let Some(pid) = self.dependency_pid(dependency) {
+                    return Some(pid);
+                }
+            }
+            dep_idx += 1;
+        }
+        None
+    }
+
+    fn revoke_record_capabilities<const NPROC: usize, const MSG_DEPTH: usize>(
+        &mut self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        index: usize,
+    ) {
+        if let Some(mut record) = self.records[index] {
+            let mut cap_idx = 0usize;
+            while cap_idx < MAX_SERVICE_CAPABILITIES {
+                if let Some(capability) = record.assigned_capabilities[cap_idx] {
+                    if let Some(id) = capability.id {
+                        let _ = kernel.revoke_task_capability(id);
+                    }
+                    record.assigned_capabilities[cap_idx] = Some(capability.unassigned());
+                }
+                cap_idx += 1;
+            }
+            self.records[index] = Some(record);
+        }
+    }
+
+    fn regrant_record_capabilities<const NPROC: usize, const MSG_DEPTH: usize>(
+        &mut self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        index: usize,
+        pid: ProcessId,
+    ) -> Result<(), KernelError> {
+        if let Some(mut record) = self.records[index] {
+            let mut cap_idx = 0usize;
+            while cap_idx < MAX_SERVICE_CAPABILITIES {
+                if let Some(capability) = record.assigned_capabilities[cap_idx] {
+                    let id =
+                        kernel.grant_task_capability(pid, capability.object, capability.rights)?;
+                    record.assigned_capabilities[cap_idx] = Some(capability.assigned(id));
+                }
+                cap_idx += 1;
+            }
+            self.records[index] = Some(record);
+        }
+        Ok(())
+    }
+
+    fn restore_record_claims<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        index: usize,
+        pid: ProcessId,
+        authorizer: Option<ProcessId>,
+    ) -> Result<(), KernelError> {
+        if let Some(record) = self.records[index] {
+            let mut endpoint_idx = 0usize;
+            while endpoint_idx < MAX_SERVICE_ENDPOINTS {
+                if let Some(endpoint) = record.claimed_endpoints[endpoint_idx] {
+                    if let Some(authorizer) = authorizer {
+                        kernel.register_endpoint(authorizer, endpoint.service, pid)?;
+                    }
+                }
+                endpoint_idx += 1;
+            }
+
+            let mut device_idx = 0usize;
+            while device_idx < MAX_SERVICE_DEVICE_CLAIMS {
+                if let Some(claim) = record.claimed_devices[device_idx] {
+                    kernel.claim_service_device(pid, claim.service, claim.device)?;
+                }
+                device_idx += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn respawn_record<const NPROC: usize, const MSG_DEPTH: usize>(
+        &mut self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        index: usize,
+    ) -> Result<ProcessId, KernelError> {
+        let record = self.records[index].ok_or(KernelError::InvalidArgument)?;
+        if !service_manifest_signature_valid(record.descriptor) {
+            return Err(KernelError::SecurityViolation(
+                IsolationError::PolicyViolation,
+            ));
+        }
+        match dependencies_ready(record.descriptor, self) {
+            DependencyStatus::Ready(_) => {}
+            DependencyStatus::Waiting | DependencyStatus::Failed => {
+                return Err(KernelError::InvalidArgument)
+            }
+        }
+        let parent = self.parent_for(record.descriptor);
+        let pid = kernel.spawn_task(SpawnTaskRequest {
+            parent,
+            entry_point: record.descriptor.entry_point,
+            priority: record.descriptor.priority,
+            credentials: record.descriptor.credentials,
+        })?;
+
+        self.regrant_record_capabilities(kernel, index, pid)?;
+        self.restore_record_claims(kernel, index, pid, parent)?;
+
+        if let Some(mut updated) = self.records[index] {
+            updated.pid = Some(pid);
+            updated.state = StartupState::Running;
+            updated.failure = None;
+            updated.restart_generation = updated.restart_generation.wrapping_add(1);
+            self.records[index] = Some(updated);
+        }
+        Ok(pid)
     }
 
     fn find(&self, service: ServiceId) -> Option<ServiceRuntime> {
@@ -320,6 +671,67 @@ pub const DEFAULT_STARTUP_MANIFEST: ServiceManifest<MAX_STARTUP_SERVICES> = Serv
     ],
     MAX_STARTUP_SERVICES,
 );
+
+fn default_capability_specs(
+    descriptor: ServiceDescriptor,
+) -> [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES] {
+    let mut capabilities = [None; MAX_SERVICE_CAPABILITIES];
+    let mut idx = 0usize;
+    let caps = descriptor.credentials.capabilities();
+
+    if caps.allows_ipc() {
+        capabilities[idx] = Some(ServiceCapabilityAssignment::new(
+            CapabilityObject::IpcEndpoint(ProcessId::new(u64::MAX)),
+            CapabilityRights::ipc_endpoint(),
+        ));
+        idx += 1;
+    }
+
+    if caps.allows_io() {
+        capabilities[idx] = Some(ServiceCapabilityAssignment::new(
+            CapabilityObject::PciDevice(u64::MAX),
+            CapabilityRights::io(),
+        ));
+        idx += 1;
+        capabilities[idx] = Some(ServiceCapabilityAssignment::new(
+            CapabilityObject::DmaRegion {
+                base: 0,
+                length: u64::MAX,
+            },
+            CapabilityRights::io(),
+        ));
+        idx += 1;
+        capabilities[idx] = Some(ServiceCapabilityAssignment::new(
+            CapabilityObject::IrqLine(u16::MAX),
+            CapabilityRights::io(),
+        ));
+        idx += 1;
+    }
+
+    if caps.allows_kernel_access() {
+        capabilities[idx] = Some(ServiceCapabilityAssignment::new(
+            CapabilityObject::ServiceControl,
+            CapabilityRights::service_control(),
+        ));
+        idx += 1;
+        capabilities[idx] = Some(ServiceCapabilityAssignment::new(
+            CapabilityObject::ModuleLoad,
+            CapabilityRights::service_control(),
+        ));
+        idx += 1;
+        capabilities[idx] = Some(ServiceCapabilityAssignment::new(
+            CapabilityObject::ProcessHandle(ProcessId::new(u64::MAX)),
+            CapabilityRights::process_control(),
+        ));
+        idx += 1;
+        capabilities[idx] = Some(ServiceCapabilityAssignment::new(
+            CapabilityObject::MemoryObject(u64::MAX),
+            CapabilityRights::memory(),
+        ));
+    }
+
+    capabilities
+}
 
 /// Validate static service-daemon signature metadata embedded in the L1 startup
 /// manifest. This models the signed-manifest gate for displayd, networkd,
@@ -449,9 +861,21 @@ impl Supervisor {
                                 match kernel.spawn_task(request) {
                                     Ok(pid) => {
                                         report.set_running(idx, pid);
+                                        if let Err(error) =
+                                            report.regrant_record_capabilities(kernel, idx, pid)
+                                        {
+                                            report.set_failed(idx, error);
+                                            made_progress = true;
+                                            idx += 1;
+                                            continue;
+                                        }
                                         if let Some(registry_service) =
                                             startup_service_to_registry(record.descriptor.id)
                                         {
+                                            report.record_endpoint_claim(
+                                                record.descriptor.id,
+                                                registry_service,
+                                            );
                                             if let Some(authorizer) = parent {
                                                 let _ = kernel.register_endpoint(
                                                     authorizer,
@@ -514,6 +938,52 @@ pub type DefaultServiceStartupReport = ServiceStartupReport<MAX_STARTUP_SERVICES
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovers_supervised_service_from_kernel_exit_report() {
+        let mut kernel = Kernel::<8, 4>::new();
+        kernel.bootstrap();
+        let supervisor = Supervisor::new();
+        let mut report = supervisor.bootstrap_services(&mut kernel);
+        let old_networkd = report.pid(ServiceId::Networkd).unwrap();
+
+        report.record_device_claim(
+            ServiceId::Networkd,
+            RegistryServiceId::Networkd,
+            DeviceId::new(6),
+        );
+        kernel
+            .claim_service_device(old_networkd, RegistryServiceId::Networkd, DeviceId::new(6))
+            .unwrap();
+
+        let exit = kernel
+            .exit_process(
+                old_networkd,
+                crate::kernel::process::ExitStatus::signaled(11),
+            )
+            .unwrap();
+        let recovery = report.handle_process_exit(&mut kernel, exit);
+
+        let ServiceRecoveryState::Restarted(new_networkd) = recovery else {
+            panic!("networkd was not restarted: {:?}", recovery);
+        };
+        assert_ne!(new_networkd, old_networkd);
+        assert_eq!(report.pid(ServiceId::Networkd), Some(new_networkd));
+        assert_eq!(report.generation(ServiceId::Networkd), Some(1));
+        assert_eq!(
+            report
+                .last_exit_status(ServiceId::Networkd)
+                .map(|status| status.raw()),
+            Some(crate::kernel::process::ExitStatus::signaled(11).raw())
+        );
+        assert_eq!(
+            kernel.service_owner(RegistryServiceId::Networkd),
+            Some(new_networkd)
+        );
+        assert!(kernel
+            .device_write(new_networkd, DeviceId::new(6), b"ping")
+            .is_ok());
+    }
 
     #[test]
     fn default_manifest_blocks_device_daemons_until_l2_runs() {
