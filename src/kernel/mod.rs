@@ -3261,6 +3261,15 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 return;
             }
 
+            let address_space_root = self.process_table[process_index]
+                .as_ref()
+                .map(|pcb| pcb.address_space_root)
+                .unwrap_or(0);
+            if x86_64::paging::switch_address_space(address_space_root).is_none() {
+                self.handle_isolation_fault(scheduled.process, IsolationError::PolicyViolation);
+                return;
+            }
+
             self.core_states[core_index].start_thread(scheduled.thread);
 
             let mut terminated = false;
@@ -3847,7 +3856,15 @@ fn validate_tls_base(base: u64) -> KernelResult<()> {
     }
 }
 
+fn active_user_root() -> u64 {
+    x86_64::paging::current_address_space_root()
+}
+
 fn validate_user_range(ptr: u64, len: usize) -> KernelResult<()> {
+    validate_user_access(ptr, len, false)
+}
+
+fn validate_user_access(ptr: u64, len: usize, write: bool) -> KernelResult<()> {
     if len == 0 {
         return Ok(());
     }
@@ -3855,26 +3872,44 @@ fn validate_user_range(ptr: u64, len: usize) -> KernelResult<()> {
         return Err(KernelError::InvalidPointer);
     }
     ptr.checked_add(len as u64)
-        .filter(|end| *end >= ptr)
-        .map(|_| ())
+        .filter(|end| *end >= ptr && *end <= USER_CANONICAL_LIMIT)
+        .ok_or(KernelError::InvalidPointer)?;
+    if !x86_64::paging::installed() || active_user_root() == 0 {
+        return Ok(());
+    }
+    if !memory::validate_user_range(active_user_root(), ptr, len, write) {
+        return Err(KernelError::InvalidPointer);
+    }
+    Ok(())
+}
+
+fn user_translated_ptr(ptr: u64, len: usize, write: bool) -> KernelResult<NonNull<u8>> {
+    validate_user_access(ptr, len, write)?;
+    if len == 0 {
+        return Ok(NonNull::dangling());
+    }
+    if !x86_64::paging::installed() || active_user_root() == 0 {
+        return NonNull::new(ptr as *mut u8).ok_or(KernelError::InvalidPointer);
+    }
+    memory::active_translated_slice(active_user_root(), ptr, len, write)
         .ok_or(KernelError::InvalidPointer)
 }
 
 fn user_slice(ptr: u64, len: usize) -> KernelResult<&'static [u8]> {
-    validate_user_range(ptr, len)?;
+    let translated = user_translated_ptr(ptr, len, false)?;
     if len == 0 {
         Ok(&[])
     } else {
-        Ok(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) })
+        Ok(unsafe { core::slice::from_raw_parts(translated.as_ptr(), len) })
     }
 }
 
 fn user_slice_mut(ptr: u64, len: usize) -> KernelResult<&'static mut [u8]> {
-    validate_user_range(ptr, len)?;
+    let translated = user_translated_ptr(ptr, len, true)?;
     if len == 0 {
         Ok(&mut [])
     } else {
-        Ok(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len) })
+        Ok(unsafe { core::slice::from_raw_parts_mut(translated.as_ptr(), len) })
     }
 }
 
@@ -3882,49 +3917,75 @@ fn user_slice_typed<T>(ptr: u64, count: usize) -> KernelResult<&'static [T]> {
     let byte_len = count
         .checked_mul(core::mem::size_of::<T>())
         .ok_or(KernelError::InvalidPointer)?;
-    validate_user_range(ptr, byte_len)?;
     if count == 0 {
-        Ok(&[])
-    } else if !(ptr as *const T).is_aligned() {
-        Err(KernelError::InvalidPointer)
-    } else {
-        Ok(unsafe { core::slice::from_raw_parts(ptr as *const T, count) })
+        return Ok(&[]);
     }
+    if !(ptr as *const T).is_aligned() {
+        return Err(KernelError::InvalidPointer);
+    }
+    let translated = user_translated_ptr(ptr, byte_len, false)?;
+    if !(translated.as_ptr() as *const T).is_aligned() {
+        return Err(KernelError::InvalidPointer);
+    }
+    Ok(unsafe { core::slice::from_raw_parts(translated.as_ptr() as *const T, count) })
 }
 
 fn user_slice_mut_typed<T>(ptr: u64, count: usize) -> KernelResult<&'static mut [T]> {
     let byte_len = count
         .checked_mul(core::mem::size_of::<T>())
         .ok_or(KernelError::InvalidPointer)?;
-    validate_user_range(ptr, byte_len)?;
     if count == 0 {
-        Ok(&mut [])
-    } else if !(ptr as *mut T).is_aligned() {
-        Err(KernelError::InvalidPointer)
-    } else {
-        Ok(unsafe { core::slice::from_raw_parts_mut(ptr as *mut T, count) })
+        return Ok(&mut []);
     }
-}
-
-fn user_out_ptr<T>(ptr: u64) -> KernelResult<*mut T> {
-    validate_user_range(ptr, core::mem::size_of::<T>())?;
     if !(ptr as *mut T).is_aligned() {
         return Err(KernelError::InvalidPointer);
     }
-    Ok(ptr as *mut T)
+    let translated = user_translated_ptr(ptr, byte_len, true)?;
+    if !(translated.as_ptr() as *mut T).is_aligned() {
+        return Err(KernelError::InvalidPointer);
+    }
+    Ok(unsafe { core::slice::from_raw_parts_mut(translated.as_ptr() as *mut T, count) })
+}
+
+fn user_out_ptr<T>(ptr: u64) -> KernelResult<*mut T> {
+    if !(ptr as *mut T).is_aligned() {
+        return Err(KernelError::InvalidPointer);
+    }
+    let translated = user_translated_ptr(ptr, core::mem::size_of::<T>(), true)?;
+    if !(translated.as_ptr() as *mut T).is_aligned() {
+        return Err(KernelError::InvalidPointer);
+    }
+    Ok(translated.as_ptr() as *mut T)
 }
 
 fn read_user_value<T: Copy>(ptr: u64) -> KernelResult<T> {
-    validate_user_range(ptr, core::mem::size_of::<T>())?;
     if !(ptr as *const T).is_aligned() {
         return Err(KernelError::InvalidPointer);
     }
-    Ok(unsafe { (ptr as *const T).read() })
+    let mut value = core::mem::MaybeUninit::<T>::uninit();
+    let out = unsafe {
+        core::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
+    };
+    if !x86_64::paging::installed() || active_user_root() == 0 {
+        unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, out.as_mut_ptr(), out.len()) };
+    } else if !memory::copy_from_user(active_user_root(), ptr, out) {
+        return Err(KernelError::InvalidPointer);
+    }
+    Ok(unsafe { value.assume_init() })
 }
 
 fn write_user_value<T: Copy>(ptr: u64, value: T) -> KernelResult<()> {
-    let out = user_out_ptr::<T>(ptr)?;
-    unsafe { out.write(value) };
+    if !(ptr as *const T).is_aligned() {
+        return Err(KernelError::InvalidPointer);
+    }
+    let input = unsafe {
+        core::slice::from_raw_parts((&value as *const T) as *const u8, core::mem::size_of::<T>())
+    };
+    if !x86_64::paging::installed() || active_user_root() == 0 {
+        unsafe { core::ptr::copy_nonoverlapping(input.as_ptr(), ptr as *mut u8, input.len()) };
+    } else if !memory::copy_to_user(active_user_root(), ptr, input) {
+        return Err(KernelError::InvalidPointer);
+    }
     Ok(())
 }
 
@@ -3979,11 +4040,15 @@ fn map_timer_error(error: TimerError) -> KernelError {
 
 fn user_cstr(ptr: u64) -> KernelResult<&'static [u8]> {
     validate_user_range(ptr, 1)?;
-    let start = ptr as *const u8;
     let mut len = 0usize;
     while len <= MAX_PATH_BYTES {
-        let byte = unsafe { start.add(len).read() };
-        if byte == 0 {
+        let mut byte = [0u8; 1];
+        if !x86_64::paging::installed() || active_user_root() == 0 {
+            byte[0] = unsafe { ((ptr + len as u64) as *const u8).read() };
+        } else if !memory::copy_from_user(active_user_root(), ptr + len as u64, &mut byte) {
+            return Err(KernelError::InvalidPointer);
+        }
+        if byte[0] == 0 {
             return user_slice(ptr, len);
         }
         len += 1;
