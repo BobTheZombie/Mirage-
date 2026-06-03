@@ -7,6 +7,7 @@ use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
+use crate::kernel::cpu::MAX_CORES;
 use crate::kernel::memory;
 use crate::kernel::syscall::{SyscallFrame, SYSCALL_MAX_ARGS};
 use crate::kernel::thread::{
@@ -43,6 +44,22 @@ pub enum ThreadRunOutcome {
     Syscall(SyscallTrap),
 }
 
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug)]
+pub struct PerCpuState {
+    pub kernel_stack_top: u64,
+    pub user_rsp: u64,
+}
+
+impl PerCpuState {
+    pub const fn new() -> Self {
+        Self {
+            kernel_stack_top: 0,
+            user_rsp: 0,
+        }
+    }
+}
+
 static INITIALISED: AtomicBool = AtomicBool::new(false);
 
 /// Version of the internal assembly/Rust CpuContext frame contract.
@@ -57,6 +74,7 @@ pub static __mirage_current_core: AtomicUsize = AtomicUsize::new(usize::MAX);
 #[no_mangle]
 pub static __mirage_current_thread: AtomicU64 = AtomicU64::new(0);
 static CURRENT_CONTEXT: AtomicUsize = AtomicUsize::new(0);
+static mut PER_CPU: [PerCpuState; MAX_CORES] = [PerCpuState::new(); MAX_CORES];
 
 /// Perform one-time CPU and memory initialisation.
 ///
@@ -67,6 +85,7 @@ pub fn init_architecture(boot_info: &BootInfo) {
     }
 
     configure_cpu_modes();
+    initialize_per_cpu_state();
     setup_memory_layout(boot_info);
     configure_interrupts();
 }
@@ -118,6 +137,8 @@ pub fn switch_to_thread(thread: &mut ThreadControlBlock) {
 /// [`CpuContext`] trap frame, then calls back into Rust to copy that frame into
 /// the running [`ThreadControlBlock`].
 pub fn enter_thread_slice(core_index: usize, thread: &mut ThreadControlBlock) {
+    prepare_core_entry_state(core_index);
+
     __mirage_current_core.store(core_index, Ordering::SeqCst);
     __mirage_current_thread.store(thread.id.raw(), Ordering::SeqCst);
     CURRENT_CONTEXT.store(
@@ -160,6 +181,47 @@ pub extern "C" fn __mirage_arch_save_trap_frame(
         .unwrap_or((0, 0));
     let _ = (core_index, thread_raw, CPU_CONTEXT_ABI_VERSION);
     idt::dispatch_interrupt(vector, error_code);
+}
+
+pub fn kernel_stack_top(core_index: usize) -> u64 {
+    gdt::kernel_stack_top(core_index)
+}
+
+pub fn per_cpu_state_ptr(core_index: usize) -> u64 {
+    let index = if core_index < MAX_CORES {
+        core_index
+    } else {
+        0
+    };
+    unsafe { core::ptr::addr_of!(PER_CPU[index]) as u64 }
+}
+
+fn initialize_per_cpu_state() {
+    let mut idx = 0usize;
+    while idx < MAX_CORES {
+        unsafe {
+            PER_CPU[idx].kernel_stack_top = gdt::kernel_stack_top(idx);
+            PER_CPU[idx].user_rsp = 0;
+        }
+        idx += 1;
+    }
+    prepare_core_entry_state(0);
+}
+
+fn prepare_core_entry_state(core_index: usize) {
+    let index = if core_index < MAX_CORES {
+        core_index
+    } else {
+        0
+    };
+    unsafe {
+        if PER_CPU[index].kernel_stack_top == 0 {
+            PER_CPU[index].kernel_stack_top = gdt::kernel_stack_top(index);
+        }
+    }
+    gdt::set_current_kernel_stack(index);
+    msr::write_gs_base(per_cpu_state_ptr(index));
+    msr::write_kernel_gs_base(per_cpu_state_ptr(index));
 }
 
 /// Hint to the CPU that the current core is in a spin loop.

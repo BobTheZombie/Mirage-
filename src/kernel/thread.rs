@@ -13,6 +13,7 @@ pub const KERNEL_DATA_SELECTOR: u64 = 0x10;
 pub const USER_CODE_SELECTOR: u64 = 0x1b;
 pub const USER_DATA_SELECTOR: u64 = 0x23;
 pub const SYSCALL_TRAP_VECTOR: u64 = 0x80;
+pub const SYSCALL_RETURN_MARKER: u64 = 0x5c_ca11_u64;
 pub const TIMER_INTERRUPT_VECTOR: u64 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -189,7 +190,8 @@ impl CpuContext {
 
     pub fn write_syscall_result(&mut self, result: u64) {
         self.rax = result;
-        self.clear_trap();
+        self.trap_vector = 0;
+        self.error_code = SYSCALL_RETURN_MARKER;
     }
 }
 

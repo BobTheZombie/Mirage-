@@ -11,6 +11,7 @@ pub struct CpuCoreState {
     pub current_thread: Option<ThreadId>,
     pub local_ticks: u64,
     pub idle_ticks: u64,
+    pub kernel_stack_top: u64,
 }
 
 impl CpuCoreState {
@@ -20,11 +21,16 @@ impl CpuCoreState {
             current_thread: None,
             local_ticks: 0,
             idle_ticks: 0,
+            kernel_stack_top: 0,
         }
     }
 
     pub fn online(&mut self) {
         self.online = true;
+    }
+
+    pub fn set_kernel_stack_top(&mut self, stack_top: u64) {
+        self.kernel_stack_top = stack_top;
     }
 
     pub fn start_thread(&mut self, thread: ThreadId) {

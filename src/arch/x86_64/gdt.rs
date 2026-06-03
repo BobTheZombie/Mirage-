@@ -2,10 +2,12 @@
 
 use core::mem::size_of;
 
+use crate::kernel::cpu::MAX_CORES;
+
 pub const KERNEL_CODE_SELECTOR: u16 = 0x08;
 pub const KERNEL_DATA_SELECTOR: u16 = 0x10;
-pub const USER_DATA_SELECTOR: u16 = 0x18;
-pub const USER_CODE_SELECTOR: u16 = 0x20;
+pub const USER_CODE_SELECTOR: u16 = 0x1b;
+pub const USER_DATA_SELECTOR: u16 = 0x23;
 pub const TSS_SELECTOR: u16 = 0x28;
 
 pub const DOUBLE_FAULT_IST_INDEX: u8 = 1;
@@ -48,11 +50,13 @@ impl TaskStateSegment {
 }
 
 #[repr(align(16))]
+#[derive(Clone, Copy)]
 struct Stack([u8; STACK_SIZE]);
 
 static mut DOUBLE_FAULT_STACK: Stack = Stack([0; STACK_SIZE]);
 static mut PAGE_FAULT_STACK: Stack = Stack([0; STACK_SIZE]);
 static mut INTERRUPT_STACK: Stack = Stack([0; STACK_SIZE]);
+static mut KERNEL_STACKS: [Stack; MAX_CORES] = [Stack([0; STACK_SIZE]); MAX_CORES];
 static mut TSS: TaskStateSegment = TaskStateSegment::new();
 static mut GDT: [u64; GDT_ENTRIES] = [0; GDT_ENTRIES];
 
@@ -65,18 +69,38 @@ pub fn initialize() {
             stack_top(core::ptr::addr_of!(PAGE_FAULT_STACK));
         TSS.interrupt_stack_table[(INTERRUPT_IST_INDEX - 1) as usize] =
             stack_top(core::ptr::addr_of!(INTERRUPT_STACK));
+        TSS.privilege_stack_table[0] = kernel_stack_top(0);
 
         GDT[0] = 0;
         GDT[1] = code_descriptor(0, true);
         GDT[2] = data_descriptor(0);
-        GDT[3] = data_descriptor(3);
-        GDT[4] = code_descriptor(3, false);
+        GDT[3] = code_descriptor(3, true);
+        GDT[4] = data_descriptor(3);
         let (tss_low, tss_high) = tss_descriptor(core::ptr::addr_of!(TSS));
         GDT[5] = tss_low;
         GDT[6] = tss_high;
 
         load();
     }
+}
+
+pub fn set_current_kernel_stack(core_index: usize) {
+    #[cfg(not(test))]
+    unsafe {
+        TSS.privilege_stack_table[0] = kernel_stack_top(core_index);
+    }
+
+    #[cfg(test)]
+    let _ = core_index;
+}
+
+pub fn kernel_stack_top(core_index: usize) -> u64 {
+    let index = if core_index < MAX_CORES {
+        core_index
+    } else {
+        0
+    };
+    unsafe { stack_top(core::ptr::addr_of!(KERNEL_STACKS[index])) }
 }
 
 unsafe fn stack_top(stack: *const Stack) -> u64 {
