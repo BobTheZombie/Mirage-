@@ -10,7 +10,7 @@ use crate::kernel::process::{
 };
 use crate::kernel::scheduler::ScheduledThread;
 use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId};
-use crate::kernel::{Kernel, KernelError, KernelResult};
+use crate::kernel::{memory, Kernel, KernelError, KernelResult};
 use crate::subkernel::Credentials;
 
 /// Linux-compatible clone bits that Mirage currently models.
@@ -156,6 +156,10 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
         self.authorize_image_replacement(&request)?;
         let closed = self.process_files_mut(request.caller)?.close_on_exec();
         self.release_description_ids(&closed);
+        let old_root = self.process_table[self.locate_process(request.caller)?]
+            .as_ref()
+            .ok_or(KernelError::UnknownProcess)?
+            .address_space_root;
         self.replace_process_image(
             request.caller,
             current_thread,
@@ -163,6 +167,11 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             request.image.stack_pointer,
             request.image.address_space_root,
         )?;
+        if old_root != 0 && old_root != request.image.address_space_root {
+            let _ =
+                crate::arch::x86_64::paging::switch_address_space(request.image.address_space_root);
+            memory::destroy_user_address_space(old_root);
+        }
         self.security
             .register_task(request.caller, request.requested_credentials)
             .map_err(KernelError::SecurityViolation)?;
@@ -291,7 +300,11 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
                 pcb.process_group = parent_pcb.process_group;
                 pcb.session = parent_pcb.session;
                 pcb.signal_actions = parent_pcb.signal_actions;
-                pcb.address_space_root = parent_pcb.address_space_root;
+                if parent_pcb.address_space_root != 0 {
+                    pcb.address_space_root =
+                        memory::clone_user_address_space(pid, parent_pcb.address_space_root)
+                            .ok_or(KernelError::AllocationFailed)?;
+                }
             }
         }
 
@@ -320,6 +333,9 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             Ok(id) => id,
             Err(err) => {
                 if let Some(mut failed) = self.process_table[slot].take() {
+                    if failed.address_space_root != 0 {
+                        memory::destroy_user_address_space(failed.address_space_root);
+                    }
                     self.release_process_file_table(&mut failed.files);
                 }
                 self.security.revoke_task(pid);
@@ -373,7 +389,12 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             pcb.signal_actions = parent_signal_actions;
         }
         if request.shares_address_space() {
-            pcb.address_space_root = parent_address_space_root;
+            pcb.address_space_root = memory::share_user_address_space(parent_address_space_root)
+                .ok_or(KernelError::AllocationFailed)?;
+        } else if parent_address_space_root != 0 {
+            pcb.address_space_root =
+                memory::clone_user_address_space(pid, parent_address_space_root)
+                    .ok_or(KernelError::AllocationFailed)?;
         }
 
         self.security.register_task(pid, creds).map_err(|err| {
@@ -395,6 +416,9 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
     fn rollback_process_shell(&mut self, pid: ProcessId) {
         if let Ok(index) = self.locate_process(pid) {
             if let Some(mut failed) = self.process_table[index].take() {
+                if failed.address_space_root != 0 {
+                    memory::destroy_user_address_space(failed.address_space_root);
+                }
                 self.release_process_file_table(&mut failed.files);
             }
             self.security.revoke_task(pid);

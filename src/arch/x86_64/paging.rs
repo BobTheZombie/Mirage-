@@ -10,6 +10,7 @@ const ENTRY_COUNT: usize = 512;
 const MAX_TABLES: usize = 128;
 const PRESENT: u64 = 1 << 0;
 const WRITABLE: u64 = 1 << 1;
+const USER_ACCESSIBLE: u64 = 1 << 2;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const DEFAULT_IDENTITY_LIMIT: u64 = 16 * 1024 * 1024;
@@ -18,6 +19,8 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 static mut TABLES: PageTablePool = PageTablePool::new();
 static mut ACTIVE_TRANSLATOR: AddressTranslator = AddressTranslator::identity();
 static mut ACTIVE_PML4: *mut PageTable = core::ptr::null_mut();
+static mut KERNEL_PML4_PHYSICAL: u64 = 0;
+static mut CURRENT_ADDRESS_SPACE_ROOT: u64 = 0;
 
 #[repr(C, align(4096))]
 #[derive(Clone, Copy)]
@@ -164,7 +167,9 @@ pub fn initialize(boot_info: &BootInfo) {
 
         ACTIVE_TRANSLATOR = translator;
         ACTIVE_PML4 = pml4;
-        load_cr3(translator.physical_for_virtual(pml4 as u64));
+        KERNEL_PML4_PHYSICAL = translator.physical_for_virtual(pml4 as u64);
+        CURRENT_ADDRESS_SPACE_ROOT = KERNEL_PML4_PHYSICAL;
+        load_cr3(KERNEL_PML4_PHYSICAL);
         INSTALLED.store(true, Ordering::SeqCst);
     }
 }
@@ -427,6 +432,208 @@ pub fn map_kernel_page(
     }
 }
 
+fn table_for_physical(physical: u64) -> *mut PageTable {
+    unsafe { ACTIVE_TRANSLATOR.virtual_for_physical(physical) as *mut PageTable }
+}
+
+pub fn active_translator() -> AddressTranslator {
+    unsafe { ACTIVE_TRANSLATOR }
+}
+
+pub fn kernel_address_space_root() -> u64 {
+    unsafe { KERNEL_PML4_PHYSICAL }
+}
+
+pub fn current_address_space_root() -> u64 {
+    unsafe { CURRENT_ADDRESS_SPACE_ROOT }
+}
+
+pub fn switch_address_space(root: u64) -> Option<()> {
+    unsafe {
+        let target = if root == 0 {
+            KERNEL_PML4_PHYSICAL
+        } else {
+            root
+        };
+        if target == 0 {
+            return None;
+        }
+        if CURRENT_ADDRESS_SPACE_ROOT != target {
+            load_cr3(target);
+            CURRENT_ADDRESS_SPACE_ROOT = target;
+        }
+        Some(())
+    }
+}
+
+pub fn create_user_address_space() -> Option<u64> {
+    let frame = crate::kernel::memory::allocate_physical_frame()?;
+    unsafe {
+        let pml4 = table_for_physical(frame);
+        (*pml4).entries.fill(0);
+        if !ACTIVE_PML4.is_null() {
+            let mut idx = 256usize;
+            while idx < ENTRY_COUNT {
+                (*pml4).entries[idx] = (*ACTIVE_PML4).entries[idx];
+                idx += 1;
+            }
+        }
+    }
+    Some(frame)
+}
+
+pub fn destroy_user_address_space(root: u64) {
+    if root == 0 || root == unsafe { KERNEL_PML4_PHYSICAL } {
+        return;
+    }
+    unsafe {
+        let pml4 = table_for_physical(root);
+        let mut pml4_idx = 0usize;
+        while pml4_idx < 256 {
+            let pml4e = (*pml4).entries[pml4_idx];
+            if pml4e & PRESENT != 0 {
+                let pdpt_phys = pml4e & ADDRESS_MASK;
+                let pdpt = table_for_physical(pdpt_phys);
+                let mut pdpt_idx = 0usize;
+                while pdpt_idx < ENTRY_COUNT {
+                    let pdpte = (*pdpt).entries[pdpt_idx];
+                    if pdpte & PRESENT != 0 {
+                        let pd_phys = pdpte & ADDRESS_MASK;
+                        let pd = table_for_physical(pd_phys);
+                        let mut pd_idx = 0usize;
+                        while pd_idx < ENTRY_COUNT {
+                            let pde = (*pd).entries[pd_idx];
+                            if pde & PRESENT != 0 {
+                                let pt_phys = pde & ADDRESS_MASK;
+                                crate::kernel::memory::deallocate_physical_frame(pt_phys);
+                            }
+                            pd_idx += 1;
+                        }
+                        crate::kernel::memory::deallocate_physical_frame(pd_phys);
+                    }
+                    pdpt_idx += 1;
+                }
+                crate::kernel::memory::deallocate_physical_frame(pdpt_phys);
+            }
+            pml4_idx += 1;
+        }
+        crate::kernel::memory::deallocate_physical_frame(root);
+    }
+}
+
+unsafe fn user_next_table(parent: *mut PageTable, slot: usize) -> Option<*mut PageTable> {
+    let entry = &mut (*parent).entries[slot];
+    if *entry & PRESENT == 0 {
+        let frame = crate::kernel::memory::allocate_physical_frame()?;
+        let table = table_for_physical(frame);
+        (*table).entries.fill(0);
+        *entry = (frame & ADDRESS_MASK) | PRESENT | WRITABLE | USER_ACCESSIBLE;
+    }
+    Some(table_for_physical(*entry & ADDRESS_MASK))
+}
+
+pub fn translate_kernel_address(virtual_address: u64) -> Option<u64> {
+    unsafe {
+        if ACTIVE_PML4.is_null() {
+            return None;
+        }
+        let pml4e = (*ACTIVE_PML4).entries[index(virtual_address, 39)];
+        if pml4e & PRESENT == 0 {
+            return None;
+        }
+        let pdpt = table_for_physical(pml4e & ADDRESS_MASK);
+        let pdpte = (*pdpt).entries[index(virtual_address, 30)];
+        if pdpte & PRESENT == 0 {
+            return None;
+        }
+        let pd = table_for_physical(pdpte & ADDRESS_MASK);
+        let pde = (*pd).entries[index(virtual_address, 21)];
+        if pde & PRESENT == 0 {
+            return None;
+        }
+        let pt = table_for_physical(pde & ADDRESS_MASK);
+        let pte = (*pt).entries[index(virtual_address, 12)];
+        if pte & PRESENT == 0 {
+            return None;
+        }
+        Some((pte & ADDRESS_MASK) | (virtual_address & (PAGE_SIZE - 1)))
+    }
+}
+
+pub fn map_user_page(
+    root: u64,
+    virtual_address: u64,
+    physical: u64,
+    protection: MemoryProtection,
+) -> Option<()> {
+    if root == 0
+        || virtual_address >= 0x0000_8000_0000_0000
+        || virtual_address & (PAGE_SIZE - 1) != 0
+    {
+        return None;
+    }
+    unsafe {
+        let pml4 = table_for_physical(root);
+        let pdpt = user_next_table(pml4, index(virtual_address, 39))?;
+        let pd = user_next_table(pdpt, index(virtual_address, 30))?;
+        let pt = user_next_table(pd, index(virtual_address, 21))?;
+        let flags = user_flags_from_protection(protection);
+        (*pt).entries[index(virtual_address, 12)] = (physical & ADDRESS_MASK) | flags.0;
+        Some(())
+    }
+}
+
+pub fn unmap_user_page(root: u64, virtual_address: u64) -> Option<u64> {
+    let pt = user_leaf_table(root, virtual_address)?;
+    unsafe {
+        let slot = index(virtual_address, 12);
+        let entry = (*pt).entries[slot];
+        if entry & PRESENT == 0 {
+            return None;
+        }
+        (*pt).entries[slot] = 0;
+        Some(entry & ADDRESS_MASK)
+    }
+}
+
+pub fn translate_user_page(root: u64, virtual_address: u64, write: bool) -> Option<u64> {
+    let pt = user_leaf_table(root, virtual_address)?;
+    unsafe {
+        let entry = (*pt).entries[index(virtual_address, 12)];
+        if entry & PRESENT == 0 || entry & USER_ACCESSIBLE == 0 {
+            return None;
+        }
+        if write && entry & WRITABLE == 0 {
+            return None;
+        }
+        Some((entry & ADDRESS_MASK) | (virtual_address & (PAGE_SIZE - 1)))
+    }
+}
+
+fn user_leaf_table(root: u64, virtual_address: u64) -> Option<*mut PageTable> {
+    if root == 0 || virtual_address >= 0x0000_8000_0000_0000 {
+        return None;
+    }
+    unsafe {
+        let pml4 = table_for_physical(root);
+        let pml4e = (*pml4).entries[index(virtual_address, 39)];
+        if pml4e & PRESENT == 0 {
+            return None;
+        }
+        let pdpt = table_for_physical(pml4e & ADDRESS_MASK);
+        let pdpte = (*pdpt).entries[index(virtual_address, 30)];
+        if pdpte & PRESENT == 0 {
+            return None;
+        }
+        let pd = table_for_physical(pdpte & ADDRESS_MASK);
+        let pde = (*pd).entries[index(virtual_address, 21)];
+        if pde & PRESENT == 0 {
+            return None;
+        }
+        Some(table_for_physical(pde & ADDRESS_MASK))
+    }
+}
+
 pub fn page_table_pool_range() -> (usize, usize) {
     let start = core::ptr::addr_of!(TABLES) as usize;
     (start, core::mem::size_of::<PageTablePool>())
@@ -434,6 +641,17 @@ pub fn page_table_pool_range() -> (usize, usize) {
 
 fn flags_from_protection(protection: MemoryProtection) -> MappingFlags {
     let mut flags = PRESENT;
+    if protection.write {
+        flags |= WRITABLE;
+    }
+    if !protection.execute {
+        flags |= NO_EXECUTE;
+    }
+    MappingFlags(flags)
+}
+
+fn user_flags_from_protection(protection: MemoryProtection) -> MappingFlags {
+    let mut flags = PRESENT | USER_ACCESSIBLE;
     if protection.write {
         flags |= WRITABLE;
     }

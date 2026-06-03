@@ -7,7 +7,6 @@
 use core::{
     cmp,
     ptr::{self, NonNull},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::arch::x86_64::{
@@ -22,6 +21,8 @@ pub const DEFAULT_HEAP_BYTES: usize = 128 * 1024;
 pub const EARLY_HEAP_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ALLOCATION_RECORDS: usize = 512;
 pub const MAX_PHYSICAL_REGIONS: usize = 128;
+pub const MAX_ADDRESS_SPACES: usize = 64;
+pub const MAX_USER_MAPPINGS: usize = 2048;
 pub const EARLY_HEAP_BASE: usize = 0xffff_9000_0000_0000;
 pub const KERNEL_PROCESS_ID: ProcessId = ProcessId::new(0);
 
@@ -974,7 +975,51 @@ type KernelMemory = MemoryManager<DEFAULT_HEAP_BYTES, MAX_ALLOCATION_RECORDS>;
 static MEMORY_MANAGER: SpinLock<KernelMemory> = SpinLock::new(MemoryManager::new());
 static PHYSICAL_ALLOCATOR: SpinLock<PhysicalFrameAllocator<MAX_PHYSICAL_REGIONS>> =
     SpinLock::new(PhysicalFrameAllocator::new());
-static NEXT_USER_ADDRESS_SPACE_ROOT: AtomicU64 = AtomicU64::new(0x1000);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AddressSpace {
+    pub owner: ProcessId,
+    pub root: u64,
+    pub references: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UserMappingRecord {
+    owner: ProcessId,
+    root: u64,
+    user_start: u64,
+    kernel_start: usize,
+    length: usize,
+    protection: MemoryProtection,
+}
+
+impl UserMappingRecord {
+    fn contains(self, root: u64, address: u64, len: usize, write: bool) -> bool {
+        if self.root != root || (write && !self.protection.write) {
+            return false;
+        }
+        let end = match address.checked_add(len as u64) {
+            Some(end) => end,
+            None => return false,
+        };
+        address >= self.user_start && end <= self.user_start.saturating_add(self.length as u64)
+    }
+}
+
+struct AddressSpaceTable {
+    spaces: [Option<AddressSpace>; MAX_ADDRESS_SPACES],
+    mappings: [Option<UserMappingRecord>; MAX_USER_MAPPINGS],
+}
+
+impl AddressSpaceTable {
+    const fn new() -> Self {
+        Self {
+            spaces: [None; MAX_ADDRESS_SPACES],
+            mappings: [None; MAX_USER_MAPPINGS],
+        }
+    }
+}
+
+static ADDRESS_SPACES: SpinLock<AddressSpaceTable> = SpinLock::new(AddressSpaceTable::new());
 
 pub fn initialize_from_boot_info(boot_info: &BootInfo) {
     PHYSICAL_ALLOCATOR.lock().ingest_boot_info(boot_info);
@@ -1047,13 +1092,116 @@ pub fn mmap_for(
     MEMORY_MANAGER.lock().mmap_for(owner, length, protection)
 }
 
-pub fn create_user_address_space(_owner: ProcessId) -> Option<u64> {
-    NEXT_USER_ADDRESS_SPACE_ROOT
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-            current.checked_add(PAGE_SIZE as u64)
-        })
-        .ok()
-        .filter(|root| *root != 0)
+pub fn create_user_address_space(owner: ProcessId) -> Option<u64> {
+    let root = paging::create_user_address_space()?;
+    let mut table = ADDRESS_SPACES.lock();
+    let mut idx = 0usize;
+    while idx < MAX_ADDRESS_SPACES {
+        if table.spaces[idx].is_none() {
+            table.spaces[idx] = Some(AddressSpace {
+                owner,
+                root,
+                references: 1,
+            });
+            return Some(root);
+        }
+        idx += 1;
+    }
+    drop(table);
+    paging::destroy_user_address_space(root);
+    None
+}
+
+pub fn share_user_address_space(root: u64) -> Option<u64> {
+    if root == 0 {
+        return None;
+    }
+    let mut table = ADDRESS_SPACES.lock();
+    for slot in table.spaces.iter_mut() {
+        if let Some(space) = slot.as_mut() {
+            if space.root == root {
+                space.references = space.references.saturating_add(1);
+                return Some(root);
+            }
+        }
+    }
+    None
+}
+
+pub fn clone_user_address_space(owner: ProcessId, parent_root: u64) -> Option<u64> {
+    if parent_root == 0 {
+        return create_user_address_space(owner);
+    }
+    let child_root = create_user_address_space(owner)?;
+    let mappings = ADDRESS_SPACES.lock().mappings;
+    let mut idx = 0usize;
+    while idx < MAX_USER_MAPPINGS {
+        if let Some(mapping) = mappings[idx] {
+            if mapping.root == parent_root {
+                let child = mmap_user_fixed(
+                    owner,
+                    child_root,
+                    mapping.user_start,
+                    mapping.length,
+                    mapping.protection,
+                )?;
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        mapping.kernel_start as *const u8,
+                        child.as_ptr(),
+                        mapping.length,
+                    );
+                }
+            }
+        }
+        idx += 1;
+    }
+    Some(child_root)
+}
+
+pub fn destroy_user_address_space(root: u64) {
+    if root == 0 {
+        return;
+    }
+    let mut should_destroy = false;
+    {
+        let mut table = ADDRESS_SPACES.lock();
+        let mut idx = 0usize;
+        while idx < MAX_ADDRESS_SPACES {
+            if let Some(mut space) = table.spaces[idx] {
+                if space.root == root {
+                    if space.references > 1 {
+                        space.references -= 1;
+                        table.spaces[idx] = Some(space);
+                        return;
+                    }
+                    table.spaces[idx] = None;
+                    should_destroy = true;
+                    break;
+                }
+            }
+            idx += 1;
+        }
+        idx = 0;
+        while idx < MAX_USER_MAPPINGS {
+            if let Some(mapping) = table.mappings[idx] {
+                if mapping.root == root {
+                    table.mappings[idx] = None;
+                    if let Some(ptr) = NonNull::new(mapping.kernel_start as *mut u8) {
+                        let _ = MEMORY_MANAGER.lock().munmap_ptr_for(
+                            mapping.owner,
+                            ptr,
+                            mapping.length,
+                        );
+                    }
+                }
+            }
+            idx += 1;
+        }
+    }
+    if should_destroy {
+        paging::destroy_user_address_space(root);
+    }
 }
 
 pub fn mmap_user_fixed(
@@ -1070,7 +1218,44 @@ pub fn mmap_user_fixed(
     {
         return None;
     }
-    mmap_for(owner, length, protection)
+    let actual_size = align_up_u64(length as u64) as usize;
+    let region = mmap_for(owner, actual_size, protection)?;
+    let mut offset = 0usize;
+    while offset < actual_size {
+        let kernel_va = region.as_ptr() as u64 + offset as u64;
+        let physical = paging::translate_kernel_address(kernel_va)
+            .unwrap_or_else(|| paging::active_translator().physical_for_virtual(kernel_va));
+        if paging::map_user_page(
+            address_space_root,
+            virtual_address + offset as u64,
+            physical,
+            protection,
+        )
+        .is_none()
+        {
+            let _ = munmap(region);
+            return None;
+        }
+        offset += PAGE_SIZE;
+    }
+    let mut table = ADDRESS_SPACES.lock();
+    let mut idx = 0usize;
+    while idx < MAX_USER_MAPPINGS {
+        if table.mappings[idx].is_none() {
+            table.mappings[idx] = Some(UserMappingRecord {
+                owner,
+                root: address_space_root,
+                user_start: virtual_address,
+                kernel_start: region.as_ptr() as usize,
+                length: actual_size,
+                protection,
+            });
+            return Some(region);
+        }
+        idx += 1;
+    }
+    let _ = munmap(region);
+    None
 }
 
 pub fn munmap(region: MappedRegion) -> bool {
@@ -1086,7 +1271,75 @@ pub fn munmap_ptr_for(owner: ProcessId, ptr: NonNull<u8>, length: usize) -> bool
 }
 
 pub fn release_process(owner: ProcessId) {
+    let mut roots = [0u64; MAX_ADDRESS_SPACES];
+    let mut count = 0usize;
+    {
+        let table = ADDRESS_SPACES.lock();
+        let mut idx = 0usize;
+        while idx < MAX_ADDRESS_SPACES {
+            if let Some(space) = table.spaces[idx] {
+                if space.owner == owner && count < MAX_ADDRESS_SPACES {
+                    roots[count] = space.root;
+                    count += 1;
+                }
+            }
+            idx += 1;
+        }
+    }
+    let mut idx = 0usize;
+    while idx < count {
+        destroy_user_address_space(roots[idx]);
+        idx += 1;
+    }
     MEMORY_MANAGER.lock().release_process(owner);
+}
+
+pub fn active_translated_slice(
+    root: u64,
+    ptr: u64,
+    len: usize,
+    write: bool,
+) -> Option<NonNull<u8>> {
+    if len == 0 {
+        return NonNull::new(core::ptr::NonNull::<u8>::dangling().as_ptr());
+    }
+    let table = ADDRESS_SPACES.lock();
+    let mut idx = 0usize;
+    while idx < MAX_USER_MAPPINGS {
+        if let Some(mapping) = table.mappings[idx] {
+            if mapping.contains(root, ptr, len, write) {
+                let offset = ptr.saturating_sub(mapping.user_start) as usize;
+                return NonNull::new((mapping.kernel_start + offset) as *mut u8);
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+pub fn validate_user_range(root: u64, ptr: u64, len: usize, write: bool) -> bool {
+    if len == 0 {
+        return true;
+    }
+    active_translated_slice(root, ptr, len, write).is_some()
+}
+
+pub fn copy_from_user(root: u64, ptr: u64, out: &mut [u8]) -> bool {
+    let src = match active_translated_slice(root, ptr, out.len(), false) {
+        Some(src) => src,
+        None => return false,
+    };
+    unsafe { ptr::copy_nonoverlapping(src.as_ptr(), out.as_mut_ptr(), out.len()) };
+    true
+}
+
+pub fn copy_to_user(root: u64, ptr: u64, input: &[u8]) -> bool {
+    let dst = match active_translated_slice(root, ptr, input.len(), true) {
+        Some(dst) => dst,
+        None => return false,
+    };
+    unsafe { ptr::copy_nonoverlapping(input.as_ptr(), dst.as_ptr(), input.len()) };
+    true
 }
 
 pub fn stats() -> AllocationStats {
