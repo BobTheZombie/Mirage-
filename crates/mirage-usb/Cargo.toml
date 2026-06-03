@@ -1,0 +1,12 @@
+[package]
+name = "mirage-usb"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Capability-mediated mock USB storage service primitives for Mirage"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+mirage-block = { path = "../mirage-block" }
+mirage-cap = { path = "../mirage-cap" }
+mirage-ipc = { path = "../mirage-ipc" }

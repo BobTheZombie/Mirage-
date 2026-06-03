@@ -63,3 +63,12 @@ version = "0.1.0"
 dependencies = [
  "mirage-block",
 ]
+
+[[package]]
+name = "mirage-usb"
+version = "0.1.0"
+dependencies = [
+ "mirage-block",
+ "mirage-cap",
+ "mirage-ipc",
+]
