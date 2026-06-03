@@ -9,3 +9,10 @@ version = "0.1.0"
 [[package]]
 name = "mirage-block"
 version = "0.1.0"
+
+[[package]]
+name = "mirage-storage"
+version = "0.1.0"
+dependencies = [
+ "mirage-block",
+]
