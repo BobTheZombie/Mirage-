@@ -1,0 +1,9 @@
+[package]
+name = "mirage-block"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Storage-backend agnostic block device primitives for Mirage"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
