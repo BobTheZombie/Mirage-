@@ -27,8 +27,9 @@ use crate::kernel::exec::{CloneTaskRequest, SpawnTaskRequest};
 use crate::kernel::fs::inode::InodeKind;
 use crate::kernel::fs::{
     open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, AccessMode,
-    CDirEntry, CStat, DescriptorFlags, DirEntry, FileDescriptionId, FileSystem, FileTable,
-    FileTableError, FsCredentials, Path, PathError, QfsFileSystem, VfsError, MAX_PATH_BYTES,
+    CDirEntry, CStat, DescriptorFlags, DescriptorObject, DirEntry, EventFdId, FileDescriptionId,
+    FileSystem, FileTable, FileTableError, FsCredentials, Path, PathError, PipeDirection,
+    PipeEndpoint, PipeId, QfsFileSystem, VfsError, MAX_PATH_BYTES,
 };
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
@@ -64,6 +65,9 @@ pub const MAX_PROCESSES: usize = 64;
 pub const MESSAGE_DEPTH: usize = 16;
 pub const MAX_DEVICES: usize = 8;
 pub const MAX_OPEN_FILES: usize = 64;
+pub const MAX_KERNEL_PIPES: usize = 32;
+pub const MAX_KERNEL_EVENTFDS: usize = 32;
+const PIPE_BUFFER_BYTES: usize = 4096;
 
 const AT_FDCWD: i32 = -100;
 const SEEK_SET: u64 = 0;
@@ -79,8 +83,106 @@ const F_GETFL: u64 = 3;
 const F_DUPFD_CLOEXEC: u64 = 1030;
 const FD_CLOEXEC: u64 = 1;
 const O_CLOEXEC_RAW: u64 = 0o02000000;
+const O_NONBLOCK_RAW: u64 = 0o0004000;
+const O_DIRECT_RAW: u64 = 0o0040000;
+const PIPE2_SUPPORTED_FLAGS: u64 = O_CLOEXEC_RAW | O_NONBLOCK_RAW;
+const EFD_SEMAPHORE: u64 = 1;
+const EFD_CLOEXEC: u64 = O_CLOEXEC_RAW;
+const EFD_NONBLOCK: u64 = O_NONBLOCK_RAW;
+const EVENTFD_SUPPORTED_FLAGS: u64 = EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK;
+const POLLIN: i16 = 0x0001;
+const POLLPRI: i16 = 0x0002;
+const POLLOUT: i16 = 0x0004;
+const POLLERR: i16 = 0x0008;
+const POLLHUP: i16 = 0x0010;
+const POLLNVAL: i16 = 0x0020;
+const FIONREAD: u64 = 0x541b;
+const BLKSSZGET: u64 = 0x1268;
+const BLKGETSIZE64: u64 = 0x80081272;
+const MIRAGE_IOCTL_DEVICE_INFO: u64 = 0x4d01;
 
 const DEFAULT_ROOT_FILESYSTEM: &[u8] = b"qfs";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PipeObject {
+    buffer: [u8; PIPE_BUFFER_BYTES],
+    head: usize,
+    len: usize,
+    readers: u16,
+    writers: u16,
+}
+
+impl PipeObject {
+    const fn new() -> Self {
+        Self {
+            buffer: [0; PIPE_BUFFER_BYTES],
+            head: 0,
+            len: 0,
+            readers: 1,
+            writers: 1,
+        }
+    }
+
+    const fn is_readable(self) -> bool {
+        self.len > 0 || self.writers == 0
+    }
+
+    const fn is_writable(self) -> bool {
+        self.readers > 0 && self.len < PIPE_BUFFER_BYTES
+    }
+
+    fn read(&mut self, out: &mut [u8]) -> usize {
+        let count = min(out.len(), self.len);
+        let mut idx = 0usize;
+        while idx < count {
+            out[idx] = self.buffer[self.head];
+            self.head = (self.head + 1) % PIPE_BUFFER_BYTES;
+            idx += 1;
+        }
+        self.len -= count;
+        count
+    }
+
+    fn write(&mut self, data: &[u8]) -> usize {
+        let count = min(data.len(), PIPE_BUFFER_BYTES - self.len);
+        let mut idx = 0usize;
+        while idx < count {
+            let tail = (self.head + self.len) % PIPE_BUFFER_BYTES;
+            self.buffer[tail] = data[idx];
+            self.len += 1;
+            idx += 1;
+        }
+        count
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EventFdObject {
+    counter: u64,
+    semaphore: bool,
+}
+
+impl EventFdObject {
+    const fn new(counter: u64, semaphore: bool) -> Self {
+        Self { counter, semaphore }
+    }
+
+    const fn is_readable(self) -> bool {
+        self.counter > 0
+    }
+
+    const fn is_writable(self) -> bool {
+        self.counter <= u64::MAX - 2
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MiragePollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
 
 struct KernelPathBuf {
     bytes: [u8; MAX_PATH_BYTES],
@@ -213,6 +315,8 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     core_states: [CpuCoreState; cpu::MAX_CORES],
     thread_table: [Option<ThreadControlBlock>; MAX_THREADS],
     timers: TimerManager<MAX_SLEEP_ENTRIES, MAX_PROCESS_TIMERS>,
+    pipes: [Option<PipeObject>; MAX_KERNEL_PIPES],
+    eventfds: [Option<EventFdObject>; MAX_KERNEL_EVENTFDS],
     next_pid: u64,
     next_thread: u64,
     message_sequence: u64,
@@ -237,6 +341,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             core_states: [CpuCoreState::new(); cpu::MAX_CORES],
             thread_table: [None; MAX_THREADS],
             timers: TimerManager::new(),
+            pipes: [None; MAX_KERNEL_PIPES],
+            eventfds: [None; MAX_KERNEL_EVENTFDS],
             next_pid: 1,
             next_thread: 1,
             message_sequence: 0,
@@ -254,6 +360,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.service_registry.reset();
         self.open_files.clear();
         self.timers.reset();
+        self.pipes = [None; MAX_KERNEL_PIPES];
+        self.eventfds = [None; MAX_KERNEL_EVENTFDS];
         self.next_pid = 1;
         self.next_thread = 1;
         self.message_sequence = 0;
@@ -1179,24 +1287,188 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         }
     }
 
-    fn syscall_ioctl(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_ioctl(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let fd = context.arg(0) as usize;
+        let request = context.arg(1);
+        let arg = context.arg(2);
+        let object = self.fd_object(context.caller, fd)?;
+        match request {
+            FIONREAD => {
+                let out = user_out_ptr::<u32>(arg)?;
+                let available = match object {
+                    DescriptorObject::Regular(file) => {
+                        let stat = self.root_fs.fstat(&file).map_err(KernelError::Filesystem)?;
+                        stat.size.saturating_sub(file.cursor()).min(u32::MAX as u64) as u32
+                    }
+                    DescriptorObject::Pipe(endpoint) => self
+                        .pipes
+                        .get(endpoint.id().raw())
+                        .and_then(|entry| *entry)
+                        .map(|pipe| pipe.len as u32)
+                        .ok_or(KernelError::InvalidArgument)?,
+                    DescriptorObject::EventFd(id) => self
+                        .eventfds
+                        .get(id.raw())
+                        .and_then(|entry| *entry)
+                        .map(|eventfd| if eventfd.counter > 0 { 8 } else { 0 })
+                        .ok_or(KernelError::InvalidArgument)?,
+                    DescriptorObject::Device(_) => 0,
+                };
+                unsafe { out.write(available) };
+                Ok(0)
+            }
+            BLKSSZGET => match object {
+                DescriptorObject::Device(handle) => {
+                    let out = user_out_ptr::<u32>(arg)?;
+                    let value = self
+                        .devices
+                        .sector_size(handle.id())
+                        .map_err(KernelError::DeviceFault)? as u32;
+                    unsafe { out.write(value) };
+                    Ok(0)
+                }
+                _ => Err(KernelError::InvalidArgument),
+            },
+            BLKGETSIZE64 => match object {
+                DescriptorObject::Device(handle) => {
+                    let out = user_out_ptr::<u64>(arg)?;
+                    let size = self
+                        .devices
+                        .sector_size(handle.id())
+                        .and_then(|sector_size| {
+                            self.devices
+                                .sector_count(handle.id())
+                                .map(|sectors| sectors.saturating_mul(sector_size as u64))
+                        })
+                        .map_err(KernelError::DeviceFault)?;
+                    unsafe { out.write(size) };
+                    Ok(0)
+                }
+                _ => Err(KernelError::InvalidArgument),
+            },
+            MIRAGE_IOCTL_DEVICE_INFO => match object {
+                DescriptorObject::Device(handle) => {
+                    let out = user_out_ptr::<MirageDeviceDescriptor>(arg)?;
+                    let descriptor = self
+                        .device_info(handle.id())
+                        .ok_or(KernelError::DeviceNotFound)?;
+                    unsafe { out.write(MirageDeviceDescriptor::from_descriptor(descriptor)) };
+                    Ok(0)
+                }
+                _ => Err(KernelError::InvalidArgument),
+            },
+            _ => Err(KernelError::InvalidArgument),
+        }
     }
 
-    fn syscall_pipe2(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_pipe2(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let out = user_slice_mut_typed::<i32>(context.arg(0), 2)?;
+        let flags = context.arg(1);
+        if flags & !PIPE2_SUPPORTED_FLAGS != 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let pipe_id = self.allocate_pipe()?;
+        let descriptor_flags = descriptor_flags_from_raw(flags);
+        let read_description = self
+            .open_files
+            .insert_object(DescriptorObject::Pipe(PipeEndpoint::new(
+                pipe_id,
+                PipeDirection::Read,
+            )))
+            .map_err(map_file_table_error)?;
+        let write_description =
+            match self
+                .open_files
+                .insert_object(DescriptorObject::Pipe(PipeEndpoint::new(
+                    pipe_id,
+                    PipeDirection::Write,
+                ))) {
+                Ok(description) => description,
+                Err(error) => {
+                    let _ = self.close_open_description(read_description);
+                    self.pipes[pipe_id.raw()] = None;
+                    return Err(map_file_table_error(error));
+                }
+            };
+        let read_fd = match self
+            .process_files_mut(context.caller)?
+            .open(read_description, descriptor_flags)
+        {
+            Ok(fd) => fd,
+            Err(error) => {
+                let _ = self.close_open_description(read_description);
+                let _ = self.close_open_description(write_description);
+                self.pipes[pipe_id.raw()] = None;
+                return Err(map_process_file_table_error(error));
+            }
+        };
+        let write_fd = match self
+            .process_files_mut(context.caller)?
+            .open(write_description, descriptor_flags)
+        {
+            Ok(fd) => fd,
+            Err(error) => {
+                let closed_read = self
+                    .process_files_mut(context.caller)
+                    .ok()
+                    .and_then(|files| files.close(read_fd).ok());
+                if let Some(descriptor) = closed_read {
+                    let _ = self.close_open_description(descriptor.description());
+                }
+                let _ = self.close_open_description(write_description);
+                self.pipes[pipe_id.raw()] = None;
+                return Err(map_process_file_table_error(error));
+            }
+        };
+        out[0] = read_fd as i32;
+        out[1] = write_fd as i32;
+        Ok(0)
     }
 
-    fn syscall_poll(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_poll(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let fds = user_slice_mut_typed::<MiragePollFd>(context.arg(0), context.arg(1) as usize)?;
+        let timeout_ms = context.arg(2) as i32;
+        self.poll_descriptors(context.caller, context.thread, fds, timeout_ms)
     }
 
-    fn syscall_pselect(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_pselect(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let fds = user_slice_mut_typed::<MiragePollFd>(context.arg(0), context.arg(1) as usize)?;
+        let timeout_ms = if context.arg(2) == 0 {
+            -1
+        } else {
+            let timeout = read_user_value::<MirageTimespec>(context.arg(2))?;
+            let nanos = timespec_to_nanos(timeout)?;
+            let millis = (nanos / 1_000_000).min(i32::MAX as u128) as i32;
+            millis
+        };
+        self.poll_descriptors(context.caller, context.thread, fds, timeout_ms)
     }
 
-    fn syscall_eventfd(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_eventfd(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let initial = context.arg(0) as u32 as u64;
+        let flags = context.arg(1);
+        if flags & !EVENTFD_SUPPORTED_FLAGS != 0 || flags & O_DIRECT_RAW != 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let id = self.allocate_eventfd(initial, flags & EFD_SEMAPHORE != 0)?;
+        let description = match self.open_files.insert_object(DescriptorObject::EventFd(id)) {
+            Ok(description) => description,
+            Err(error) => {
+                self.eventfds[id.raw()] = None;
+                return Err(map_file_table_error(error));
+            }
+        };
+        match self
+            .process_files_mut(context.caller)?
+            .open(description, descriptor_flags_from_raw(flags))
+        {
+            Ok(fd) => Ok(fd as u64),
+            Err(error) => {
+                let _ = self.close_open_description(description);
+                self.eventfds[id.raw()] = None;
+                Err(map_process_file_table_error(error))
+            }
+        }
     }
 
     fn syscall_socket(&mut self, _context: SyscallContext) -> KernelResult<u64> {
@@ -1549,27 +1821,118 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_read(&mut self, context: SyscallContext) -> KernelResult<u64> {
         let buffer = user_slice_mut(context.arg(1), context.arg(2) as usize)?;
         let description = self.fd_description(context.caller, context.arg(0) as usize)?;
-        let file = self
+        match self
             .open_files
-            .get_mut(description)
-            .map_err(map_file_table_error)?;
-        self.root_fs
-            .read(file, buffer)
-            .map(|read| read as u64)
-            .map_err(KernelError::Filesystem)
+            .get_object(description)
+            .map_err(map_file_table_error)?
+        {
+            DescriptorObject::Regular(_) => {
+                let file = self
+                    .open_files
+                    .get_mut(description)
+                    .map_err(map_file_table_error)?;
+                self.root_fs
+                    .read(file, buffer)
+                    .map(|read| read as u64)
+                    .map_err(KernelError::Filesystem)
+            }
+            DescriptorObject::Pipe(endpoint) => {
+                if endpoint.direction() != PipeDirection::Read {
+                    return Err(KernelError::InvalidArgument);
+                }
+                let pipe = self
+                    .pipes
+                    .get_mut(endpoint.id().raw())
+                    .and_then(Option::as_mut)
+                    .ok_or(KernelError::InvalidArgument)?;
+                Ok(pipe.read(buffer) as u64)
+            }
+            DescriptorObject::EventFd(id) => {
+                if buffer.len() < 8 {
+                    return Err(KernelError::InvalidArgument);
+                }
+                let eventfd = self
+                    .eventfds
+                    .get_mut(id.raw())
+                    .and_then(Option::as_mut)
+                    .ok_or(KernelError::InvalidArgument)?;
+                if eventfd.counter == 0 {
+                    return Ok(0);
+                }
+                let value = if eventfd.semaphore {
+                    eventfd.counter -= 1;
+                    1
+                } else {
+                    let value = eventfd.counter;
+                    eventfd.counter = 0;
+                    value
+                };
+                buffer[..8].copy_from_slice(&value.to_ne_bytes());
+                Ok(8)
+            }
+            DescriptorObject::Device(handle) => self
+                .device_read(context.caller, handle.id(), buffer)
+                .map(|read| read as u64),
+        }
     }
 
     fn syscall_write(&mut self, context: SyscallContext) -> KernelResult<u64> {
         let data = user_slice(context.arg(1), context.arg(2) as usize)?;
         let description = self.fd_description(context.caller, context.arg(0) as usize)?;
-        let file = self
+        match self
             .open_files
-            .get_mut(description)
-            .map_err(map_file_table_error)?;
-        self.root_fs
-            .write(file, data)
-            .map(|written| written as u64)
-            .map_err(KernelError::Filesystem)
+            .get_object(description)
+            .map_err(map_file_table_error)?
+        {
+            DescriptorObject::Regular(_) => {
+                let file = self
+                    .open_files
+                    .get_mut(description)
+                    .map_err(map_file_table_error)?;
+                self.root_fs
+                    .write(file, data)
+                    .map(|written| written as u64)
+                    .map_err(KernelError::Filesystem)
+            }
+            DescriptorObject::Pipe(endpoint) => {
+                if endpoint.direction() != PipeDirection::Write {
+                    return Err(KernelError::InvalidArgument);
+                }
+                let pipe = self
+                    .pipes
+                    .get_mut(endpoint.id().raw())
+                    .and_then(Option::as_mut)
+                    .ok_or(KernelError::InvalidArgument)?;
+                if pipe.readers == 0 {
+                    return Err(KernelError::InvalidArgument);
+                }
+                Ok(pipe.write(data) as u64)
+            }
+            DescriptorObject::EventFd(id) => {
+                if data.len() < 8 {
+                    return Err(KernelError::InvalidArgument);
+                }
+                let value = u64::from_ne_bytes([
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]);
+                if value == u64::MAX {
+                    return Err(KernelError::InvalidArgument);
+                }
+                let eventfd = self
+                    .eventfds
+                    .get_mut(id.raw())
+                    .and_then(Option::as_mut)
+                    .ok_or(KernelError::InvalidArgument)?;
+                eventfd.counter = eventfd
+                    .counter
+                    .checked_add(value)
+                    .ok_or(KernelError::InvalidArgument)?;
+                Ok(8)
+            }
+            DescriptorObject::Device(handle) => self
+                .device_write(context.caller, handle.id(), data)
+                .map(|written| written as u64),
+        }
     }
 
     fn syscall_pread64(&self, context: SyscallContext) -> KernelResult<u64> {
@@ -2399,14 +2762,173 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn close_open_description(&mut self, description: FileDescriptionId) -> KernelResult<()> {
-        if let Some(file) = self
+        if let Some(object) = self
             .open_files
             .close(description)
             .map_err(map_file_table_error)?
         {
-            self.root_fs.close(file).map_err(KernelError::Filesystem)?;
+            match object {
+                DescriptorObject::Regular(file) => {
+                    self.root_fs.close(file).map_err(KernelError::Filesystem)?;
+                }
+                DescriptorObject::Pipe(endpoint) => self.release_pipe_endpoint(endpoint),
+                DescriptorObject::EventFd(id) => self.release_eventfd(id),
+                DescriptorObject::Device(_) => {}
+            }
         }
         Ok(())
+    }
+
+    fn fd_object(&self, pid: ProcessId, fd: usize) -> KernelResult<DescriptorObject> {
+        let description = self.fd_description(pid, fd)?;
+        self.open_files
+            .get_object(description)
+            .map_err(map_file_table_error)
+    }
+
+    fn allocate_pipe(&mut self) -> KernelResult<PipeId> {
+        let mut idx = 0usize;
+        while idx < MAX_KERNEL_PIPES {
+            if self.pipes[idx].is_none() {
+                self.pipes[idx] = Some(PipeObject::new());
+                return Ok(PipeId::new(idx));
+            }
+            idx += 1;
+        }
+        Err(KernelError::FileTableFull)
+    }
+
+    fn release_pipe_endpoint(&mut self, endpoint: PipeEndpoint) {
+        if let Some(pipe) = self
+            .pipes
+            .get_mut(endpoint.id().raw())
+            .and_then(Option::as_mut)
+        {
+            match endpoint.direction() {
+                PipeDirection::Read => pipe.readers = pipe.readers.saturating_sub(1),
+                PipeDirection::Write => pipe.writers = pipe.writers.saturating_sub(1),
+            }
+            if pipe.readers == 0 && pipe.writers == 0 {
+                self.pipes[endpoint.id().raw()] = None;
+            }
+        }
+    }
+
+    fn allocate_eventfd(&mut self, counter: u64, semaphore: bool) -> KernelResult<EventFdId> {
+        let mut idx = 0usize;
+        while idx < MAX_KERNEL_EVENTFDS {
+            if self.eventfds[idx].is_none() {
+                self.eventfds[idx] = Some(EventFdObject::new(counter, semaphore));
+                return Ok(EventFdId::new(idx));
+            }
+            idx += 1;
+        }
+        Err(KernelError::FileTableFull)
+    }
+
+    fn release_eventfd(&mut self, id: EventFdId) {
+        if id.raw() < MAX_KERNEL_EVENTFDS {
+            self.eventfds[id.raw()] = None;
+        }
+    }
+
+    fn descriptor_readiness(&self, object: DescriptorObject, events: i16) -> i16 {
+        let mut revents = 0i16;
+        match object {
+            DescriptorObject::Regular(_) => {
+                if events & (POLLIN | POLLPRI) != 0 {
+                    revents |= events & (POLLIN | POLLPRI);
+                }
+                if events & POLLOUT != 0 {
+                    revents |= POLLOUT;
+                }
+            }
+            DescriptorObject::Pipe(endpoint) => {
+                match self.pipes.get(endpoint.id().raw()).and_then(|entry| *entry) {
+                    Some(pipe) => match endpoint.direction() {
+                        PipeDirection::Read => {
+                            if events & (POLLIN | POLLPRI) != 0 && pipe.is_readable() {
+                                revents |= events & (POLLIN | POLLPRI);
+                            }
+                            if pipe.writers == 0 {
+                                revents |= POLLHUP;
+                            }
+                        }
+                        PipeDirection::Write => {
+                            if events & POLLOUT != 0 && pipe.is_writable() {
+                                revents |= POLLOUT;
+                            }
+                            if pipe.readers == 0 {
+                                revents |= POLLERR;
+                            }
+                        }
+                    },
+                    None => revents |= POLLNVAL,
+                }
+            }
+            DescriptorObject::EventFd(id) => {
+                match self.eventfds.get(id.raw()).and_then(|entry| *entry) {
+                    Some(eventfd) => {
+                        if events & (POLLIN | POLLPRI) != 0 && eventfd.is_readable() {
+                            revents |= events & (POLLIN | POLLPRI);
+                        }
+                        if events & POLLOUT != 0 && eventfd.is_writable() {
+                            revents |= POLLOUT;
+                        }
+                    }
+                    None => revents |= POLLNVAL,
+                }
+            }
+            DescriptorObject::Device(_) => {
+                if events & (POLLIN | POLLPRI) != 0 {
+                    revents |= events & (POLLIN | POLLPRI);
+                }
+                if events & POLLOUT != 0 {
+                    revents |= POLLOUT;
+                }
+            }
+        }
+        revents
+    }
+
+    fn poll_descriptors(
+        &mut self,
+        pid: ProcessId,
+        thread: Option<ThreadId>,
+        fds: &mut [MiragePollFd],
+        timeout_ms: i32,
+    ) -> KernelResult<u64> {
+        let mut ready = 0u64;
+        let mut idx = 0usize;
+        while idx < fds.len() {
+            fds[idx].revents = 0;
+            if fds[idx].fd >= 0 {
+                match self.fd_object(pid, fds[idx].fd as usize) {
+                    Ok(object) => {
+                        fds[idx].revents = self.descriptor_readiness(object, fds[idx].events)
+                    }
+                    Err(_) => fds[idx].revents = POLLNVAL,
+                }
+                if fds[idx].revents != 0 {
+                    ready += 1;
+                }
+            }
+            idx += 1;
+        }
+        if ready == 0 && timeout_ms != 0 {
+            if timeout_ms > 0 {
+                let wake_deadline = KERNEL_TIME
+                    .now()
+                    .as_nanos()
+                    .saturating_add((timeout_ms as u128).saturating_mul(1_000_000));
+                self.timers
+                    .add_sleep(pid, thread, wake_deadline)
+                    .map_err(map_timer_error)?;
+            }
+            let process_index = self.locate_process(pid)?;
+            self.block_process_at_index(pid, process_index);
+        }
+        Ok(ready)
     }
 
     pub fn tick(&mut self) {
@@ -3013,6 +3535,14 @@ fn nanos_to_timespec(nanos: u128) -> MirageTimespec {
     MirageTimespec {
         tv_sec: (nanos / 1_000_000_000) as i64,
         tv_nsec: (nanos % 1_000_000_000) as i64,
+    }
+}
+
+fn descriptor_flags_from_raw(flags: u64) -> DescriptorFlags {
+    if flags & (O_CLOEXEC_RAW | EFD_CLOEXEC) != 0 {
+        DescriptorFlags::CLOSE_ON_EXEC
+    } else {
+        DescriptorFlags::EMPTY
     }
 }
 
