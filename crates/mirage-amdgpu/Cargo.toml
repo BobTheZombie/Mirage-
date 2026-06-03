@@ -1,0 +1,12 @@
+[package]
+name = "mirage-amdgpu"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Mock AMDGPU driver service skeleton for Mirage graphics"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+mirage-cap = { path = "../mirage-cap" }
+mirage-fb = { path = "../mirage-fb" }
+mirage-gpu = { path = "../mirage-gpu" }

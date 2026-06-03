@@ -7,6 +7,15 @@ name = "mirage"
 version = "0.1.0"
 
 [[package]]
+name = "mirage-amdgpu"
+version = "0.1.0"
+dependencies = [
+ "mirage-cap",
+ "mirage-fb",
+ "mirage-gpu",
+]
+
+[[package]]
 name = "mirage-block"
 version = "0.1.0"
 
