@@ -23,7 +23,7 @@ pub use ext4::{Ext4Backend, Ext4Error, Ext4Superblock, SsdUsbOptions};
 pub use file::{
     DescriptorFlags, DescriptorObject, DeviceHandle, EventFdId, File, FileDescriptionId,
     FileHandle, FileMode, FileTable, FileTableError, OpenFileDescription, OpenFlags, PipeDirection,
-    PipeEndpoint, PipeId,
+    PipeEndpoint, PipeId, SocketHandle,
 };
 pub use inode::{Dentry, DirEntry, Inode, InodeId, InodeKind, InodeMetadata, Stat};
 pub use mount::{Mount, MountError, MountTable};
