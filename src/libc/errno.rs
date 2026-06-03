@@ -8,6 +8,39 @@ use crate::kernel::syscall::{
 use crate::kernel::KernelError;
 use crate::subkernel::IsolationError;
 
+/// Process-wide errno storage exported for C sysroot headers.
+///
+/// Mirage currently runs these libc shims in a single kernel/runtime context, so
+/// errno is process-wide until TLS-backed per-thread errno is wired into the
+/// userspace runtime.
+#[no_mangle]
+pub static mut errno: i32 = 0;
+
+#[no_mangle]
+pub unsafe extern "C" fn __errno_location() -> *mut i32 {
+    core::ptr::addr_of_mut!(errno)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mirage_errno_location() -> *mut i32 {
+    __errno_location()
+}
+
+pub(super) fn set_errno(value: i32) {
+    unsafe {
+        errno = value;
+    }
+}
+
+pub(super) fn return_or_errno(value: isize) -> isize {
+    if value < 0 {
+        set_errno((-value) as i32);
+        -1
+    } else {
+        value
+    }
+}
+
 pub(super) fn libc_errno(error: KernelError) -> i32 {
     match error {
         KernelError::ProcessTableFull

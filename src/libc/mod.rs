@@ -25,27 +25,59 @@ pub mod sys_stat;
 pub mod time;
 pub mod unistd;
 
-pub use dirent::{getdents64, mirage_getdents64};
-pub use fcntl::{mirage_open, mirage_openat, open, openat};
+pub use dirent::getdents64;
+pub use fcntl::{open, openat};
 pub use sys_stat::{
-    fstat, fsync, ftruncate, mirage_fstat, mirage_fsync, mirage_ftruncate, mirage_mkdir,
-    mirage_mkdirat, mirage_newfstatat, mirage_rename, mirage_renameat, mirage_renameat2,
-    mirage_stat, mirage_statx, mirage_unlink, mirage_unlinkat, mkdir, mkdirat, rename, renameat,
-    renameat2, stat, statx, unlink, unlinkat,
+    fstat, fsync, ftruncate, mkdir, mkdirat, newfstatat, rename, renameat, renameat2, stat, statx,
+    unlink, unlinkat,
 };
-pub use time::{clock_gettime, mirage_clock_gettime};
+pub use time::clock_gettime;
 pub use unistd::{
-    close, getegid, geteuid, getgid, getpid, getppid, getuid, lseek, mirage_clone, mirage_close,
-    mirage_device_enumerate, mirage_device_info, mirage_device_read, mirage_device_write,
-    mirage_exit, mirage_getegid, mirage_geteuid, mirage_getgid, mirage_getgroups, mirage_getpid,
-    mirage_getppid, mirage_getuid, mirage_kill, mirage_lseek, mirage_read, mirage_setgid,
-    mirage_setuid, mirage_write, read, write,
+    _exit, clone, close, getegid, geteuid, getgid, getgroups, getpid, getppid, getuid, kill, lseek,
+    mirage_device_enumerate, mirage_device_info, mirage_device_read, mirage_device_write, read,
+    setgid, setuid, write,
 };
 
 pub(super) type DefaultKernel =
     Kernel<{ crate::kernel::MAX_PROCESSES }, { crate::kernel::MESSAGE_DEPTH }>;
 
 pub(super) const MIRAGE_AT_FDCWD: i32 = -100;
+
+#[derive(Clone, Copy)]
+pub struct MirageRuntimeSyscallContext {
+    pub kernel: *mut DefaultKernel,
+    pub caller: ProcessId,
+    pub thread: Option<ThreadId>,
+}
+
+static mut RUNTIME_SYSCALL_CONTEXT: MirageRuntimeSyscallContext = MirageRuntimeSyscallContext {
+    kernel: core::ptr::null_mut(),
+    caller: ProcessId::new(0),
+    thread: None,
+};
+
+/// Installs the kernel/process/thread context used by POSIX C ABI shims.
+#[no_mangle]
+pub unsafe extern "C" fn mirage_set_runtime_syscall_context(
+    kernel: *mut DefaultKernel,
+    caller: u64,
+    thread: u64,
+) {
+    RUNTIME_SYSCALL_CONTEXT = MirageRuntimeSyscallContext {
+        kernel,
+        caller: ProcessId::new(caller),
+        thread: if thread == 0 {
+            None
+        } else {
+            Some(ThreadId::new(thread))
+        },
+    };
+}
+
+/// Returns the runtime context currently used for libc/syscall dispatch.
+pub fn mirage_runtime_syscall_context() -> MirageRuntimeSyscallContext {
+    unsafe { RUNTIME_SYSCALL_CONTEXT }
+}
 
 pub enum SpawnCredentialProfile {
     User = 0,
@@ -377,6 +409,7 @@ pub fn free<const MAX_PROC: usize, const MSG_DEPTH: usize>(
     syscall(kernel, caller, thread, SyscallNumber::Free, args).map(|_| ())
 }
 
+#[allow(dead_code)]
 pub(super) fn raw_syscall_default(
     kernel: *mut DefaultKernel,
     caller: u64,
@@ -392,6 +425,26 @@ pub(super) fn raw_syscall_default(
         (&mut *kernel).handle_syscall(
             number,
             SyscallContext::new(ProcessId::new(caller), None, args),
+        )
+    };
+    match result {
+        Ok(value) => value as isize,
+        Err(error) => -(errno::libc_errno(error) as isize),
+    }
+}
+
+pub(super) fn raw_syscall_runtime(number: u64, args: [u64; SYSCALL_MAX_ARGS]) -> isize {
+    use crate::kernel::syscall::MIRAGE_EFAULT;
+
+    let context = mirage_runtime_syscall_context();
+    if context.kernel.is_null() {
+        return -(MIRAGE_EFAULT as isize);
+    }
+
+    let result = unsafe {
+        (&mut *context.kernel).handle_syscall(
+            number,
+            SyscallContext::new(context.caller, context.thread, args),
         )
     };
     match result {

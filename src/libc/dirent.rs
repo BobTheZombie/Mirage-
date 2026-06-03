@@ -1,12 +1,12 @@
 //! Directory entry C ABI wrappers.
+#![allow(dead_code)]
 
 use crate::kernel::fs::CDirEntry;
 use crate::kernel::syscall::{self, MIRAGE_EFAULT};
 
-use super::{raw_syscall_default, DefaultKernel};
+use super::{errno, raw_syscall_default, raw_syscall_runtime, DefaultKernel};
 
-#[no_mangle]
-pub unsafe extern "C" fn mirage_getdents64(
+pub(crate) unsafe fn mirage_getdents64_with_kernel(
     kernel: *mut DefaultKernel,
     caller: u64,
     fd: i32,
@@ -25,12 +25,12 @@ pub unsafe extern "C" fn mirage_getdents64(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn getdents64(
-    kernel: *mut DefaultKernel,
-    caller: u64,
-    fd: i32,
-    entries: *mut CDirEntry,
-    count: usize,
-) -> isize {
-    mirage_getdents64(kernel, caller, fd, entries, count)
+pub unsafe extern "C" fn getdents64(fd: i32, entries: *mut CDirEntry, count: usize) -> isize {
+    if count > 0 && entries.is_null() {
+        return errno::return_or_errno(-(MIRAGE_EFAULT as isize));
+    }
+    errno::return_or_errno(raw_syscall_runtime(
+        syscall::MIRAGE_SYSCALL_GETDENTS64,
+        [fd as u64, entries as u64, count as u64, 0, 0, 0],
+    ))
 }
