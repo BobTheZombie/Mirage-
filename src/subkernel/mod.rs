@@ -79,14 +79,195 @@ pub enum IsolationLevel {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapabilityId(u64);
+
+impl CapabilityId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
+    pub const fn raw(&self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapabilityObject {
+    IpcEndpoint(ProcessId),
+    IrqLine(u16),
+    DmaRegion { base: u64, length: u64 },
+    PciDevice(u64),
+    FsObject(u64),
+    ServiceControl,
+    ModuleLoad,
+    ProcessHandle(ProcessId),
+    MemoryObject(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapabilityRight {
+    Read,
+    Write,
+    Send,
+    Receive,
+    Control,
+    Transfer,
+    Revoke,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapabilityRights {
+    flags: u16,
+}
+
+const RIGHT_READ: u16 = 0b0000001;
+const RIGHT_WRITE: u16 = 0b0000010;
+const RIGHT_SEND: u16 = 0b0000100;
+const RIGHT_RECEIVE: u16 = 0b0001000;
+const RIGHT_CONTROL: u16 = 0b0010000;
+const RIGHT_TRANSFER: u16 = 0b0100000;
+const RIGHT_REVOKE: u16 = 0b1000000;
+
+impl CapabilityRights {
+    pub const fn new(flags: u16) -> Self {
+        Self { flags }
+    }
+
+    pub const fn none() -> Self {
+        Self::new(0)
+    }
+
+    pub const fn all() -> Self {
+        Self::new(
+            RIGHT_READ
+                | RIGHT_WRITE
+                | RIGHT_SEND
+                | RIGHT_RECEIVE
+                | RIGHT_CONTROL
+                | RIGHT_TRANSFER
+                | RIGHT_REVOKE,
+        )
+    }
+
+    pub const fn io() -> Self {
+        Self::new(RIGHT_READ | RIGHT_WRITE | RIGHT_CONTROL | RIGHT_TRANSFER | RIGHT_REVOKE)
+    }
+
+    pub const fn ipc_endpoint() -> Self {
+        Self::new(RIGHT_SEND | RIGHT_RECEIVE | RIGHT_TRANSFER | RIGHT_REVOKE)
+    }
+
+    pub const fn service_control() -> Self {
+        Self::new(RIGHT_CONTROL | RIGHT_TRANSFER | RIGHT_REVOKE)
+    }
+
+    pub const fn memory() -> Self {
+        Self::new(RIGHT_READ | RIGHT_WRITE | RIGHT_CONTROL | RIGHT_TRANSFER | RIGHT_REVOKE)
+    }
+
+    pub const fn process_control() -> Self {
+        Self::new(RIGHT_CONTROL | RIGHT_TRANSFER | RIGHT_REVOKE)
+    }
+
+    pub const fn with(mut self, right: CapabilityRight) -> Self {
+        self.flags |= right.flag();
+        self
+    }
+
+    pub const fn without(mut self, right: CapabilityRight) -> Self {
+        self.flags &= !right.flag();
+        self
+    }
+
+    pub const fn contains(self, right: CapabilityRight) -> bool {
+        (self.flags & right.flag()) != 0
+    }
+
+    pub const fn contains_all(self, requested: CapabilityRights) -> bool {
+        (self.flags & requested.flags) == requested.flags
+    }
+
+    pub const fn inherited_child(self) -> Self {
+        self.without(CapabilityRight::Revoke)
+    }
+
+    pub const fn raw(&self) -> u16 {
+        self.flags
+    }
+}
+
+impl CapabilityRight {
+    const fn flag(self) -> u16 {
+        match self {
+            CapabilityRight::Read => RIGHT_READ,
+            CapabilityRight::Write => RIGHT_WRITE,
+            CapabilityRight::Send => RIGHT_SEND,
+            CapabilityRight::Receive => RIGHT_RECEIVE,
+            CapabilityRight::Control => RIGHT_CONTROL,
+            CapabilityRight::Transfer => RIGHT_TRANSFER,
+            CapabilityRight::Revoke => RIGHT_REVOKE,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapabilityRecord {
+    id: CapabilityId,
+    owner: ProcessId,
+    object: CapabilityObject,
+    rights: CapabilityRights,
+    parent: Option<CapabilityId>,
+}
+
+impl CapabilityRecord {
+    pub const fn new(
+        id: CapabilityId,
+        owner: ProcessId,
+        object: CapabilityObject,
+        rights: CapabilityRights,
+        parent: Option<CapabilityId>,
+    ) -> Self {
+        Self {
+            id,
+            owner,
+            object,
+            rights,
+            parent,
+        }
+    }
+
+    pub const fn id(&self) -> CapabilityId {
+        self.id
+    }
+
+    pub const fn owner(&self) -> ProcessId {
+        self.owner
+    }
+
+    pub const fn object(&self) -> CapabilityObject {
+        self.object
+    }
+
+    pub const fn rights(&self) -> CapabilityRights {
+        self.rights
+    }
+
+    pub const fn parent(&self) -> Option<CapabilityId> {
+        self.parent
+    }
+}
+
+pub const MAX_CAPABILITY_RECORDS: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CapabilitySet {
     flags: u32,
 }
 
-const CAP_IPC: u32 = 0b0001;
-const CAP_SPAWN: u32 = 0b0010;
-const CAP_KERNEL: u32 = 0b0100;
-const CAP_IO: u32 = 0b1000;
+pub const CAP_IPC: u32 = 0b0001;
+pub const CAP_SPAWN: u32 = 0b0010;
+pub const CAP_KERNEL: u32 = 0b0100;
+pub const CAP_IO: u32 = 0b1000;
 
 impl CapabilitySet {
     pub const fn new(flags: u32) -> Self {
@@ -333,17 +514,22 @@ pub enum IsolationError {
     UnknownTask,
     PolicyViolation,
     CapabilityMissing,
+    CapabilityTableFull,
 }
 
 #[derive(Clone, Copy)]
 pub struct SecurityKernel<const MAX: usize> {
     domains: [Option<TaskDomain>; MAX],
+    capabilities: [Option<CapabilityRecord>; MAX_CAPABILITY_RECORDS],
+    next_capability_id: u64,
 }
 
 impl<const MAX: usize> SecurityKernel<MAX> {
     pub const fn new() -> Self {
         Self {
             domains: [None; MAX],
+            capabilities: [None; MAX_CAPABILITY_RECORDS],
+            next_capability_id: 1,
         }
     }
 
@@ -353,6 +539,13 @@ impl<const MAX: usize> SecurityKernel<MAX> {
             self.domains[idx] = None;
             idx += 1;
         }
+
+        idx = 0;
+        while idx < MAX_CAPABILITY_RECORDS {
+            self.capabilities[idx] = None;
+            idx += 1;
+        }
+        self.next_capability_id = 1;
     }
 
     pub fn register_task(
@@ -361,7 +554,14 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         creds: Credentials,
     ) -> Result<(), IsolationError> {
         if let Some(idx) = self.find_domain_index(pid) {
+            let previous = self.domains[idx];
             self.domains[idx] = Some(TaskDomain::from_credentials(pid, creds));
+            self.revoke_all_capabilities(pid);
+            if let Err(err) = self.seed_initial_capabilities(pid, creds) {
+                self.revoke_all_capabilities(pid);
+                self.domains[idx] = previous;
+                return Err(err);
+            }
             return Ok(());
         }
 
@@ -369,6 +569,10 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         while idx < MAX {
             if self.domains[idx].is_none() {
                 self.domains[idx] = Some(TaskDomain::from_credentials(pid, creds));
+                if let Err(err) = self.seed_initial_capabilities(pid, creds) {
+                    self.domains[idx] = None;
+                    return Err(err);
+                }
                 return Ok(());
             }
             idx += 1;
@@ -381,6 +585,114 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         if let Some(idx) = self.find_domain_index(pid) {
             self.domains[idx] = None;
         }
+        self.revoke_all_capabilities(pid);
+    }
+
+    pub fn grant_capability(
+        &mut self,
+        owner: ProcessId,
+        object: CapabilityObject,
+        rights: CapabilityRights,
+    ) -> Result<CapabilityId, IsolationError> {
+        self.domain(owner)?;
+        self.insert_capability(owner, object, rights, None)
+    }
+
+    pub fn revoke_capability(&mut self, id: CapabilityId) -> Result<(), IsolationError> {
+        let idx = self
+            .find_capability_index(id)
+            .ok_or(IsolationError::CapabilityMissing)?;
+        self.capabilities[idx] = None;
+
+        let mut child_idx = 0;
+        while child_idx < MAX_CAPABILITY_RECORDS {
+            if let Some(record) = self.capabilities[child_idx] {
+                if record.parent == Some(id) {
+                    self.capabilities[child_idx] = None;
+                }
+            }
+            child_idx += 1;
+        }
+
+        Ok(())
+    }
+
+    pub fn check_capability(
+        &self,
+        owner: ProcessId,
+        object: CapabilityObject,
+        right: CapabilityRight,
+    ) -> Result<(), IsolationError> {
+        self.domain(owner)?;
+        if self.has_capability(owner, object, right) {
+            Ok(())
+        } else {
+            Err(IsolationError::CapabilityMissing)
+        }
+    }
+
+    pub fn transfer_capability(
+        &mut self,
+        source: ProcessId,
+        target: ProcessId,
+        id: CapabilityId,
+    ) -> Result<CapabilityId, IsolationError> {
+        self.domain(source)?;
+        self.domain(target)?;
+        let idx = self
+            .find_capability_index(id)
+            .ok_or(IsolationError::CapabilityMissing)?;
+        let record = self.capabilities[idx].ok_or(IsolationError::CapabilityMissing)?;
+
+        if record.owner != source || !record.rights.contains(CapabilityRight::Transfer) {
+            return Err(IsolationError::CapabilityMissing);
+        }
+
+        self.insert_capability(
+            target,
+            record.object,
+            record.rights.inherited_child(),
+            Some(id),
+        )
+    }
+
+    pub fn derive_inherited_child_capabilities(
+        &mut self,
+        parent: ProcessId,
+        child: ProcessId,
+    ) -> Result<(), IsolationError> {
+        self.domain(parent)?;
+        self.domain(child)?;
+
+        let snapshot = self.capabilities;
+        let mut idx = 0;
+        while idx < MAX_CAPABILITY_RECORDS {
+            if let Some(record) = snapshot[idx] {
+                if record.owner == parent && record.rights.contains(CapabilityRight::Transfer) {
+                    self.insert_capability(
+                        child,
+                        record.object,
+                        record.rights.inherited_child(),
+                        Some(record.id),
+                    )?;
+                }
+            }
+            idx += 1;
+        }
+
+        Ok(())
+    }
+
+    pub fn revoke_all_capabilities(&mut self, owner: ProcessId) {
+        let mut idx = 0;
+        while idx < MAX_CAPABILITY_RECORDS {
+            if let Some(record) = self.capabilities[idx] {
+                if record.owner == owner {
+                    self.capabilities[idx] = None;
+                }
+            }
+            idx += 1;
+        }
     }
 
     pub fn authorize_ipc(
@@ -392,9 +704,11 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         let sender_domain = self.domain(sender)?;
         let receiver_domain = self.domain(receiver)?;
 
-        if !sender_domain.capabilities.allows_ipc() {
-            return Err(IsolationError::CapabilityMissing);
-        }
+        self.check_capability(
+            sender,
+            CapabilityObject::IpcEndpoint(receiver),
+            CapabilityRight::Send,
+        )?;
 
         if !sender_domain.can_transmit(class) || !receiver_domain.can_receive(class) {
             return Err(IsolationError::PolicyViolation);
@@ -412,16 +726,16 @@ impl<const MAX: usize> SecurityKernel<MAX> {
     pub fn authorize_device_access(
         &self,
         pid: ProcessId,
+        object: CapabilityObject,
+        required_right: CapabilityRight,
         security: DeviceSecurity,
     ) -> Result<(), IsolationError> {
         let domain = self.domain(pid)?;
 
-        if !domain.capabilities.allows_io() {
-            return Err(IsolationError::CapabilityMissing);
-        }
+        self.check_capability(pid, object, required_right)?;
 
-        if security.requires_kernel_mode() && !domain.capabilities.allows_kernel_access() {
-            return Err(IsolationError::CapabilityMissing);
+        if security.requires_kernel_mode() {
+            self.check_capability(pid, CapabilityObject::ModuleLoad, CapabilityRight::Control)?;
         }
 
         if !domain.label.dominates(&security.class().as_label()) {
@@ -432,32 +746,32 @@ impl<const MAX: usize> SecurityKernel<MAX> {
     }
 
     pub fn authorize_ipc_receive(&self, pid: ProcessId) -> Result<(), IsolationError> {
-        let domain = self.domain(pid)?;
-        if domain.capabilities.allows_ipc() {
-            Ok(())
-        } else {
-            Err(IsolationError::CapabilityMissing)
-        }
+        self.domain(pid)?;
+        self.check_capability(
+            pid,
+            CapabilityObject::IpcEndpoint(pid),
+            CapabilityRight::Receive,
+        )
     }
 
     /// Authorize the L2/subkernel control plane to bind a service endpoint.
     pub fn authorize_service_control(&self, pid: ProcessId) -> Result<(), IsolationError> {
-        let domain = self.domain(pid)?;
-        if domain.has_system_privilege() {
-            Ok(())
-        } else {
-            Err(IsolationError::CapabilityMissing)
-        }
+        self.domain(pid)?;
+        self.check_capability(
+            pid,
+            CapabilityObject::ServiceControl,
+            CapabilityRight::Control,
+        )
     }
 
     /// Authorize changes to mutable Unix credential state (uid/gid/groups).
     pub fn authorize_credential_update(&self, pid: ProcessId) -> Result<(), IsolationError> {
-        let domain = self.domain(pid)?;
-        if domain.has_system_privilege() {
-            Ok(())
-        } else {
-            Err(IsolationError::CapabilityMissing)
-        }
+        self.domain(pid)?;
+        self.check_capability(
+            pid,
+            CapabilityObject::ProcessHandle(pid),
+            CapabilityRight::Control,
+        )
     }
 
     /// Authorize a task domain to own a service advertised at the given class.
@@ -467,9 +781,11 @@ impl<const MAX: usize> SecurityKernel<MAX> {
         class: SecurityClass,
     ) -> Result<(), IsolationError> {
         let domain = self.domain(pid)?;
-        if !domain.capabilities.allows_ipc() {
-            return Err(IsolationError::CapabilityMissing);
-        }
+        self.check_capability(
+            pid,
+            CapabilityObject::IpcEndpoint(pid),
+            CapabilityRight::Receive,
+        )?;
         if domain.can_receive(class) {
             Ok(())
         } else {
@@ -523,12 +839,12 @@ impl<const MAX: usize> SecurityKernel<MAX> {
     }
 
     pub fn authorize_device_enumeration(&self, pid: ProcessId) -> Result<(), IsolationError> {
-        let domain = self.domain(pid)?;
-        if domain.capabilities.allows_io() {
-            Ok(())
-        } else {
-            Err(IsolationError::CapabilityMissing)
-        }
+        self.domain(pid)?;
+        self.check_capability(
+            pid,
+            CapabilityObject::PciDevice(u64::MAX),
+            CapabilityRight::Read,
+        )
     }
 
     pub fn authorize_memory_service(&self, pid: ProcessId) -> Result<(), IsolationError> {
@@ -581,6 +897,181 @@ impl<const MAX: usize> SecurityKernel<MAX> {
                 }
             }
         }
+    }
+
+    fn seed_initial_capabilities(
+        &mut self,
+        pid: ProcessId,
+        creds: Credentials,
+    ) -> Result<(), IsolationError> {
+        let caps = creds.capabilities();
+
+        if caps.allows_ipc() {
+            self.insert_capability(
+                pid,
+                CapabilityObject::IpcEndpoint(pid),
+                CapabilityRights::ipc_endpoint(),
+                None,
+            )?;
+            self.insert_capability(
+                pid,
+                CapabilityObject::IpcEndpoint(ProcessId::new(u64::MAX)),
+                CapabilityRights::ipc_endpoint(),
+                None,
+            )?;
+        }
+
+        if caps.allows_io() {
+            self.insert_capability(
+                pid,
+                CapabilityObject::PciDevice(u64::MAX),
+                CapabilityRights::io(),
+                None,
+            )?;
+            self.insert_capability(
+                pid,
+                CapabilityObject::DmaRegion {
+                    base: 0,
+                    length: u64::MAX,
+                },
+                CapabilityRights::io(),
+                None,
+            )?;
+            self.insert_capability(
+                pid,
+                CapabilityObject::IrqLine(u16::MAX),
+                CapabilityRights::io(),
+                None,
+            )?;
+        }
+
+        if caps.allows_kernel_access() || creds.label().level() == SecurityLevel::System {
+            self.insert_capability(
+                pid,
+                CapabilityObject::ServiceControl,
+                CapabilityRights::service_control(),
+                None,
+            )?;
+            self.insert_capability(
+                pid,
+                CapabilityObject::ModuleLoad,
+                CapabilityRights::service_control(),
+                None,
+            )?;
+            self.insert_capability(
+                pid,
+                CapabilityObject::ProcessHandle(pid),
+                CapabilityRights::process_control(),
+                None,
+            )?;
+            self.insert_capability(
+                pid,
+                CapabilityObject::ProcessHandle(ProcessId::new(u64::MAX)),
+                CapabilityRights::process_control(),
+                None,
+            )?;
+            self.insert_capability(
+                pid,
+                CapabilityObject::MemoryObject(u64::MAX),
+                CapabilityRights::memory(),
+                None,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn insert_capability(
+        &mut self,
+        owner: ProcessId,
+        object: CapabilityObject,
+        rights: CapabilityRights,
+        parent: Option<CapabilityId>,
+    ) -> Result<CapabilityId, IsolationError> {
+        let mut idx = 0;
+        while idx < MAX_CAPABILITY_RECORDS {
+            if self.capabilities[idx].is_none() {
+                let id = CapabilityId::new(self.next_capability_id);
+                self.next_capability_id = self.next_capability_id.wrapping_add(1);
+                if self.next_capability_id == 0 {
+                    self.next_capability_id = 1;
+                }
+                self.capabilities[idx] =
+                    Some(CapabilityRecord::new(id, owner, object, rights, parent));
+                return Ok(id);
+            }
+            idx += 1;
+        }
+
+        Err(IsolationError::CapabilityTableFull)
+    }
+
+    fn has_capability(
+        &self,
+        owner: ProcessId,
+        object: CapabilityObject,
+        right: CapabilityRight,
+    ) -> bool {
+        let mut idx = 0;
+        while idx < MAX_CAPABILITY_RECORDS {
+            if let Some(record) = self.capabilities[idx] {
+                if record.owner == owner
+                    && Self::capability_object_matches(record.object, object)
+                    && record.rights.contains(right)
+                {
+                    return true;
+                }
+            }
+            idx += 1;
+        }
+        false
+    }
+
+    fn capability_object_matches(granted: CapabilityObject, requested: CapabilityObject) -> bool {
+        if granted == requested {
+            return true;
+        }
+
+        match (granted, requested) {
+            (CapabilityObject::IpcEndpoint(pid), CapabilityObject::IpcEndpoint(_))
+            | (CapabilityObject::ProcessHandle(pid), CapabilityObject::ProcessHandle(_)) => {
+                pid.raw() == u64::MAX
+            }
+            (CapabilityObject::PciDevice(id), CapabilityObject::PciDevice(_))
+            | (CapabilityObject::FsObject(id), CapabilityObject::FsObject(_))
+            | (CapabilityObject::MemoryObject(id), CapabilityObject::MemoryObject(_)) => {
+                id == u64::MAX
+            }
+            (CapabilityObject::IrqLine(line), CapabilityObject::IrqLine(_)) => line == u16::MAX,
+            (
+                CapabilityObject::DmaRegion {
+                    base: granted_base,
+                    length: granted_length,
+                },
+                CapabilityObject::DmaRegion {
+                    base: requested_base,
+                    length: requested_length,
+                },
+            ) => {
+                let granted_end = granted_base.saturating_add(granted_length);
+                let requested_end = requested_base.saturating_add(requested_length);
+                requested_base >= granted_base && requested_end <= granted_end
+            }
+            _ => false,
+        }
+    }
+
+    fn find_capability_index(&self, id: CapabilityId) -> Option<usize> {
+        let mut idx = 0;
+        while idx < MAX_CAPABILITY_RECORDS {
+            if let Some(record) = self.capabilities[idx] {
+                if record.id == id {
+                    return Some(idx);
+                }
+            }
+            idx += 1;
+        }
+        None
     }
 
     fn domain(&self, pid: ProcessId) -> Result<TaskDomain, IsolationError> {
@@ -690,6 +1181,116 @@ mod tests {
         );
 
         assert_eq!(security.authorize_exec(&signed), Ok(()));
+    }
+
+    #[test]
+    fn capability_table_grants_revokes_and_checks_object_rights() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        security.register_task(pid(1), Credentials::user()).unwrap();
+
+        let object = CapabilityObject::PciDevice(7);
+        let cap = security
+            .grant_capability(pid(1), object, CapabilityRights::io())
+            .unwrap();
+
+        assert_eq!(
+            security.check_capability(pid(1), object, CapabilityRight::Read),
+            Ok(())
+        );
+        assert_eq!(
+            security.check_capability(
+                pid(1),
+                CapabilityObject::PciDevice(8),
+                CapabilityRight::Read
+            ),
+            Err(IsolationError::CapabilityMissing)
+        );
+
+        security.revoke_capability(cap).unwrap();
+        assert_eq!(
+            security.check_capability(pid(1), object, CapabilityRight::Read),
+            Err(IsolationError::CapabilityMissing)
+        );
+    }
+
+    #[test]
+    fn capability_transfer_and_child_inheritance_use_transferable_rights() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        security.register_task(pid(1), Credentials::user()).unwrap();
+        security.register_task(pid(2), Credentials::user()).unwrap();
+        security.register_task(pid(3), Credentials::user()).unwrap();
+
+        let object = CapabilityObject::MemoryObject(42);
+        let cap = security
+            .grant_capability(pid(1), object, CapabilityRights::memory())
+            .unwrap();
+        let child_cap = security.transfer_capability(pid(1), pid(2), cap).unwrap();
+
+        assert_eq!(
+            security.check_capability(pid(2), object, CapabilityRight::Control),
+            Ok(())
+        );
+        assert_eq!(
+            security.check_capability(pid(2), object, CapabilityRight::Revoke),
+            Err(IsolationError::CapabilityMissing)
+        );
+
+        security
+            .derive_inherited_child_capabilities(pid(1), pid(3))
+            .unwrap();
+        assert_eq!(
+            security.check_capability(pid(3), object, CapabilityRight::Control),
+            Ok(())
+        );
+
+        security.revoke_capability(cap).unwrap();
+        assert_eq!(
+            security.revoke_capability(child_cap),
+            Err(IsolationError::CapabilityMissing)
+        );
+    }
+
+    #[test]
+    fn device_authorization_requires_scoped_device_capability() {
+        let mut security: SecurityKernel<4> = SecurityKernel::new();
+        security.register_task(pid(1), Credentials::user()).unwrap();
+        let security_class = DeviceSecurity::new(SecurityClass::Internal, false);
+
+        assert_eq!(
+            security.authorize_device_access(
+                pid(1),
+                CapabilityObject::PciDevice(3),
+                CapabilityRight::Read,
+                security_class,
+            ),
+            Err(IsolationError::CapabilityMissing)
+        );
+
+        security
+            .grant_capability(
+                pid(1),
+                CapabilityObject::PciDevice(3),
+                CapabilityRights::io(),
+            )
+            .unwrap();
+        assert_eq!(
+            security.authorize_device_access(
+                pid(1),
+                CapabilityObject::PciDevice(3),
+                CapabilityRight::Read,
+                security_class,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            security.authorize_device_access(
+                pid(1),
+                CapabilityObject::PciDevice(4),
+                CapabilityRight::Read,
+                security_class,
+            ),
+            Err(IsolationError::CapabilityMissing)
+        );
     }
 
     #[test]

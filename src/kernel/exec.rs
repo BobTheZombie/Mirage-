@@ -298,6 +298,16 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             self.release_process_file_table(&mut pcb.files);
             KernelError::SecurityViolation(err)
         })?;
+        if let Some(parent_pid) = parent {
+            if let Err(err) = self
+                .security
+                .derive_inherited_child_capabilities(parent_pid, pid)
+            {
+                self.release_process_file_table(&mut pcb.files);
+                self.security.revoke_task(pid);
+                return Err(KernelError::SecurityViolation(err));
+            }
+        }
 
         self.process_table[slot] = Some(pcb);
 
@@ -369,6 +379,14 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             self.release_process_file_table(&mut pcb.files);
             KernelError::SecurityViolation(err)
         })?;
+        if let Err(err) = self
+            .security
+            .derive_inherited_child_capabilities(request.caller, pid)
+        {
+            self.release_process_file_table(&mut pcb.files);
+            self.security.revoke_task(pid);
+            return Err(KernelError::SecurityViolation(err));
+        }
         self.process_table[slot] = Some(pcb);
         Ok(pid)
     }

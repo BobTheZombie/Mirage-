@@ -56,7 +56,8 @@ use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId, ThreadStat
 use crate::kernel::time::KERNEL_TIME;
 use crate::kernel::timer::{TimerError, TimerManager, MAX_PROCESS_TIMERS, MAX_SLEEP_ENTRIES};
 use crate::subkernel::{
-    Credentials, DeviceSecurity, IsolationError, SecurityClass, SecurityKernel,
+    CapabilityObject, CapabilityRight, Credentials, DeviceSecurity, IsolationError, SecurityClass,
+    SecurityKernel,
 };
 use core::cmp::min;
 use core::ptr::NonNull;
@@ -584,7 +585,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .descriptor(device)
             .ok_or(KernelError::DeviceNotFound)?;
         self.security
-            .authorize_device_access(owner, descriptor.security)
+            .authorize_device_access(
+                owner,
+                CapabilityObject::PciDevice(descriptor.id.raw() as u64),
+                CapabilityRight::Control,
+                descriptor.security,
+            )
             .map_err(KernelError::SecurityViolation)?;
         self.service_registry
             .claim_device(service, owner, descriptor)
@@ -3681,7 +3687,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .ok_or(KernelError::DeviceNotFound)?;
 
         self.security
-            .authorize_device_access(pid, descriptor.security)
+            .authorize_device_access(
+                pid,
+                CapabilityObject::PciDevice(descriptor.id.raw() as u64),
+                CapabilityRight::Read,
+                descriptor.security,
+            )
             .map_err(KernelError::SecurityViolation)?;
         if !self.service_registry.claimed_by(pid, id) {
             return Err(KernelError::SecurityViolation(
@@ -3701,7 +3712,12 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .ok_or(KernelError::DeviceNotFound)?;
 
         self.security
-            .authorize_device_access(pid, descriptor.security)
+            .authorize_device_access(
+                pid,
+                CapabilityObject::PciDevice(descriptor.id.raw() as u64),
+                CapabilityRight::Write,
+                descriptor.security,
+            )
             .map_err(KernelError::SecurityViolation)?;
         if !self.service_registry.claimed_by(pid, id) {
             return Err(KernelError::SecurityViolation(
@@ -3995,6 +4011,7 @@ fn isolation_syscall_error_code(reason: IsolationError) -> SyscallErrorCode {
         IsolationError::PolicyViolation | IsolationError::CapabilityMissing => {
             SyscallErrorCode::PermissionDenied
         }
+        IsolationError::CapabilityTableFull => SyscallErrorCode::OutOfMemory,
     }
 }
 
