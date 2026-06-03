@@ -3,6 +3,7 @@
 
 pub mod cpu;
 pub mod device;
+pub mod elf;
 pub mod exec;
 pub mod fs;
 pub mod futex;
@@ -35,8 +36,8 @@ use crate::kernel::futex::{FutexKey, FutexTable, MAX_FUTEX_WAITERS};
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{
-    ExecImageMetadata, ExecRequest, ExecServiceDaemon, ExecSignatureMetadata, ExecVectorMetadata,
-    ExitStatus, ProcessControlBlock, ProcessFileTableError, ProcessGroupId, ProcessId, ProcessPath,
+    ExecRequest, ExecServiceDaemon, ExecSignatureMetadata, ExecVectorMetadata, ExitStatus,
+    ProcessControlBlock, ProcessFileTableError, ProcessGroupId, ProcessId, ProcessPath,
     ProcessPriority, ProcessState, SessionId, SignalAction, SignalMask, MAX_EXEC_ARGS,
     MAX_EXEC_ENVS, MAX_SUPPLEMENTARY_GROUPS, SIGCHLD, SIGKILL, SIGTERM,
 };
@@ -866,15 +867,19 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             return Err(KernelError::Filesystem(VfsError::PermissionDenied));
         }
 
-        let entry_point = context.arg(3);
-        let stack_pointer = context.arg(4);
+        let argv = exec_vector_metadata(context.arg(1), MAX_EXEC_ARGS)?;
+        let envp = exec_vector_metadata(context.arg(2), MAX_EXEC_ENVS)?;
+        if argv.truncated || envp.truncated {
+            return Err(KernelError::InvalidArgument);
+        }
+        let image = self.load_exec_image(context.caller, &resolved, stat, argv, envp)?;
         let request = ExecRequest::new(
             context.caller,
             ProcessPath::from_path(path),
-            exec_vector_metadata(context.arg(1), MAX_EXEC_ARGS)?,
-            exec_vector_metadata(context.arg(2), MAX_EXEC_ENVS)?,
+            argv,
+            envp,
             decode_credentials(context.arg(5))?,
-            self.exec_image_metadata(&resolved, stat, entry_point, stack_pointer),
+            image,
         );
 
         self.exec_task(request, context.thread)?;
@@ -2565,25 +2570,6 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Ok(resolved)
     }
 
-    fn exec_image_metadata(
-        &self,
-        resolved: &KernelPathBuf,
-        stat: crate::kernel::fs::inode::Stat,
-        entry_point: u64,
-        stack_pointer: u64,
-    ) -> ExecImageMetadata {
-        let (service_daemon, signature) = signed_exec_manifest_for_path(resolved.as_str());
-        ExecImageMetadata::new(
-            stat.inode.raw(),
-            stat.size,
-            stat.mode,
-            entry_point,
-            stack_pointer,
-            service_daemon,
-            signature,
-        )
-    }
-
     fn user_path(&self, path_ptr: u64) -> KernelResult<Path<'_>> {
         let raw = self.user_path_str(path_ptr)?;
         Path::new(raw).map_err(map_path_error)
@@ -2600,10 +2586,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         current_thread: Option<ThreadId>,
         entry_point: u64,
         stack_pointer: u64,
+        address_space_root: u64,
     ) -> KernelResult<()> {
         let index = self.locate_process(pid)?;
         if let Some(pcb) = self.process_table[index].as_mut() {
-            pcb.set_exec_image(entry_point, 0);
+            pcb.set_exec_image(entry_point, address_space_root);
             pcb.thread_count = 0;
         }
 

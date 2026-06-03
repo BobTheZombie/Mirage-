@@ -7,6 +7,7 @@
 use core::{
     cmp,
     ptr::{self, NonNull},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::arch::x86_64::{
@@ -973,6 +974,7 @@ type KernelMemory = MemoryManager<DEFAULT_HEAP_BYTES, MAX_ALLOCATION_RECORDS>;
 static MEMORY_MANAGER: SpinLock<KernelMemory> = SpinLock::new(MemoryManager::new());
 static PHYSICAL_ALLOCATOR: SpinLock<PhysicalFrameAllocator<MAX_PHYSICAL_REGIONS>> =
     SpinLock::new(PhysicalFrameAllocator::new());
+static NEXT_USER_ADDRESS_SPACE_ROOT: AtomicU64 = AtomicU64::new(0x1000);
 
 pub fn initialize_from_boot_info(boot_info: &BootInfo) {
     PHYSICAL_ALLOCATOR.lock().ingest_boot_info(boot_info);
@@ -1043,6 +1045,32 @@ pub fn mmap_for(
     protection: MemoryProtection,
 ) -> Option<MappedRegion> {
     MEMORY_MANAGER.lock().mmap_for(owner, length, protection)
+}
+
+pub fn create_user_address_space(_owner: ProcessId) -> Option<u64> {
+    NEXT_USER_ADDRESS_SPACE_ROOT
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_add(PAGE_SIZE as u64)
+        })
+        .ok()
+        .filter(|root| *root != 0)
+}
+
+pub fn mmap_user_fixed(
+    owner: ProcessId,
+    address_space_root: u64,
+    virtual_address: u64,
+    length: usize,
+    protection: MemoryProtection,
+) -> Option<MappedRegion> {
+    if address_space_root == 0
+        || length == 0
+        || virtual_address & ((PAGE_SIZE as u64) - 1) != 0
+        || virtual_address.checked_add(length as u64)? > 0x0000_8000_0000_0000
+    {
+        return None;
+    }
+    mmap_for(owner, length, protection)
 }
 
 pub fn munmap(region: MappedRegion) -> bool {

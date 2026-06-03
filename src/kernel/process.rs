@@ -144,6 +144,7 @@ pub struct ExecImageMetadata {
     pub mode: u16,
     pub entry_point: u64,
     pub stack_pointer: u64,
+    pub address_space_root: u64,
     pub service_daemon: Option<ExecServiceDaemon>,
     pub signature: Option<ExecSignatureMetadata>,
 }
@@ -155,6 +156,7 @@ impl ExecImageMetadata {
         mode: u16,
         entry_point: u64,
         stack_pointer: u64,
+        address_space_root: u64,
         service_daemon: Option<ExecServiceDaemon>,
         signature: Option<ExecSignatureMetadata>,
     ) -> Self {
@@ -164,6 +166,7 @@ impl ExecImageMetadata {
             mode,
             entry_point,
             stack_pointer,
+            address_space_root,
             service_daemon,
             signature,
         }
