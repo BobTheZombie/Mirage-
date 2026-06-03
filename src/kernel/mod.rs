@@ -3281,7 +3281,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                         terminated = true;
                     } else {
                         thread.mark_running();
-                        run_outcome = x86_64::run_thread_slice(thread);
+                        run_outcome = x86_64::run_thread_slice(core_index, thread);
                         thread.accumulate_cpu_time(1);
                     }
                 }

@@ -43,6 +43,12 @@ pub enum PrivilegeMode {
     User = 3,
 }
 
+/// Internal assembly/Rust stack-frame contract for saved x86_64 thread state.
+///
+/// `src/arch/x86_64/entry.S` stores trap frames in this exact `repr(C)` field
+/// order so syscall argument extraction and scheduler restores continue to use
+/// one canonical ABI. Bump the arch-side ABI version before changing this
+/// layout.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuContext {
@@ -74,6 +80,45 @@ pub struct CpuContext {
     pub error_code: u64,
     pub privilege_mode: PrivilegeMode,
 }
+
+pub const CPU_CONTEXT_SIZE: usize = core::mem::size_of::<CpuContext>();
+pub const CPU_CONTEXT_RAX_OFFSET: usize = core::mem::offset_of!(CpuContext, rax);
+pub const CPU_CONTEXT_RBX_OFFSET: usize = core::mem::offset_of!(CpuContext, rbx);
+pub const CPU_CONTEXT_RCX_OFFSET: usize = core::mem::offset_of!(CpuContext, rcx);
+pub const CPU_CONTEXT_RDX_OFFSET: usize = core::mem::offset_of!(CpuContext, rdx);
+pub const CPU_CONTEXT_RSI_OFFSET: usize = core::mem::offset_of!(CpuContext, rsi);
+pub const CPU_CONTEXT_RDI_OFFSET: usize = core::mem::offset_of!(CpuContext, rdi);
+pub const CPU_CONTEXT_RBP_OFFSET: usize = core::mem::offset_of!(CpuContext, rbp);
+pub const CPU_CONTEXT_R8_OFFSET: usize = core::mem::offset_of!(CpuContext, r8);
+pub const CPU_CONTEXT_R9_OFFSET: usize = core::mem::offset_of!(CpuContext, r9);
+pub const CPU_CONTEXT_R10_OFFSET: usize = core::mem::offset_of!(CpuContext, r10);
+pub const CPU_CONTEXT_R11_OFFSET: usize = core::mem::offset_of!(CpuContext, r11);
+pub const CPU_CONTEXT_R12_OFFSET: usize = core::mem::offset_of!(CpuContext, r12);
+pub const CPU_CONTEXT_R13_OFFSET: usize = core::mem::offset_of!(CpuContext, r13);
+pub const CPU_CONTEXT_R14_OFFSET: usize = core::mem::offset_of!(CpuContext, r14);
+pub const CPU_CONTEXT_R15_OFFSET: usize = core::mem::offset_of!(CpuContext, r15);
+pub const CPU_CONTEXT_RIP_OFFSET: usize = core::mem::offset_of!(CpuContext, rip);
+pub const CPU_CONTEXT_CS_OFFSET: usize = core::mem::offset_of!(CpuContext, cs);
+pub const CPU_CONTEXT_RFLAGS_OFFSET: usize = core::mem::offset_of!(CpuContext, rflags);
+pub const CPU_CONTEXT_RSP_OFFSET: usize = core::mem::offset_of!(CpuContext, rsp);
+pub const CPU_CONTEXT_SS_OFFSET: usize = core::mem::offset_of!(CpuContext, ss);
+pub const CPU_CONTEXT_FS_OFFSET: usize = core::mem::offset_of!(CpuContext, fs);
+pub const CPU_CONTEXT_GS_OFFSET: usize = core::mem::offset_of!(CpuContext, gs);
+pub const CPU_CONTEXT_FS_BASE_OFFSET: usize = core::mem::offset_of!(CpuContext, fs_base);
+pub const CPU_CONTEXT_GS_BASE_OFFSET: usize = core::mem::offset_of!(CpuContext, gs_base);
+pub const CPU_CONTEXT_TRAP_VECTOR_OFFSET: usize = core::mem::offset_of!(CpuContext, trap_vector);
+pub const CPU_CONTEXT_ERROR_CODE_OFFSET: usize = core::mem::offset_of!(CpuContext, error_code);
+pub const CPU_CONTEXT_PRIVILEGE_MODE_OFFSET: usize =
+    core::mem::offset_of!(CpuContext, privilege_mode);
+
+const _: () = {
+    assert!(CPU_CONTEXT_SIZE == 216);
+    assert!(CPU_CONTEXT_RAX_OFFSET == 0);
+    assert!(CPU_CONTEXT_RIP_OFFSET == 120);
+    assert!(CPU_CONTEXT_FS_BASE_OFFSET == 176);
+    assert!(CPU_CONTEXT_TRAP_VECTOR_OFFSET == 192);
+    assert!(CPU_CONTEXT_PRIVILEGE_MODE_OFFSET == 208);
+};
 
 impl CpuContext {
     pub const fn new(
