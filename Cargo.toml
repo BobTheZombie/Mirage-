@@ -27,10 +27,12 @@ required-features = ["qfs-std"]
 [features]
 default = []
 # Enables host/testing QFS adapters backed by the Rust standard library.
-qfs-std = []
+qfs-std = ["dep:mirage-block", "dep:mirage-storage"]
 
 [dependencies]
 # The default kernel build is strictly no_std and does not currently rely on external crates.
+mirage-block = { path = "crates/mirage-block", optional = true }
+mirage-storage = { path = "crates/mirage-storage", optional = true }
 
 [profile.dev]
 panic = "abort"

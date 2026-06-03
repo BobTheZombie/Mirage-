@@ -1,19 +1,221 @@
-//! Userspace QFS image operations backed by host [`std::fs::File`] handles.
+//! Userspace QFS image operations backed by generic Mirage block/storage handles.
 //!
 //! This module is compiled only when the `qfs-std` Cargo feature is enabled so
 //! hosted tooling can format and inspect QFS images without depending on the
-//! private kernel filesystem module layout.
+//! private kernel filesystem module layout or driver-specific storage crates.
 
 use std::boxed::Box;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
+use std::vec;
 
 use crate::kernel::device::{BlockStorageDevice, DeviceError};
+use mirage_block::{BlockDevice, BlockDeviceInfo, BlockError, BlockRange, Lba, SectorCount};
+use mirage_storage::{StorageCapability, StorageDeviceHandle, StorageError, StorageService};
 
 pub use crate::kernel::fs::qfs_format::{
     QfsSuperblock, QFS_BOOK_PAGES, QFS_PAGE_SECTORS, QFS_SECTOR_SIZE,
 };
+
+/// QFS sector adapter over Mirage's backend-independent [`mirage_block::BlockDevice`] trait.
+///
+/// Driver services such as NVMe, AHCI, USB storage, or future transports should expose
+/// devices through `mirage-block`; QFS consumes only this stable block abstraction.
+pub struct MirageBlockQfsDevice<D: BlockDevice> {
+    device: Mutex<D>,
+    info: BlockDeviceInfo,
+}
+
+impl<D: BlockDevice> MirageBlockQfsDevice<D> {
+    /// Wraps any `mirage-block` device behind QFS's existing sector-addressed API.
+    pub fn new(device: D) -> Result<Self, DeviceError> {
+        let info = device.info();
+        validate_sector_size(info.block_size.bytes_usize())?;
+        Ok(Self {
+            device: Mutex::new(device),
+            info,
+        })
+    }
+
+    fn range_for_transfer(
+        &self,
+        first_sector: u64,
+        byte_count: usize,
+    ) -> Result<Option<BlockRange>, DeviceError> {
+        let sector_size = self.sector_size();
+        if byte_count % sector_size != 0 {
+            return Err(DeviceError::BufferTooSmall);
+        }
+
+        let sectors = byte_count / sector_size;
+        if sectors == 0 {
+            return Ok(None);
+        }
+
+        let sector_count = u64::try_from(sectors).map_err(|_| DeviceError::Unsupported)?;
+        Ok(Some(BlockRange::new(
+            Lba::new(first_sector),
+            SectorCount::new(sector_count),
+        )))
+    }
+}
+
+impl<D: BlockDevice> BlockStorageDevice for MirageBlockQfsDevice<D> {
+    fn sector_size(&self) -> usize {
+        self.info.block_size.bytes_usize()
+    }
+
+    fn sector_count(&self) -> u64 {
+        self.info.sectors.get()
+    }
+
+    fn read_sectors(&self, first_sector: u64, buffer: &mut [u8]) -> Result<usize, DeviceError> {
+        let Some(range) = self.range_for_transfer(first_sector, buffer.len())? else {
+            return Ok(0);
+        };
+        let mut device = self.device.lock().map_err(|_| DeviceError::Busy)?;
+        device.read_blocks(range, buffer).map_err(map_block_error)?;
+        Ok(buffer.len())
+    }
+
+    fn write_sectors(&self, first_sector: u64, data: &[u8]) -> Result<usize, DeviceError> {
+        let Some(range) = self.range_for_transfer(first_sector, data.len())? else {
+            return Ok(0);
+        };
+        let mut device = self.device.lock().map_err(|_| DeviceError::Busy)?;
+        device.write_blocks(range, data).map_err(map_block_error)?;
+        Ok(data.len())
+    }
+
+    fn flush(&self) -> Result<(), DeviceError> {
+        let mut device = self.device.lock().map_err(|_| DeviceError::Busy)?;
+        device.flush().map_err(map_block_error)
+    }
+
+    fn discard(&self, first_sector: u64, sector_count: u64) -> Result<(), DeviceError> {
+        self.write_zeroes(first_sector, sector_count)
+    }
+
+    fn write_zeroes(&self, first_sector: u64, sector_count: u64) -> Result<(), DeviceError> {
+        if sector_count == 0 {
+            return Ok(());
+        }
+
+        let byte_count = byte_len(self.sector_size(), sector_count)?;
+        let data_len = usize::try_from(byte_count).map_err(|_| DeviceError::Unsupported)?;
+        let zeroes = vec![0u8; data_len];
+        self.write_sectors(first_sector, &zeroes)?;
+        Ok(())
+    }
+}
+
+/// Capability-checked QFS adapter over a supervisor-owned [`mirage_storage::StorageService`].
+///
+/// This is the preferred service-kernel path for mounting QFS from a storage handle:
+/// the filesystem sees only sector operations, while access remains mediated by the
+/// storage capability issued for the registered generic block device.
+pub struct StorageServiceQfsDevice {
+    service: Mutex<StorageService>,
+    handle: StorageDeviceHandle,
+    capability: StorageCapability,
+}
+
+impl StorageServiceQfsDevice {
+    /// Wraps a registered storage handle and capability for QFS sector I/O.
+    pub fn new(
+        service: StorageService,
+        handle: StorageDeviceHandle,
+        capability: StorageCapability,
+    ) -> Result<Self, DeviceError> {
+        validate_sector_size(handle.info().block_size.bytes_usize())?;
+        if capability.device_id() != handle.id() {
+            return Err(DeviceError::Unsupported);
+        }
+        Ok(Self {
+            service: Mutex::new(service),
+            handle,
+            capability,
+        })
+    }
+
+    fn range_for_transfer(
+        &self,
+        first_sector: u64,
+        byte_count: usize,
+    ) -> Result<Option<BlockRange>, DeviceError> {
+        let sector_size = self.sector_size();
+        if byte_count % sector_size != 0 {
+            return Err(DeviceError::BufferTooSmall);
+        }
+
+        let sectors = byte_count / sector_size;
+        if sectors == 0 {
+            return Ok(None);
+        }
+
+        let sector_count = u64::try_from(sectors).map_err(|_| DeviceError::Unsupported)?;
+        Ok(Some(BlockRange::new(
+            Lba::new(first_sector),
+            SectorCount::new(sector_count),
+        )))
+    }
+}
+
+impl BlockStorageDevice for StorageServiceQfsDevice {
+    fn sector_size(&self) -> usize {
+        self.handle.info().block_size.bytes_usize()
+    }
+
+    fn sector_count(&self) -> u64 {
+        self.handle.info().sectors.get()
+    }
+
+    fn read_sectors(&self, first_sector: u64, buffer: &mut [u8]) -> Result<usize, DeviceError> {
+        let Some(range) = self.range_for_transfer(first_sector, buffer.len())? else {
+            return Ok(0);
+        };
+        let mut service = self.service.lock().map_err(|_| DeviceError::Busy)?;
+        service
+            .read_blocks(&self.capability, &self.handle, range, buffer)
+            .map_err(map_storage_error)?;
+        Ok(buffer.len())
+    }
+
+    fn write_sectors(&self, first_sector: u64, data: &[u8]) -> Result<usize, DeviceError> {
+        let Some(range) = self.range_for_transfer(first_sector, data.len())? else {
+            return Ok(0);
+        };
+        let mut service = self.service.lock().map_err(|_| DeviceError::Busy)?;
+        service
+            .write_blocks(&self.capability, &self.handle, range, data)
+            .map_err(map_storage_error)?;
+        Ok(data.len())
+    }
+
+    fn flush(&self) -> Result<(), DeviceError> {
+        let mut service = self.service.lock().map_err(|_| DeviceError::Busy)?;
+        service
+            .flush(&self.capability, &self.handle)
+            .map_err(map_storage_error)
+    }
+
+    fn discard(&self, first_sector: u64, sector_count: u64) -> Result<(), DeviceError> {
+        self.write_zeroes(first_sector, sector_count)
+    }
+
+    fn write_zeroes(&self, first_sector: u64, sector_count: u64) -> Result<(), DeviceError> {
+        if sector_count == 0 {
+            return Ok(());
+        }
+
+        let byte_count = byte_len(self.sector_size(), sector_count)?;
+        let data_len = usize::try_from(byte_count).map_err(|_| DeviceError::Unsupported)?;
+        let zeroes = vec![0u8; data_len];
+        self.write_sectors(first_sector, &zeroes)?;
+        Ok(())
+    }
+}
 
 /// A host-side block device for QFS disk images backed by [`std::fs::File`].
 ///
@@ -164,6 +366,31 @@ fn byte_len(sector_size: usize, sector_count: u64) -> Result<u64, DeviceError> {
         .ok_or(DeviceError::Unsupported)
 }
 
+fn map_block_error(error: BlockError) -> DeviceError {
+    match error {
+        BlockError::OutOfBounds => DeviceError::NotFound,
+        BlockError::BufferSizeMismatch | BlockError::EmptyRange | BlockError::InvalidBlockSize => {
+            DeviceError::BufferTooSmall
+        }
+        BlockError::DeviceOffline | BlockError::DeviceFaulted | BlockError::QueueEmpty => {
+            DeviceError::Busy
+        }
+        BlockError::RangeOverflow
+        | BlockError::ReadOnly
+        | BlockError::DeviceMismatch
+        | BlockError::Io => DeviceError::Unsupported,
+    }
+}
+
+fn map_storage_error(error: StorageError) -> DeviceError {
+    match error {
+        StorageError::DeviceNotFound => DeviceError::NotFound,
+        StorageError::AccessDenied | StorageError::CapabilityRevoked => DeviceError::Unsupported,
+        StorageError::DeviceAlreadyRegistered => DeviceError::Busy,
+        StorageError::Block(error) => map_block_error(error),
+    }
+}
+
 fn map_std_error(error: std::io::Error) -> DeviceError {
     match error.kind() {
         std::io::ErrorKind::NotFound => DeviceError::NotFound,
@@ -177,8 +404,103 @@ fn map_std_error(error: std::io::Error) -> DeviceError {
 mod tests {
     use std::fs::OpenOptions;
     use std::path::PathBuf;
+    use std::vec;
+    use std::vec::Vec;
 
     use super::*;
+    use crate::kernel::fs::path::Path;
+    use crate::kernel::fs::vfs::FileSystem;
+    use mirage_block::{BlockDeviceId, BlockDeviceState, BlockSize};
+
+    struct MockBlockDevice {
+        info: BlockDeviceInfo,
+        state: BlockDeviceState,
+        storage: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl MockBlockDevice {
+        fn new(id: u64, sectors: u64) -> Self {
+            let block_size = BlockSize::new(QFS_SECTOR_SIZE as u32).unwrap();
+            Self {
+                info: BlockDeviceInfo::new(
+                    BlockDeviceId::new(id),
+                    block_size,
+                    SectorCount::new(sectors),
+                    false,
+                    true,
+                ),
+                state: BlockDeviceState::Online,
+                storage: vec![0; sectors as usize * block_size.bytes_usize()],
+                flushes: 0,
+            }
+        }
+
+        fn byte_bounds(&self, range: BlockRange) -> (usize, usize) {
+            let start = range.start().get() as usize * self.info.block_size.bytes_usize();
+            let len = range.byte_len(self.info.block_size).unwrap();
+            (start, start + len)
+        }
+    }
+
+    impl BlockDevice for MockBlockDevice {
+        fn info(&self) -> BlockDeviceInfo {
+            self.info
+        }
+
+        fn state(&self) -> BlockDeviceState {
+            self.state
+        }
+
+        fn read_blocks(&mut self, range: BlockRange, buffer: &mut [u8]) -> Result<(), BlockError> {
+            self.validate_read(range, buffer)?;
+            let (start, end) = self.byte_bounds(range);
+            buffer.copy_from_slice(&self.storage[start..end]);
+            Ok(())
+        }
+
+        fn write_blocks(&mut self, range: BlockRange, data: &[u8]) -> Result<(), BlockError> {
+            self.validate_write(range, data)?;
+            let (start, end) = self.byte_bounds(range);
+            self.storage[start..end].copy_from_slice(data);
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.state.ensure_available()?;
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn qfs_mounts_root_object_through_storage_service_handle() {
+        let mut service = StorageService::new();
+        let handle = service
+            .register_device(Box::new(MockBlockDevice::new(42, 1024)))
+            .unwrap();
+        let capability = service.grant_read_write(handle.id()).unwrap();
+        let adapter = StorageServiceQfsDevice::new(service, handle, capability).unwrap();
+
+        crate::kernel::fs::qfs_format::initialize_image(&adapter, 1024).unwrap();
+        adapter.flush().unwrap();
+
+        let adapter: &'static StorageServiceQfsDevice = Box::leak(Box::new(adapter));
+        let fs = crate::kernel::fs::qfs::QfsFileSystem::new_on_block_device(false, adapter);
+        fs.refresh_from_block_device().unwrap();
+
+        let root_path = Path::new("/").unwrap();
+        let root_inode = fs.lookup(root_path).unwrap();
+        let root_object = fs.lookup_object_record(root_path).unwrap();
+
+        assert_eq!(root_inode.id, crate::kernel::fs::inode::InodeId::ROOT);
+        assert_eq!(
+            root_object.object_id,
+            crate::kernel::fs::inode::InodeId::ROOT.raw()
+        );
+        assert_eq!(adapter.sector_size(), QFS_SECTOR_SIZE);
+        assert_eq!(adapter.sector_count(), 1024);
+    }
 
     #[test]
     fn reads_writes_flushes_and_zeroes_file_backed_sectors() {
