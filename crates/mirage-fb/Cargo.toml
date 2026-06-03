@@ -1,0 +1,9 @@
+[package]
+name = "mirage-fb"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Mock linear framebuffer primitives for Mirage display services"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
