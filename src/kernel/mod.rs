@@ -18,7 +18,11 @@ pub mod thread;
 pub mod time;
 pub mod timer;
 
-use crate::arch::x86_64::{self, boot::FramebufferInfo, clock, ThreadRunOutcome};
+use crate::arch::x86_64::{
+    self,
+    boot::{BootModules, FramebufferInfo},
+    clock, ThreadRunOutcome,
+};
 use crate::kernel::cpu::CpuCoreState;
 use crate::kernel::device::{
     DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceKind, DeviceManager,
@@ -28,9 +32,10 @@ use crate::kernel::exec::{CloneTaskRequest, SpawnTaskRequest};
 use crate::kernel::fs::inode::InodeKind;
 use crate::kernel::fs::{
     open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, AccessMode,
-    CDirEntry, CStat, DescriptorFlags, DescriptorObject, DirEntry, EventFdId, FileDescriptionId,
-    FileSystem, FileTable, FileTableError, FsCredentials, Path, PathError, PipeDirection,
-    PipeEndpoint, PipeId, QfsFileSystem, SocketHandle, VfsError, MAX_PATH_BYTES,
+    CDirEntry, CStat, DescriptorFlags, DescriptorObject, DirEntry, EventFdId, Ext4Backend,
+    FileDescriptionId, FileSystem, FileTable, FileTableError, FsCredentials, Path, PathError,
+    PipeDirection, PipeEndpoint, PipeId, QfsFileSystem, SocketHandle, SsdUsbOptions, SuperBlock,
+    VfsError, MAX_PATH_BYTES,
 };
 use crate::kernel::futex::{FutexKey, FutexTable, MAX_FUTEX_WAITERS};
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
@@ -195,6 +200,356 @@ pub struct MiragePollFd {
     pub revents: i16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootMountSource {
+    BuiltInBlockQfs,
+    BootModuleQfs { index: u64 },
+    BootModuleExt4 { index: u64 },
+    DiscoveredBlockQfs,
+    DiscoveredBlockExt4,
+}
+
+enum RootFileSystem {
+    Qfs(QfsFileSystem),
+    Ext4(Ext4Backend<'static>),
+}
+
+impl RootFileSystem {
+    pub const fn new() -> Self {
+        Self::Qfs(QfsFileSystem::new_on_block_device(
+            false,
+            crate::kernel::device::built_in_block_storage(),
+        ))
+    }
+
+    fn mount_qfs(
+        &mut self,
+        read_only: bool,
+        device: &'static dyn crate::kernel::device::BlockStorageDevice,
+    ) -> Result<(), VfsError> {
+        let next = QfsFileSystem::new_on_block_device(read_only, device);
+        next.refresh_from_block_device()?;
+        *self = Self::Qfs(next);
+        Ok(())
+    }
+
+    fn mount_ext4(
+        &mut self,
+        device: &'static dyn crate::kernel::device::BlockStorageDevice,
+    ) -> Result<(), VfsError> {
+        let mut superblock = [0u8; 1024];
+        read_ext4_superblock(device, &mut superblock)?;
+        let backend = Ext4Backend::mount(device, &superblock, SsdUsbOptions::flash_friendly(8))
+            .map_err(|_| VfsError::Unsupported)?;
+        *self = Self::Ext4(backend);
+        Ok(())
+    }
+}
+
+impl FileSystem for RootFileSystem {
+    fn root_inode(&self) -> crate::kernel::fs::InodeId {
+        match self {
+            Self::Qfs(fs) => fs.root_inode(),
+            Self::Ext4(fs) => fs.root_inode(),
+        }
+    }
+    fn super_block(&self) -> SuperBlock {
+        match self {
+            Self::Qfs(fs) => fs.super_block(),
+            Self::Ext4(fs) => fs.super_block(),
+        }
+    }
+    fn lookup(&self, path: Path<'_>) -> Result<crate::kernel::fs::InodeMetadata, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.lookup(path),
+            Self::Ext4(fs) => fs.lookup(path),
+        }
+    }
+    fn open(
+        &self,
+        path: Path<'_>,
+        flags: crate::kernel::fs::OpenFlags,
+        credentials: FsCredentials,
+    ) -> Result<crate::kernel::fs::File, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.open(path, flags, credentials),
+            Self::Ext4(fs) => fs.open(path, flags, credentials),
+        }
+    }
+    fn close(&self, file: crate::kernel::fs::File) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.close(file),
+            Self::Ext4(fs) => fs.close(file),
+        }
+    }
+    fn pread(
+        &self,
+        file: &crate::kernel::fs::File,
+        buffer: &mut [u8],
+        offset: u64,
+    ) -> Result<usize, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.pread(file, buffer, offset),
+            Self::Ext4(fs) => fs.pread(file, buffer, offset),
+        }
+    }
+    fn pwrite(
+        &self,
+        file: &crate::kernel::fs::File,
+        data: &[u8],
+        offset: u64,
+    ) -> Result<usize, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.pwrite(file, data, offset),
+            Self::Ext4(fs) => fs.pwrite(file, data, offset),
+        }
+    }
+    fn mkdir(
+        &self,
+        path: Path<'_>,
+        mode: crate::kernel::fs::Permissions,
+        credentials: FsCredentials,
+    ) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.mkdir(path, mode, credentials),
+            Self::Ext4(fs) => fs.mkdir(path, mode, credentials),
+        }
+    }
+    fn rmdir(&self, path: Path<'_>, credentials: FsCredentials) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.rmdir(path, credentials),
+            Self::Ext4(fs) => fs.rmdir(path, credentials),
+        }
+    }
+    fn unlink(&self, path: Path<'_>, credentials: FsCredentials) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.unlink(path, credentials),
+            Self::Ext4(fs) => fs.unlink(path, credentials),
+        }
+    }
+    fn rename(
+        &self,
+        old_path: Path<'_>,
+        new_path: Path<'_>,
+        credentials: FsCredentials,
+    ) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.rename(old_path, new_path, credentials),
+            Self::Ext4(fs) => fs.rename(old_path, new_path, credentials),
+        }
+    }
+    fn link(
+        &self,
+        old_path: Path<'_>,
+        new_path: Path<'_>,
+        credentials: FsCredentials,
+    ) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.link(old_path, new_path, credentials),
+            Self::Ext4(fs) => fs.link(old_path, new_path, credentials),
+        }
+    }
+    fn symlink(
+        &self,
+        target: &str,
+        link_path: Path<'_>,
+        credentials: FsCredentials,
+    ) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.symlink(target, link_path, credentials),
+            Self::Ext4(fs) => fs.symlink(target, link_path, credentials),
+        }
+    }
+    fn readlink(&self, path: Path<'_>, buffer: &mut [u8]) -> Result<usize, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.readlink(path, buffer),
+            Self::Ext4(fs) => fs.readlink(path, buffer),
+        }
+    }
+    fn stat(&self, path: Path<'_>) -> Result<crate::kernel::fs::Stat, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.stat(path),
+            Self::Ext4(fs) => fs.stat(path),
+        }
+    }
+    fn fstat(&self, file: &crate::kernel::fs::File) -> Result<crate::kernel::fs::Stat, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.fstat(file),
+            Self::Ext4(fs) => fs.fstat(file),
+        }
+    }
+    fn lookup_inode(
+        &self,
+        inode: crate::kernel::fs::InodeId,
+    ) -> Result<crate::kernel::fs::InodeMetadata, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.lookup_inode(inode),
+            Self::Ext4(fs) => fs.lookup_inode(inode),
+        }
+    }
+    fn chmod(&self, path: Path<'_>, mode: u16, credentials: FsCredentials) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.chmod(path, mode, credentials),
+            Self::Ext4(fs) => fs.chmod(path, mode, credentials),
+        }
+    }
+    fn chown(
+        &self,
+        path: Path<'_>,
+        uid: u16,
+        gid: u16,
+        credentials: FsCredentials,
+    ) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.chown(path, uid, gid, credentials),
+            Self::Ext4(fs) => fs.chown(path, uid, gid, credentials),
+        }
+    }
+    fn truncate(
+        &self,
+        path: Path<'_>,
+        size: u64,
+        credentials: FsCredentials,
+    ) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.truncate(path, size, credentials),
+            Self::Ext4(fs) => fs.truncate(path, size, credentials),
+        }
+    }
+    fn ftruncate(
+        &self,
+        file: &crate::kernel::fs::File,
+        size: u64,
+        credentials: FsCredentials,
+    ) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.ftruncate(file, size, credentials),
+            Self::Ext4(fs) => fs.ftruncate(file, size, credentials),
+        }
+    }
+    fn fsync(&self, file: &crate::kernel::fs::File) -> Result<(), VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.fsync(file),
+            Self::Ext4(fs) => fs.fsync(file),
+        }
+    }
+    fn readdir(
+        &self,
+        path: Path<'_>,
+        offset: usize,
+        entries: &mut [DirEntry],
+    ) -> Result<usize, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.readdir(path, offset, entries),
+            Self::Ext4(fs) => fs.readdir(path, offset, entries),
+        }
+    }
+    fn readdir_inode(
+        &self,
+        inode: crate::kernel::fs::InodeId,
+        offset: usize,
+        entries: &mut [DirEntry],
+    ) -> Result<usize, VfsError> {
+        match self {
+            Self::Qfs(fs) => fs.readdir_inode(inode, offset, entries),
+            Self::Ext4(fs) => fs.readdir_inode(inode, offset, entries),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BootModuleBlockState {
+    base: *const u8,
+    size: usize,
+}
+
+unsafe impl Send for BootModuleBlockState {}
+
+struct BootModuleBlockDevice {
+    state: crate::kernel::sync::SpinLock<BootModuleBlockState>,
+}
+
+impl BootModuleBlockDevice {
+    const fn new() -> Self {
+        Self {
+            state: crate::kernel::sync::SpinLock::new(BootModuleBlockState {
+                base: core::ptr::null(),
+                size: 0,
+            }),
+        }
+    }
+
+    fn configure(&self, base: *const u8, size: usize) {
+        *self.state.lock() = BootModuleBlockState { base, size };
+    }
+}
+
+impl crate::kernel::device::BlockStorageDevice for BootModuleBlockDevice {
+    fn sector_size(&self) -> usize {
+        512
+    }
+    fn sector_count(&self) -> u64 {
+        (self.state.lock().size / 512) as u64
+    }
+    fn read_sectors(
+        &self,
+        first_sector: u64,
+        buffer: &mut [u8],
+    ) -> Result<usize, crate::kernel::device::DeviceError> {
+        if buffer.len() % 512 != 0 {
+            return Err(crate::kernel::device::DeviceError::BufferTooSmall);
+        }
+        let state = self.state.lock();
+        let start = (first_sector as usize)
+            .checked_mul(512)
+            .ok_or(crate::kernel::device::DeviceError::Unsupported)?;
+        let end = start
+            .checked_add(buffer.len())
+            .ok_or(crate::kernel::device::DeviceError::Unsupported)?;
+        if state.base.is_null() || end > state.size {
+            return Err(crate::kernel::device::DeviceError::BufferTooSmall);
+        }
+        let src = unsafe { core::slice::from_raw_parts(state.base.add(start), buffer.len()) };
+        buffer.copy_from_slice(src);
+        Ok(buffer.len())
+    }
+    fn write_sectors(
+        &self,
+        _first_sector: u64,
+        _data: &[u8],
+    ) -> Result<usize, crate::kernel::device::DeviceError> {
+        Err(crate::kernel::device::DeviceError::Unsupported)
+    }
+    fn flush(&self) -> Result<(), crate::kernel::device::DeviceError> {
+        Ok(())
+    }
+    fn discard(
+        &self,
+        _first_sector: u64,
+        _sector_count: u64,
+    ) -> Result<(), crate::kernel::device::DeviceError> {
+        Err(crate::kernel::device::DeviceError::Unsupported)
+    }
+}
+
+static BOOT_MODULE_BLOCK_DEVICE: BootModuleBlockDevice = BootModuleBlockDevice::new();
+
+fn read_ext4_superblock(
+    device: &'static dyn crate::kernel::device::BlockStorageDevice,
+    out: &mut [u8; 1024],
+) -> Result<(), VfsError> {
+    let sector_size = device.sector_size();
+    if sector_size == 0 || sector_size > out.len() || 1024 % sector_size != 0 {
+        return Err(VfsError::Unsupported);
+    }
+    let first_sector = (1024 / sector_size) as u64;
+    let sectors = out.len() / sector_size;
+    device
+        .read_sectors(first_sector, &mut out[..sectors * sector_size])
+        .map_err(|_| VfsError::Unsupported)?;
+    Ok(())
+}
+
 struct KernelPathBuf {
     bytes: [u8; MAX_PATH_BYTES],
     len: usize,
@@ -328,7 +683,7 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     security: SecurityKernel<MAX_PROC>,
     devices: DeviceManager<MAX_DEVICES>,
     service_registry: ServiceRegistry<MAX_SERVICE_REGISTRATIONS, MAX_DEVICE_CLAIMS>,
-    root_fs: QfsFileSystem,
+    root_fs: RootFileSystem,
     open_files: FileTable<MAX_OPEN_FILES>,
     core_states: [CpuCoreState; cpu::MAX_CORES],
     thread_table: [Option<ThreadControlBlock>; MAX_THREADS],
@@ -353,10 +708,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             security: SecurityKernel::new(),
             devices: DeviceManager::new(),
             service_registry: ServiceRegistry::new(),
-            root_fs: QfsFileSystem::new_on_block_device(
-                false,
-                crate::kernel::device::built_in_block_storage(),
-            ),
+            root_fs: RootFileSystem::new(),
             open_files: FileTable::new(),
             core_states: [CpuCoreState::new(); cpu::MAX_CORES],
             thread_table: [None; MAX_THREADS],
@@ -415,6 +767,78 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
         self.devices
             .install_core_devices_with_framebuffer(framebuffer);
+    }
+
+    pub fn mount_root_from_boot_sources(
+        &mut self,
+        modules: BootModules,
+    ) -> KernelResult<RootMountSource> {
+        let mut index = 0u64;
+        while index < modules.len() {
+            if let Some(module) = modules.module(index) {
+                if module.size >= 512 {
+                    BOOT_MODULE_BLOCK_DEVICE
+                        .configure(module.base.0 as *const u8, module.size as usize);
+                    if self
+                        .root_fs
+                        .mount_qfs(true, &BOOT_MODULE_BLOCK_DEVICE)
+                        .is_ok()
+                    {
+                        return Ok(RootMountSource::BootModuleQfs { index });
+                    }
+                    if self.root_fs.mount_ext4(&BOOT_MODULE_BLOCK_DEVICE).is_ok() {
+                        return Ok(RootMountSource::BootModuleExt4 { index });
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        let built_in = crate::kernel::device::built_in_block_storage();
+        if self.root_fs.mount_qfs(false, built_in).is_ok() {
+            return Ok(RootMountSource::DiscoveredBlockQfs);
+        }
+        if self.root_fs.mount_ext4(built_in).is_ok() {
+            return Ok(RootMountSource::DiscoveredBlockExt4);
+        }
+        Ok(RootMountSource::BuiltInBlockQfs)
+    }
+
+    pub fn bootstrap_userspace_init(&mut self) -> KernelResult<ProcessId> {
+        const INIT_CANDIDATES: [&str; 3] = ["/sbin/init", "/bin/init", "/bin/sh"];
+        let init = self.spawn_initial_process(Credentials::system())?;
+        let mut idx = 0usize;
+        while idx < INIT_CANDIDATES.len() {
+            match self.exec_bootstrap_path(init, INIT_CANDIDATES[idx]) {
+                Ok(()) => return Ok(init),
+                Err(_) => {
+                    idx += 1;
+                }
+            }
+        }
+        self.terminate_process(init);
+        Err(KernelError::Filesystem(VfsError::NotFound))
+    }
+
+    fn exec_bootstrap_path(&mut self, pid: ProcessId, raw_path: &str) -> KernelResult<()> {
+        let resolved = KernelPathBuf::from_str(raw_path)?;
+        let path = resolved.as_path()?;
+        let stat = self.root_fs.stat(path).map_err(KernelError::Filesystem)?;
+        if stat.kind != InodeKind::RegularFile {
+            return Err(KernelError::Filesystem(VfsError::PermissionDenied));
+        }
+        let argv = ExecVectorMetadata::empty();
+        let envp = ExecVectorMetadata::empty();
+        let image = self.load_exec_image(pid, &resolved, stat, argv, envp)?;
+        let request = ExecRequest::new(
+            pid,
+            ProcessPath::from_path(path),
+            argv,
+            envp,
+            Credentials::system(),
+            image,
+        );
+        self.exec_task(request, None)
     }
 
     pub fn bring_up_secondary_cores(&mut self, count: usize) {

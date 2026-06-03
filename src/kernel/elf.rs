@@ -338,8 +338,8 @@ impl InitialStackBuilder {
     }
 }
 
-fn read_exact(
-    fs: &crate::kernel::fs::QfsFileSystem,
+fn read_exact<F: FileSystem + ?Sized>(
+    fs: &F,
     file: &crate::kernel::fs::File,
     buffer: &mut [u8],
     offset: u64,

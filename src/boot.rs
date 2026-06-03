@@ -28,6 +28,7 @@ const MEMORY_MAP_REQUEST: [u64; 4] =
 const RSDP_REQUEST: [u64; 4] = limine_request_id(0xc5e7_7b6b_397e_7b43, 0x2763_7845_accd_cf3c);
 const EXECUTABLE_ADDRESS_REQUEST: [u64; 4] =
     limine_request_id(0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487);
+const MODULE_REQUEST: [u64; 4] = limine_request_id(0x3e7e_2797_02be_32af, 0xca1c_4f3b_d128_0cee);
 
 const fn limine_request_id(kind0: u64, kind1: u64) -> [u64; 4] {
     [LIMINE_COMMON_MAGIC[0], LIMINE_COMMON_MAGIC[1], kind0, kind1]
@@ -166,6 +167,40 @@ pub struct ExecutableAddressResponse {
     pub virtual_base: u64,
 }
 
+#[repr(C)]
+pub struct ModuleResponse {
+    pub revision: u64,
+    pub module_count: u64,
+    pub modules: *const *const LimineFile,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LimineUuid {
+    pub a: u32,
+    pub b: u16,
+    pub c: u16,
+    pub d: [u8; 8],
+}
+
+#[repr(C)]
+pub struct LimineFile {
+    pub revision: u64,
+    pub address: *mut u8,
+    pub size: u64,
+    pub path: *const u8,
+    pub cmdline: *const u8,
+    pub media_type: u32,
+    pub unused: u32,
+    pub tftp_ip: u32,
+    pub tftp_port: u32,
+    pub partition_index: u32,
+    pub mbr_disk_id: u32,
+    pub gpt_disk_uuid: LimineUuid,
+    pub gpt_part_uuid: LimineUuid,
+    pub part_uuid: LimineUuid,
+}
+
 #[used]
 #[link_section = ".requests_start_marker"]
 static REQUESTS_START_MARKER: [u64; 4] = LIMINE_REQUESTS_START_MARKER;
@@ -210,6 +245,10 @@ pub static EXECUTABLE_ADDRESS: LimineRequest<ExecutableAddressResponse> =
     LimineRequest::new(EXECUTABLE_ADDRESS_REQUEST);
 
 #[used]
+#[link_section = ".requests"]
+pub static MODULES: LimineRequest<ModuleResponse> = LimineRequest::new(MODULE_REQUEST);
+
+#[used]
 #[link_section = ".requests_end_marker"]
 static REQUESTS_END_MARKER: [u64; 2] = LIMINE_REQUESTS_END_MARKER;
 
@@ -229,6 +268,7 @@ pub fn snapshot() -> LimineBootSnapshot {
         memory_map: MEMORY_MAP.response(),
         rsdp: RSDP.response(),
         executable_address: EXECUTABLE_ADDRESS.response(),
+        modules: MODULES.response(),
     }
 }
 
@@ -241,4 +281,5 @@ pub struct LimineBootSnapshot {
     pub memory_map: Option<&'static MemoryMapResponse>,
     pub rsdp: Option<&'static RsdpResponse>,
     pub executable_address: Option<&'static ExecutableAddressResponse>,
+    pub modules: Option<&'static ModuleResponse>,
 }
