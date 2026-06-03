@@ -161,6 +161,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             current_thread,
             request.image.entry_point,
             request.image.stack_pointer,
+            request.image.address_space_root,
         )?;
         self.security
             .register_task(request.caller, request.requested_credentials)

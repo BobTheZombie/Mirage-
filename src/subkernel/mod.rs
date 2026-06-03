@@ -1121,6 +1121,7 @@ mod tests {
                 mode,
                 0x1000,
                 0x8000,
+                0x9000,
                 signature.map(|_| crate::kernel::process::ExecServiceDaemon::Display),
                 signature,
             ),
