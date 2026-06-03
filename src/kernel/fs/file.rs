@@ -275,11 +275,27 @@ impl DeviceHandle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SocketHandle {
+    raw: u64,
+}
+
+impl SocketHandle {
+    pub const fn new(raw: u64) -> Self {
+        Self { raw }
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.raw
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DescriptorObject {
     Regular(File),
     Pipe(PipeEndpoint),
     EventFd(EventFdId),
     Device(DeviceHandle),
+    Socket(SocketHandle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

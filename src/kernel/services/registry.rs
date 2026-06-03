@@ -21,6 +21,7 @@ pub const MAX_DEVICE_CLAIMS: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceId {
     Displayd = 1,
+    /// Reserved IPC endpoint for POSIX-style socket operations routed through `networkd`.
     Networkd = 2,
     Inputd = 3,
     SerialDriver = 0x100,
@@ -32,6 +33,9 @@ pub enum ServiceId {
     InputDriver = 0x106,
     SubkernelDriver = 0x107,
 }
+
+/// Stable service identifier used by socket syscalls when routing requests.
+pub const NETWORK_SERVICE_ID: ServiceId = ServiceId::Networkd;
 
 impl ServiceId {
     pub const fn raw(self) -> u64 {

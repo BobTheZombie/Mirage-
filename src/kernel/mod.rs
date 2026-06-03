@@ -29,7 +29,7 @@ use crate::kernel::fs::{
     open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, AccessMode,
     CDirEntry, CStat, DescriptorFlags, DescriptorObject, DirEntry, EventFdId, FileDescriptionId,
     FileSystem, FileTable, FileTableError, FsCredentials, Path, PathError, PipeDirection,
-    PipeEndpoint, PipeId, QfsFileSystem, VfsError, MAX_PATH_BYTES,
+    PipeEndpoint, PipeId, QfsFileSystem, SocketHandle, VfsError, MAX_PATH_BYTES,
 };
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
@@ -40,6 +40,10 @@ use crate::kernel::process::{
     MAX_EXEC_ENVS, MAX_SUPPLEMENTARY_GROUPS, SIGCHLD, SIGKILL, SIGTERM,
 };
 use crate::kernel::scheduler::{ScheduledThread, Scheduler};
+use crate::kernel::services::network::{
+    NetworkIpcRequest, NetworkOpcode, NetworkRecvmsgRequest, NetworkRequestHeader,
+    NetworkSendmsgRequest, NetworkSockaddrRequest, NetworkSocketRequest,
+};
 use crate::kernel::services::registry::{
     ServiceId as RegistryServiceId, ServiceRegistry, ServiceRegistryError, MAX_DEVICE_CLAIMS,
     MAX_SERVICE_REGISTRATIONS,
@@ -320,6 +324,7 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     next_pid: u64,
     next_thread: u64,
     message_sequence: u64,
+    next_socket_handle: u64,
 }
 
 impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> {
@@ -346,6 +351,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             next_pid: 1,
             next_thread: 1,
             message_sequence: 0,
+            next_socket_handle: 1,
         }
     }
 
@@ -365,6 +371,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.next_pid = 1;
         self.next_thread = 1;
         self.message_sequence = 0;
+        self.next_socket_handle = 1;
         KERNEL_TIME.init(clock::DEFAULT_FREQUENCY_HZ);
 
         let mut idx = 0;
@@ -1312,7 +1319,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                         .and_then(|entry| *entry)
                         .map(|eventfd| if eventfd.counter > 0 { 8 } else { 0 })
                         .ok_or(KernelError::InvalidArgument)?,
-                    DescriptorObject::Device(_) => 0,
+                    DescriptorObject::Device(_) | DescriptorObject::Socket(_) => 0,
                 };
                 unsafe { out.write(available) };
                 Ok(0)
@@ -1471,32 +1478,192 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         }
     }
 
-    fn syscall_socket(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_socket(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let domain = i32::try_from(context.arg(0)).map_err(|_| KernelError::InvalidArgument)?;
+        let socket_type =
+            i32::try_from(context.arg(1)).map_err(|_| KernelError::InvalidArgument)?;
+        let protocol = i32::try_from(context.arg(2)).map_err(|_| KernelError::InvalidArgument)?;
+        if domain < 0 || socket_type < 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let handle = self.allocate_socket_handle()?;
+        let description = match self
+            .open_files
+            .insert_object(DescriptorObject::Socket(handle))
+        {
+            Ok(description) => description,
+            Err(error) => return Err(map_file_table_error(error)),
+        };
+        let fd = match self
+            .process_files_mut(context.caller)?
+            .open(description, DescriptorFlags::EMPTY)
+        {
+            Ok(fd) => fd,
+            Err(error) => {
+                let _ = self.close_open_description(description);
+                return Err(map_process_file_table_error(error));
+            }
+        };
+
+        let request = NetworkSocketRequest {
+            header: self.network_request_header(
+                NetworkOpcode::Socket,
+                context.caller,
+                socket_type as u32,
+            ),
+            socket_handle: handle.raw(),
+            domain,
+            socket_type,
+            protocol,
+            reserved: 0,
+        };
+        if let Err(error) = self.send_network_request(context.caller, &request) {
+            if let Ok(descriptor) = self
+                .process_files_mut(context.caller)
+                .and_then(|files| files.close(fd).map_err(map_process_file_table_error))
+            {
+                let _ = self.close_open_description(descriptor.description());
+            }
+            return Err(error);
+        }
+
+        Ok(fd as u64)
     }
 
-    fn syscall_bind(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_bind(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let handle = self.socket_handle_for_fd(context.caller, context.arg(0) as usize)?;
+        let addr_ptr = context.arg(1);
+        let addr_len = u32::try_from(context.arg(2)).map_err(|_| KernelError::InvalidArgument)?;
+        validate_user_range(addr_ptr, addr_len as usize)?;
+        let request = NetworkSockaddrRequest {
+            header: self.network_request_header(NetworkOpcode::Bind, context.caller, 0),
+            socket_handle: handle.raw(),
+            addr_ptr,
+            addr_len,
+            value: 0,
+            result_addr_len_ptr: 0,
+            accepted_socket_handle: 0,
+        };
+        self.send_network_request(context.caller, &request)?;
+        Ok(0)
     }
 
-    fn syscall_listen(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_listen(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let handle = self.socket_handle_for_fd(context.caller, context.arg(0) as usize)?;
+        let backlog = i32::try_from(context.arg(1)).map_err(|_| KernelError::InvalidArgument)?;
+        if backlog < 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        let request = NetworkSockaddrRequest {
+            header: self.network_request_header(NetworkOpcode::Listen, context.caller, 0),
+            socket_handle: handle.raw(),
+            addr_ptr: 0,
+            addr_len: 0,
+            value: backlog,
+            result_addr_len_ptr: 0,
+            accepted_socket_handle: 0,
+        };
+        self.send_network_request(context.caller, &request)?;
+        Ok(0)
     }
 
-    fn syscall_accept(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_accept(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let listener = self.socket_handle_for_fd(context.caller, context.arg(0) as usize)?;
+        let addr_ptr = context.arg(1);
+        let addr_len_ptr = context.arg(2);
+        if addr_ptr != 0 {
+            if addr_len_ptr == 0 {
+                return Err(KernelError::InvalidPointer);
+            }
+            let addr_len = read_user_value::<u32>(addr_len_ptr)?;
+            validate_user_range(addr_ptr, addr_len as usize)?;
+        } else if addr_len_ptr != 0 {
+            let _ = read_user_value::<u32>(addr_len_ptr)?;
+        }
+        let accepted = self.allocate_socket_handle()?;
+        let description = self
+            .open_files
+            .insert_object(DescriptorObject::Socket(accepted))
+            .map_err(map_file_table_error)?;
+        let fd = match self
+            .process_files_mut(context.caller)?
+            .open(description, DescriptorFlags::EMPTY)
+        {
+            Ok(fd) => fd,
+            Err(error) => {
+                let _ = self.close_open_description(description);
+                return Err(map_process_file_table_error(error));
+            }
+        };
+        let request = NetworkSockaddrRequest {
+            header: self.network_request_header(NetworkOpcode::Accept, context.caller, 0),
+            socket_handle: listener.raw(),
+            addr_ptr,
+            addr_len: 0,
+            value: 0,
+            result_addr_len_ptr: addr_len_ptr,
+            accepted_socket_handle: accepted.raw(),
+        };
+        if let Err(error) = self.send_network_request(context.caller, &request) {
+            if let Ok(descriptor) = self
+                .process_files_mut(context.caller)
+                .and_then(|files| files.close(fd).map_err(map_process_file_table_error))
+            {
+                let _ = self.close_open_description(descriptor.description());
+            }
+            return Err(error);
+        }
+
+        Ok(fd as u64)
     }
 
-    fn syscall_connect(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_connect(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let handle = self.socket_handle_for_fd(context.caller, context.arg(0) as usize)?;
+        let addr_ptr = context.arg(1);
+        let addr_len = u32::try_from(context.arg(2)).map_err(|_| KernelError::InvalidArgument)?;
+        validate_user_range(addr_ptr, addr_len as usize)?;
+        let request = NetworkSockaddrRequest {
+            header: self.network_request_header(NetworkOpcode::Connect, context.caller, 0),
+            socket_handle: handle.raw(),
+            addr_ptr,
+            addr_len,
+            value: 0,
+            result_addr_len_ptr: 0,
+            accepted_socket_handle: 0,
+        };
+        self.send_network_request(context.caller, &request)?;
+        Ok(0)
     }
 
-    fn syscall_sendmsg(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_sendmsg(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let handle = self.socket_handle_for_fd(context.caller, context.arg(0) as usize)?;
+        let message_ptr = context.arg(1);
+        validate_user_range(message_ptr, 1)?;
+        let request = NetworkSendmsgRequest {
+            header: self.network_request_header(NetworkOpcode::Sendmsg, context.caller, 0),
+            socket_handle: handle.raw(),
+            message_ptr,
+            flags: context.arg(2),
+            reserved: 0,
+        };
+        self.send_network_request(context.caller, &request)?;
+        Ok(0)
     }
 
-    fn syscall_recvmsg(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_recvmsg(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let handle = self.socket_handle_for_fd(context.caller, context.arg(0) as usize)?;
+        let message_ptr = context.arg(1);
+        validate_user_range(message_ptr, 1)?;
+        let request = NetworkRecvmsgRequest {
+            header: self.network_request_header(NetworkOpcode::Recvmsg, context.caller, 0),
+            socket_handle: handle.raw(),
+            message_ptr,
+            flags: context.arg(2),
+            reserved: 0,
+        };
+        self.send_network_request(context.caller, &request)?;
+        Ok(0)
     }
 
     fn syscall_clone(&mut self, context: SyscallContext) -> KernelResult<u64> {
@@ -1873,6 +2040,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             DescriptorObject::Device(handle) => self
                 .device_read(context.caller, handle.id(), buffer)
                 .map(|read| read as u64),
+            DescriptorObject::Socket(_) => Err(KernelError::InvalidArgument),
         }
     }
 
@@ -1932,6 +2100,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             DescriptorObject::Device(handle) => self
                 .device_write(context.caller, handle.id(), data)
                 .map(|written| written as u64),
+            DescriptorObject::Socket(_) => Err(KernelError::InvalidArgument),
         }
     }
 
@@ -2773,7 +2942,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 }
                 DescriptorObject::Pipe(endpoint) => self.release_pipe_endpoint(endpoint),
                 DescriptorObject::EventFd(id) => self.release_eventfd(id),
-                DescriptorObject::Device(_) => {}
+                DescriptorObject::Device(_) | DescriptorObject::Socket(_) => {}
             }
         }
         Ok(())
@@ -2784,6 +2953,58 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.open_files
             .get_object(description)
             .map_err(map_file_table_error)
+    }
+
+    fn socket_handle_for_fd(&self, pid: ProcessId, fd: usize) -> KernelResult<SocketHandle> {
+        match self.fd_object(pid, fd)? {
+            DescriptorObject::Socket(handle) => Ok(handle),
+            _ => Err(KernelError::Filesystem(VfsError::InvalidHandle)),
+        }
+    }
+
+    fn allocate_socket_handle(&mut self) -> KernelResult<SocketHandle> {
+        let raw = self.next_socket_handle;
+        if raw == 0 {
+            return Err(KernelError::FileTableFull);
+        }
+        self.next_socket_handle = self
+            .next_socket_handle
+            .checked_add(1)
+            .ok_or(KernelError::FileTableFull)?;
+        Ok(SocketHandle::new(raw))
+    }
+
+    fn network_request_header(
+        &mut self,
+        opcode: NetworkOpcode,
+        client: ProcessId,
+        flags: u32,
+    ) -> NetworkRequestHeader {
+        NetworkRequestHeader::new(opcode, client, self.next_message_sequence(), flags)
+    }
+
+    fn send_network_request<T: NetworkIpcRequest>(
+        &mut self,
+        sender: ProcessId,
+        request: &T,
+    ) -> KernelResult<()> {
+        let receiver = self
+            .service_registry
+            .owner(RegistryServiceId::Networkd)
+            .ok_or(KernelError::UnknownProcess)?;
+        self.ensure_process_exists(receiver)?;
+        self.security
+            .authorize_ipc(
+                sender,
+                receiver,
+                RegistryServiceId::Networkd.security_class(),
+            )
+            .map_err(KernelError::SecurityViolation)?;
+        let payload = MessagePayload::from_slice(
+            RegistryServiceId::Networkd.security_class(),
+            request.as_bytes(),
+        );
+        self.send_message(sender, receiver, payload)
     }
 
     fn allocate_pipe(&mut self) -> KernelResult<PipeId> {
@@ -2879,7 +3100,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                     None => revents |= POLLNVAL,
                 }
             }
-            DescriptorObject::Device(_) => {
+            DescriptorObject::Device(_) | DescriptorObject::Socket(_) => {
                 if events & (POLLIN | POLLPRI) != 0 {
                     revents |= events & (POLLIN | POLLPRI);
                 }
