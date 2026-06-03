@@ -16,8 +16,8 @@ use crate::kernel::{
 
 /// QFS volume signature stored at the beginning of sector zero.
 pub const QFS_MAGIC: [u8; 8] = *b"MIRQFS\0\0";
-/// Initial QFS wire-format version understood by this kernel module.
-pub const QFS_VERSION: u16 = 1;
+/// QFS wire-format version with explicit fixed-width object metadata.
+pub const QFS_VERSION: u16 = 2;
 /// QFS devices are addressed in 512-byte logical sectors.
 pub const QFS_SECTOR_SIZE: usize = 512;
 /// Number of sectors grouped into a QFS page.
@@ -36,7 +36,9 @@ pub const QFS_MAX_INODE_RECORDS: usize = 32;
 /// Maximum number of journal records cached by the in-kernel QFS mount state.
 pub const QFS_MAX_JOURNAL_RECORDS: usize = 16;
 /// Maximum number of bytes stored inline in one cached QFS inode record.
-pub const QFS_INLINE_DATA_BYTES: usize = 128;
+pub const QFS_INLINE_DATA_BYTES: usize = 76;
+/// Fixed extent records embedded in each inode record for bounded extent metadata.
+pub const QFS_INLINE_EXTENT_RECORDS: usize = 2;
 
 /// Maximum byte length of a QFS inode name.
 pub const QFS_NAME_BYTES: usize = 32;
@@ -51,7 +53,9 @@ pub const QFS_BOOK_INDEX_SECTORS: u64 = 1;
 pub const QFS_SUPERBLOCK_RESERVED_BYTES: usize = 64;
 pub const QFS_BOOK_HEADER_RESERVED_BYTES: usize = 496;
 pub const QFS_BOOK_INDEX_ENTRY_BYTES: usize = 16;
-pub const QFS_INODE_RECORD_BYTES: usize = 192;
+pub const QFS_INODE_RECORD_BYTES: usize = 256;
+pub const QFS_SIGNATURE_REF_BYTES: usize = 16;
+pub const QFS_CAPABILITY_REF_BYTES: usize = 16;
 pub const QFS_JOURNAL_SLOT_SECTORS: u64 = 2;
 pub const QFS_JOURNAL_PAYLOAD_SECTOR_OFFSET: u64 = 1;
 pub const QFS_JOURNAL_RECORD_MAGIC: u32 = 0x4a_46_53_51;
@@ -242,21 +246,80 @@ impl QfsChapterIndexEntry {
     }
 }
 
-/// Fixed-width inode record cached by QFS mount state.
+/// Per-object mutation state captured in every serialized inode/object record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum QfsObjectMutationState {
+    Clean = 0,
+    Committed = 1,
+}
+
+impl QfsObjectMutationState {
+    pub const fn from_u16(value: u16) -> Self {
+        match value {
+            1 => Self::Committed,
+            _ => Self::Clean,
+        }
+    }
+}
+
+pub const QFS_OBJECT_HAS_SIGNATURE: u16 = 1 << 0;
+pub const QFS_OBJECT_HAS_CAPABILITY: u16 = 1 << 1;
+pub const QFS_OBJECT_SERVICE_AWARE: u16 = 1 << 2;
+
+/// Fixed-width extent map entry embedded in object metadata.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QfsExtentRecord {
+    pub logical_page: u64,
+    pub book_id: u32,
+    pub first_page: u16,
+    pub page_count: u16,
+}
+
+impl QfsExtentRecord {
+    pub const fn empty() -> Self {
+        Self {
+            logical_page: 0,
+            book_id: 0,
+            first_page: 0,
+            page_count: 0,
+        }
+    }
+}
+
+/// Fixed-width inode/object record cached by QFS mount state.
+///
+/// The `inode` field remains the VFS lookup key, while `object_id` is the
+/// stable QFS object identity that survives path/name changes. `path_identity`
+/// is a deterministic parent/name fingerprint for directory-entry identity.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QfsInodeRecord {
     pub inode: u64,
+    pub object_id: u64,
     pub parent_inode: u64,
+    pub path_identity: u64,
     pub kind: u8,
     pub name_len: u8,
+    pub metadata_flags: u16,
     pub mode: u16,
     pub uid: u16,
     pub gid: u16,
     pub links: u16,
+    pub service_class: u16,
+    pub mutation_state: u16,
     pub size: u64,
     pub first_chapter: u32,
     pub chapter_count: u32,
+    pub extent_map_version: u32,
+    pub extent_count: u16,
+    pub signature_len: u16,
+    pub signature_ref: [u8; QFS_SIGNATURE_REF_BYTES],
+    pub capability_len: u16,
+    pub capability_ref: [u8; QFS_CAPABILITY_REF_BYTES],
+    pub last_transaction_id: u64,
+    pub extents: [QfsExtentRecord; QFS_INLINE_EXTENT_RECORDS],
     pub name: [u8; QFS_NAME_BYTES],
     pub inline_data_len: u16,
     pub inline_data: [u8; QFS_INLINE_DATA_BYTES],
@@ -266,16 +329,29 @@ impl QfsInodeRecord {
     pub const fn empty() -> Self {
         Self {
             inode: 0,
+            object_id: 0,
             parent_inode: 0,
+            path_identity: 0,
             kind: 0,
             name_len: 0,
+            metadata_flags: 0,
             mode: 0,
             uid: 0,
             gid: 0,
             links: 0,
+            service_class: 0,
+            mutation_state: QfsObjectMutationState::Clean as u16,
             size: 0,
             first_chapter: 0,
             chapter_count: 0,
+            extent_map_version: 0,
+            extent_count: 0,
+            signature_len: 0,
+            signature_ref: [0; QFS_SIGNATURE_REF_BYTES],
+            capability_len: 0,
+            capability_ref: [0; QFS_CAPABILITY_REF_BYTES],
+            last_transaction_id: 0,
+            extents: [QfsExtentRecord::empty(); QFS_INLINE_EXTENT_RECORDS],
             name: [0; QFS_NAME_BYTES],
             inline_data_len: 0,
             inline_data: [0; QFS_INLINE_DATA_BYTES],
@@ -285,16 +361,29 @@ impl QfsInodeRecord {
     pub const fn root() -> Self {
         Self {
             inode: InodeId::ROOT.raw(),
+            object_id: InodeId::ROOT.raw(),
             parent_inode: InodeId::ROOT.raw(),
+            path_identity: 0,
             kind: encode_inode_kind(InodeKind::Directory),
             name_len: 0,
+            metadata_flags: QFS_OBJECT_SERVICE_AWARE,
             mode: 0o755,
             uid: 0,
             gid: 0,
             links: 1,
+            service_class: 0,
+            mutation_state: QfsObjectMutationState::Clean as u16,
             size: 0,
             first_chapter: 0,
             chapter_count: 0,
+            extent_map_version: 0,
+            extent_count: 0,
+            signature_len: 0,
+            signature_ref: [0; QFS_SIGNATURE_REF_BYTES],
+            capability_len: 0,
+            capability_ref: [0; QFS_CAPABILITY_REF_BYTES],
+            last_transaction_id: 0,
+            extents: [QfsExtentRecord::empty(); QFS_INLINE_EXTENT_RECORDS],
             name: [0; QFS_NAME_BYTES],
             inline_data_len: 0,
             inline_data: [0; QFS_INLINE_DATA_BYTES],
@@ -306,6 +395,15 @@ impl QfsInodeRecord {
         core::str::from_utf8(&self.name[..len]).unwrap_or("")
     }
 
+    pub fn refresh_path_identity(&mut self) {
+        self.path_identity = qfs_path_identity(self.parent_inode, &self.name, self.name_len);
+    }
+
+    pub fn mark_mutation(&mut self, transaction_id: u64) {
+        self.last_transaction_id = transaction_id;
+        self.mutation_state = QfsObjectMutationState::Committed as u16;
+    }
+
     pub(crate) fn metadata(&self) -> InodeMetadata {
         InodeMetadata::with_links(
             InodeId::new(self.inode),
@@ -315,6 +413,18 @@ impl QfsInodeRecord {
             self.links,
         )
     }
+}
+
+pub fn qfs_path_identity(parent_inode: u64, name: &[u8; QFS_NAME_BYTES], name_len: u8) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64 ^ parent_inode;
+    let len = min(name_len as usize, QFS_NAME_BYTES);
+    let mut idx = 0usize;
+    while idx < len {
+        hash ^= name[idx] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        idx += 1;
+    }
+    hash
 }
 
 /// Monotonic QFS journal transaction identifier.
@@ -895,30 +1005,61 @@ pub fn parse_inode_records(
     sector: &[u8; QFS_SECTOR_SIZE],
     inodes: &mut [Option<QfsInodeRecord>],
 ) -> Result<(), FsError> {
+    inodes.fill(None);
     let cur = LeCursor::new(sector);
     let mut idx = 0usize;
     let mut offset = 0usize;
     while idx < inodes.len() && offset + QFS_INODE_RECORD_BYTES <= QFS_SECTOR_SIZE {
         let inode = cur.u64_at(offset)?;
         if inode != 0 {
+            let mut signature_ref = [0u8; QFS_SIGNATURE_REF_BYTES];
+            signature_ref.copy_from_slice(&sector[offset + 72..offset + 88]);
+            let mut capability_ref = [0u8; QFS_CAPABILITY_REF_BYTES];
+            capability_ref.copy_from_slice(&sector[offset + 90..offset + 106]);
+            let mut extents = [QfsExtentRecord::empty(); QFS_INLINE_EXTENT_RECORDS];
+            let mut extent_idx = 0usize;
+            while extent_idx < QFS_INLINE_EXTENT_RECORDS {
+                let extent_offset = offset + 114 + extent_idx * 16;
+                extents[extent_idx] = QfsExtentRecord {
+                    logical_page: cur.u64_at(extent_offset)?,
+                    book_id: cur.u32_at(extent_offset + 8)?,
+                    first_page: cur.u16_at(extent_offset + 12)?,
+                    page_count: cur.u16_at(extent_offset + 14)?,
+                };
+                extent_idx += 1;
+            }
             let mut name = [0u8; QFS_NAME_BYTES];
-            name.copy_from_slice(&sector[offset + 48..offset + 80]);
+            name.copy_from_slice(&sector[offset + 146..offset + 178]);
             let mut inline_data = [0u8; QFS_INLINE_DATA_BYTES];
-            let inline_len = min(cur.u16_at(offset + 80)? as usize, QFS_INLINE_DATA_BYTES);
+            let inline_len = min(cur.u16_at(offset + 178)? as usize, QFS_INLINE_DATA_BYTES);
             inline_data[..inline_len]
-                .copy_from_slice(&sector[offset + 82..offset + 82 + inline_len]);
+                .copy_from_slice(&sector[offset + 180..offset + 180 + inline_len]);
             inodes[idx] = Some(QfsInodeRecord {
                 inode,
-                parent_inode: cur.u64_at(offset + 8)?,
-                kind: cur.u8_at(offset + 16)?,
-                name_len: cur.u8_at(offset + 17)?,
-                mode: cur.u16_at(offset + 18)?,
-                uid: cur.u16_at(offset + 20)?,
-                gid: cur.u16_at(offset + 22)?,
-                links: cur.u16_at(offset + 24)?,
-                size: cur.u64_at(offset + 32)?,
-                first_chapter: cur.u32_at(offset + 40)?,
-                chapter_count: cur.u32_at(offset + 44)?,
+                object_id: cur.u64_at(offset + 8)?,
+                parent_inode: cur.u64_at(offset + 16)?,
+                path_identity: cur.u64_at(offset + 24)?,
+                kind: cur.u8_at(offset + 32)?,
+                name_len: cur.u8_at(offset + 33)?,
+                metadata_flags: cur.u16_at(offset + 34)?,
+                mode: cur.u16_at(offset + 36)?,
+                uid: cur.u16_at(offset + 38)?,
+                gid: cur.u16_at(offset + 40)?,
+                links: cur.u16_at(offset + 42)?,
+                service_class: cur.u16_at(offset + 44)?,
+                mutation_state: cur.u16_at(offset + 46)?,
+                size: cur.u64_at(offset + 48)?,
+                first_chapter: cur.u32_at(offset + 56)?,
+                chapter_count: cur.u32_at(offset + 60)?,
+                extent_map_version: cur.u32_at(offset + 64)?,
+                extent_count: min(cur.u16_at(offset + 68)? as usize, QFS_INLINE_EXTENT_RECORDS)
+                    as u16,
+                signature_len: cur.u16_at(offset + 70)?,
+                signature_ref,
+                capability_len: cur.u16_at(offset + 88)?,
+                capability_ref,
+                last_transaction_id: cur.u64_at(offset + 106)?,
+                extents,
                 name,
                 inline_data_len: inline_len as u16,
                 inline_data,
@@ -938,22 +1079,54 @@ pub fn serialize_inode_records(
     let mut idx = 0usize;
     let mut offset = 0usize;
     while idx < inodes.len() && offset + QFS_INODE_RECORD_BYTES <= QFS_SECTOR_SIZE {
-        if let Some(record) = inodes[idx] {
+        if let Some(mut record) = inodes[idx] {
+            if record.object_id == 0 {
+                record.object_id = record.inode;
+            }
+            if record.path_identity == 0 && record.name_len != 0 {
+                record.refresh_path_identity();
+            }
             put_u64(sector, offset, record.inode)?;
-            put_u64(sector, offset + 8, record.parent_inode)?;
-            sector[offset + 16] = record.kind;
-            sector[offset + 17] = min(record.name_len as usize, QFS_NAME_BYTES) as u8;
-            put_u16(sector, offset + 18, record.mode)?;
-            put_u16(sector, offset + 20, record.uid)?;
-            put_u16(sector, offset + 22, record.gid)?;
-            put_u16(sector, offset + 24, record.links)?;
-            put_u64(sector, offset + 32, record.size)?;
-            put_u32(sector, offset + 40, record.first_chapter)?;
-            put_u32(sector, offset + 44, record.chapter_count)?;
-            sector[offset + 48..offset + 80].copy_from_slice(&record.name);
+            put_u64(sector, offset + 8, record.object_id)?;
+            put_u64(sector, offset + 16, record.parent_inode)?;
+            put_u64(sector, offset + 24, record.path_identity)?;
+            sector[offset + 32] = record.kind;
+            sector[offset + 33] = min(record.name_len as usize, QFS_NAME_BYTES) as u8;
+            put_u16(sector, offset + 34, record.metadata_flags)?;
+            put_u16(sector, offset + 36, record.mode)?;
+            put_u16(sector, offset + 38, record.uid)?;
+            put_u16(sector, offset + 40, record.gid)?;
+            put_u16(sector, offset + 42, record.links)?;
+            put_u16(sector, offset + 44, record.service_class)?;
+            put_u16(sector, offset + 46, record.mutation_state)?;
+            put_u64(sector, offset + 48, record.size)?;
+            put_u32(sector, offset + 56, record.first_chapter)?;
+            put_u32(sector, offset + 60, record.chapter_count)?;
+            put_u32(sector, offset + 64, record.extent_map_version)?;
+            put_u16(
+                sector,
+                offset + 68,
+                min(record.extent_count as usize, QFS_INLINE_EXTENT_RECORDS) as u16,
+            )?;
+            put_u16(sector, offset + 70, record.signature_len)?;
+            sector[offset + 72..offset + 88].copy_from_slice(&record.signature_ref);
+            put_u16(sector, offset + 88, record.capability_len)?;
+            sector[offset + 90..offset + 106].copy_from_slice(&record.capability_ref);
+            put_u64(sector, offset + 106, record.last_transaction_id)?;
+            let mut extent_idx = 0usize;
+            while extent_idx < QFS_INLINE_EXTENT_RECORDS {
+                let extent_offset = offset + 114 + extent_idx * 16;
+                let extent = record.extents[extent_idx];
+                put_u64(sector, extent_offset, extent.logical_page)?;
+                put_u32(sector, extent_offset + 8, extent.book_id)?;
+                put_u16(sector, extent_offset + 12, extent.first_page)?;
+                put_u16(sector, extent_offset + 14, extent.page_count)?;
+                extent_idx += 1;
+            }
+            sector[offset + 146..offset + 178].copy_from_slice(&record.name);
             let inline_len = min(record.inline_data_len as usize, QFS_INLINE_DATA_BYTES);
-            put_u16(sector, offset + 80, inline_len as u16)?;
-            sector[offset + 82..offset + 82 + inline_len]
+            put_u16(sector, offset + 178, inline_len as u16)?;
+            sector[offset + 180..offset + 180 + inline_len]
                 .copy_from_slice(&record.inline_data[..inline_len]);
         }
         idx += 1;

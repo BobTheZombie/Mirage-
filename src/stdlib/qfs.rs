@@ -255,6 +255,16 @@ pub struct QfsImageReport {
 pub struct QfsStatReport {
     pub image: QfsImageReport,
     pub inode: crate::kernel::fs::inode::InodeMetadata,
+    pub object_id: u64,
+    pub path_identity: u64,
+    pub metadata_flags: u16,
+    pub service_class: u16,
+    pub extent_map_version: u32,
+    pub extent_count: u16,
+    pub signature_len: u16,
+    pub capability_len: u16,
+    pub last_transaction_id: u64,
+    pub mutation_state: u16,
 }
 
 /// Error type used by hosted QFS tooling APIs.
@@ -349,7 +359,21 @@ pub fn stat_image<P: AsRef<std::path::Path>>(
     let path = crate::kernel::fs::path::Path::new(qfs_path)
         .map_err(crate::kernel::fs::vfs::VfsError::from)?;
     let inode = fs.lookup(path)?;
-    Ok(QfsStatReport { image, inode })
+    let object = fs.lookup_object_record(path)?;
+    Ok(QfsStatReport {
+        image,
+        inode,
+        object_id: object.object_id,
+        path_identity: object.path_identity,
+        metadata_flags: object.metadata_flags,
+        service_class: object.service_class,
+        extent_map_version: object.extent_map_version,
+        extent_count: object.extent_count,
+        signature_len: object.signature_len,
+        capability_len: object.capability_len,
+        last_transaction_id: object.last_transaction_id,
+        mutation_state: object.mutation_state,
+    })
 }
 
 fn open_userspace_qfs<P: AsRef<std::path::Path>>(

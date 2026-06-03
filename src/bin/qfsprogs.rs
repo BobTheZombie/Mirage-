@@ -56,6 +56,16 @@ fn run() -> Result<(), String> {
             println!("size: {}", report.inode.size);
             println!("mode: {:o}", report.inode.permissions.bits());
             println!("links: {}", report.inode.links);
+            println!("object_id: {}", report.object_id);
+            println!("path_identity: {:#x}", report.path_identity);
+            println!("metadata_flags: {:#x}", report.metadata_flags);
+            println!("service_class: {}", report.service_class);
+            println!("extent_map_version: {}", report.extent_map_version);
+            println!("extent_count: {}", report.extent_count);
+            println!("signature_len: {}", report.signature_len);
+            println!("capability_len: {}", report.capability_len);
+            println!("last_transaction_id: {}", report.last_transaction_id);
+            println!("mutation_state: {}", report.mutation_state);
         }
         "help" | "--help" | "-h" => {
             println!("{}", usage());

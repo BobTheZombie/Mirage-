@@ -24,12 +24,13 @@ pub use super::qfs_format::{
     parse_inode_records, read_book_header, read_inode_table, read_superblock,
     replay_valid_journal_records, scan_journal, serialize_book_header, serialize_book_index_entry,
     serialize_inode_records, write_book_header, write_inode_table, write_superblock, QfsBookHeader,
-    QfsBookIndexEntry, QfsBookRole, QfsChapterIndexEntry, QfsInodeRecord, QfsJournalRecord,
-    QfsJournalRecordKind, QfsPageLocation, QfsSuperblock, QfsTransactionId,
-    QFS_BOOK_INDEX_ENTRY_BYTES, QFS_BOOK_INDEX_SECTORS, QFS_BOOK_PAGES, QFS_INLINE_DATA_BYTES,
-    QFS_MAGIC, QFS_MAX_BOOKS, QFS_MAX_BOOK_INDEX_ENTRIES, QFS_MAX_CHAPTER_INDEX_ENTRIES,
-    QFS_MAX_INODE_RECORDS, QFS_MAX_JOURNAL_RECORDS, QFS_NAME_BYTES, QFS_PAGE_SECTORS,
-    QFS_SECTOR_SIZE, QFS_VERSION,
+    QfsBookIndexEntry, QfsBookRole, QfsChapterIndexEntry, QfsExtentRecord, QfsInodeRecord,
+    QfsJournalRecord, QfsJournalRecordKind, QfsObjectMutationState, QfsPageLocation, QfsSuperblock,
+    QfsTransactionId, QFS_BOOK_INDEX_ENTRY_BYTES, QFS_BOOK_INDEX_SECTORS, QFS_BOOK_PAGES,
+    QFS_INLINE_DATA_BYTES, QFS_MAGIC, QFS_MAX_BOOKS, QFS_MAX_BOOK_INDEX_ENTRIES,
+    QFS_MAX_CHAPTER_INDEX_ENTRIES, QFS_MAX_INODE_RECORDS, QFS_MAX_JOURNAL_RECORDS, QFS_NAME_BYTES,
+    QFS_OBJECT_HAS_CAPABILITY, QFS_OBJECT_HAS_SIGNATURE, QFS_OBJECT_SERVICE_AWARE,
+    QFS_PAGE_SECTORS, QFS_SECTOR_SIZE, QFS_VERSION,
 };
 
 use super::qfs_format::{
@@ -66,6 +67,31 @@ impl QfsState {
             journal: [None; QFS_MAX_JOURNAL_RECORDS],
             next_transaction_id: 1,
             next_journal_slot: 0,
+        }
+    }
+
+    fn normalize_object_metadata(&mut self) {
+        let mut idx = 0usize;
+        while idx < QFS_MAX_INODE_RECORDS {
+            if let Some(mut record) = self.inodes[idx] {
+                if record.object_id == 0 {
+                    record.object_id = record.inode;
+                }
+                record.refresh_path_identity();
+                self.inodes[idx] = Some(record);
+            }
+            idx += 1;
+        }
+    }
+
+    fn mark_all_inode_mutations(&mut self, transaction_id: QfsTransactionId) {
+        let mut idx = 0usize;
+        while idx < QFS_MAX_INODE_RECORDS {
+            if let Some(mut record) = self.inodes[idx] {
+                record.mark_mutation(transaction_id);
+                self.inodes[idx] = Some(record);
+            }
+            idx += 1;
         }
     }
 
@@ -237,6 +263,17 @@ impl QfsFileSystem {
         self.state.lock().cached_counts()
     }
 
+    pub fn lookup_object_record(&self, path: Path<'_>) -> Result<QfsInodeRecord, FsError> {
+        self.state.lock().resolve_inode(path)
+    }
+
+    pub fn lookup_inode_record(&self, inode: InodeId) -> Result<QfsInodeRecord, FsError> {
+        self.state
+            .lock()
+            .inode_by_id(inode)
+            .ok_or(FsError::NotFound)
+    }
+
     pub fn write_superblock_to_block_device(&self) -> Result<(), FsError> {
         if self.read_only {
             return Err(FsError::ReadOnly);
@@ -276,7 +313,20 @@ impl QfsFileSystem {
         replay_valid_journal_records(device, &superblock, &records, slot_count)?;
         device.flush().map_err(map_device_error)?;
 
+        let mut replayed_inodes = [None; QFS_MAX_INODE_RECORDS];
+        if let Some(inode_sector) = page_location_sector(&superblock, superblock.inode_table) {
+            if inode_sector < device.sector_count() {
+                let mut sector = [0u8; QFS_SECTOR_SIZE];
+                read_sector(device, inode_sector, &mut sector)?;
+                parse_inode_records(&sector, &mut replayed_inodes)?;
+            }
+        }
+
         let mut state = self.state.lock();
+        if replayed_inodes.iter().any(Option::is_some) {
+            state.inodes = replayed_inodes;
+            state.normalize_object_metadata();
+        }
         state.journal = records;
         state.next_transaction_id = max_u64(
             state.next_transaction_id,
@@ -433,6 +483,7 @@ impl QfsFileSystem {
     }
 
     fn commit_inode_transaction(&self, transaction_id: QfsTransactionId) -> Result<(), FsError> {
+        self.state.lock().mark_all_inode_mutations(transaction_id);
         self.persist_inode_table(transaction_id)?;
         self.commit_transaction(transaction_id)
     }
@@ -606,6 +657,7 @@ impl QfsFileSystem {
                 sector.fill(0);
                 read_sector(device, inode_sector, &mut sector)?;
                 parse_inode_records(&sector, &mut next.inodes)?;
+                next.normalize_object_metadata();
             }
         }
         if next.inode_by_id(InodeId::ROOT).is_none() {
@@ -778,22 +830,23 @@ impl FileSystem for QfsFileSystem {
                 return Err(FsError::AlreadyExists);
             }
             let slot = state.free_inode_slot().ok_or(FsError::NoSpace)?;
-            state.inodes[slot] = Some(QfsInodeRecord {
-                inode: state.next_inode_id().raw(),
+            let inode = state.next_inode_id().raw();
+            let mut record = QfsInodeRecord {
+                inode,
+                object_id: inode,
                 parent_inode: parent.raw(),
                 kind: encode_inode_kind(InodeKind::Directory),
                 name_len,
+                metadata_flags: QFS_OBJECT_SERVICE_AWARE,
                 mode: mode.bits(),
                 uid: credentials.uid,
                 gid: credentials.gid,
                 links: 1,
-                size: 0,
-                first_chapter: 0,
-                chapter_count: 0,
                 name,
-                inline_data_len: 0,
-                inline_data: [0; QFS_INLINE_DATA_BYTES],
-            });
+                ..QfsInodeRecord::empty()
+            };
+            record.refresh_path_identity();
+            state.inodes[slot] = Some(record);
         }
         self.commit_inode_transaction(transaction_id)
     }
@@ -910,6 +963,7 @@ impl FileSystem for QfsFileSystem {
             updated.parent_inode = new_parent.raw();
             updated.name = new_name;
             updated.name_len = new_name_len;
+            updated.refresh_path_identity();
             state.inodes[slot] = Some(updated);
         }
         self.commit_inode_transaction(transaction_id)
@@ -951,6 +1005,7 @@ impl FileSystem for QfsFileSystem {
             entry.parent_inode = parent.raw();
             entry.name = name;
             entry.name_len = name_len;
+            entry.refresh_path_identity();
             entry.links = state
                 .link_count(InodeId::new(source.inode))
                 .saturating_add(1);
@@ -992,22 +1047,25 @@ impl FileSystem for QfsFileSystem {
             let mut inline_data = [0u8; QFS_INLINE_DATA_BYTES];
             let inline_len = min(target_bytes.len(), QFS_INLINE_DATA_BYTES);
             inline_data[..inline_len].copy_from_slice(&target_bytes[..inline_len]);
-            let record = QfsInodeRecord {
-                inode: state.next_inode_id().raw(),
+            let inode = state.next_inode_id().raw();
+            let mut record = QfsInodeRecord {
+                inode,
+                object_id: inode,
                 parent_inode: parent.raw(),
                 kind: encode_inode_kind(InodeKind::Symlink),
                 name_len,
+                metadata_flags: QFS_OBJECT_SERVICE_AWARE,
                 mode: 0o777,
                 uid: credentials.uid,
                 gid: credentials.gid,
                 links: 1,
                 size: target_bytes.len() as u64,
-                first_chapter: 0,
-                chapter_count: 0,
                 name,
                 inline_data_len: inline_len as u16,
                 inline_data,
+                ..QfsInodeRecord::empty()
             };
+            record.refresh_path_identity();
             state.inodes[slot] = Some(record);
             record
         };
@@ -1340,21 +1398,20 @@ mod tests {
     ) -> QfsInodeRecord {
         let mut record = QfsInodeRecord {
             inode,
+            object_id: inode,
             parent_inode,
             kind: encode_inode_kind(kind),
             name_len: name.len() as u8,
+            metadata_flags: QFS_OBJECT_SERVICE_AWARE,
             mode,
             uid,
             gid,
             links: 1,
-            size: 0,
-            first_chapter: 0,
-            chapter_count: 0,
             name: [0; QFS_NAME_BYTES],
-            inline_data_len: 0,
-            inline_data: [0; QFS_INLINE_DATA_BYTES],
+            ..QfsInodeRecord::empty()
         };
         record.name[..name.len()].copy_from_slice(name.as_bytes());
+        record.refresh_path_identity();
         record
     }
 
@@ -1470,6 +1527,46 @@ mod tests {
         let parsed = QfsSuperblock::parse_sector(&sector).unwrap();
 
         assert_eq!(parsed, superblock);
+    }
+
+    #[test]
+    fn inode_object_metadata_round_trips_fixed_record() {
+        let mut record = named_inode(
+            9,
+            InodeId::ROOT.raw(),
+            InodeKind::RegularFile,
+            "signed",
+            0o640,
+            7,
+            8,
+        );
+        record.metadata_flags =
+            QFS_OBJECT_HAS_SIGNATURE | QFS_OBJECT_HAS_CAPABILITY | QFS_OBJECT_SERVICE_AWARE;
+        record.service_class = 3;
+        record.extent_map_version = 4;
+        record.extent_count = 1;
+        record.extents[0] = QfsExtentRecord {
+            logical_page: 5,
+            book_id: 2,
+            first_page: 11,
+            page_count: 6,
+        };
+        record.signature_len = 16;
+        record.signature_ref = [0xa5; 16];
+        record.capability_len = 16;
+        record.capability_ref = [0x5a; 16];
+        record.last_transaction_id = 77;
+        record.mutation_state = QfsObjectMutationState::Committed as u16;
+
+        let mut inodes = [None; QFS_MAX_INODE_RECORDS];
+        inodes[0] = Some(record);
+        let mut sector = [0u8; QFS_SECTOR_SIZE];
+        serialize_inode_records(&inodes, &mut sector).unwrap();
+
+        let mut parsed = [None; QFS_MAX_INODE_RECORDS];
+        parse_inode_records(&sector, &mut parsed).unwrap();
+        assert_eq!(parsed[0], Some(record));
+        assert_eq!(parsed[1], None);
     }
 
     #[test]
