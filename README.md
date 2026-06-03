@@ -1,30 +1,33 @@
 # Mirage Kernel
 
-Mirage is a conceptual 64-bit, Rust-based operating system kernel organised into two tightly
-coupled layers:
+Mirage is a conceptual 64-bit, Rust-based GNU/Mirage operating system kernel organised
+around a mechanism/policy split:
 
-* **Level 1 (L1) core** – handles CPU scheduling, process lifecycle management,
-  message-based inter-process communication (IPC), device management, filesystem access and syscall
-  dispatch.
-* **Level 2 (L2) security core** – uses the `src/subkernel/` isolation domains, credentials,
-  capabilities and message authorization to authenticate tasks and adjudicate message flow between
-  processes.
+* **Mechanism-only kernel layer** – provides CPU scheduling primitives, process lifecycle
+  mechanics, message-based inter-process communication (IPC), filesystem mechanisms and syscall
+  entry points without treating POSIX or Linux conventions as internal design constraints.
+* **Supervisor and security broker layers** – combine `src/supervisor/` policy/recovery
+  orchestration with the `src/subkernel/` isolation domains, credentials, capabilities and message
+  authorization used to authenticate tasks, broker security decisions and recover supervised
+  services.
 
 The kernel is `#![no_std]` and now has a real x86_64 boot artifact path: Cargo builds a
 freestanding ELF for a custom target, a linker script places the kernel and Limine request records,
-and the Makefile packages the ELF into a BIOS/UEFI bootable ISO.
+and the Makefile packages the ELF with a signed boot module set into a BIOS/UEFI bootable ISO.
 
 ## Architecture flow
 
 Mirage boots from the Limine request and response records declared in `src/boot.rs`. Control enters
 through the `_start` entry point in `src/main.rs`, which gathers boot information and hands it to
 `kernel_main`. The architecture layer is initialised with `x86_64::init_architecture` from
-`src/arch/x86_64/mod.rs`, then the L1/L2 runtime is constructed with
-`Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new()`.
+`src/arch/x86_64/mod.rs`, then the mechanism-only kernel and GNU/Mirage policy layers are
+constructed with `Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new()`.
 
-From there, `bootstrap_with_framebuffer` seeds framebuffer-aware boot state, `bootstrap_services`
-registers the kernel service surface and the kernel settles into the `tick` loop where L1 scheduling,
-process lifecycle, IPC, device, filesystem and syscall dispatch continue to pass through the L2
+From there, `bootstrap_with_framebuffer` seeds framebuffer-aware boot state and
+`bootstrap_services` launches the signed boot module set. The supervisor acts as the
+policy/recovery/security broker for those modules, including supervised driver services as the
+preferred driver model, while the kernel settles into the `tick` loop where scheduling, process
+lifecycle, IPC, filesystem mechanisms and external ABI dispatch continue to pass through
 `src/subkernel/` checks for isolation domains, credentials, capabilities and message authorization.
 
 ## Layout
@@ -35,11 +38,12 @@ src/
 ├── bin/
 │   └── qfsprogs.rs   # Host QFS tooling gated behind the `qfs-std` feature
 ├── boot.rs           # Limine boot protocol request/response records
-├── kernel/           # L1 kernel components: scheduler, processes, IPC, devices, syscalls
-│   ├── fs/           # Heap-free VFS, QFS, ext4, SSD/USB, path, inode, mount, permissions
-│   └── services/     # Bootstrap/service registry support
-├── libc/             # C/POSIX-shaped ABI wrappers and syscall shims
-├── subkernel/        # L2 isolation domains, credentials, capabilities, message authorization
+├── kernel/           # Mechanism-only scheduler, processes, IPC, devices, syscalls
+│   ├── fs/           # Heap-free VFS, native indexed-object QFS, ext4, path, inode, mount
+│   └── services/     # Bootstrap/service registry support for supervised services
+├── libc/             # C/POSIX-shaped external ABI wrappers and syscall shims
+├── subkernel/        # Isolation domains, credentials, capabilities, message authorization
+├── supervisor/       # Policy, recovery, security brokerage and signed service manifests
 ├── lib.rs            # Crate entry point that exposes the layered kernel modules
 ├── librust.rs        # Local runtime primitives and allocator exports
 ├── main.rs           # `_start` entry point wiring the boot data and layers together
@@ -65,16 +69,19 @@ boot/limine/
   size, higher-half direct map, framebuffer, memory map, RSDP and executable address data.
 * **Deterministic resource management:** fixed-size tables and ring buffers are used instead of
   heap allocations, making the control flow easy to audit.
-* **Bounded Linux/POSIX target:** filesystem and descriptor APIs are guided by the supported
-  subset documented in `docs/linux-posix-compatibility.md`, not by an unbounded claim of complete
-  Linux compatibility.
-* **QFS root filesystem by default:** kernel bootstrap wires the built-in block storage device
-  through QFS for the root filesystem; ext4 and SSD/USB backends remain available for explicit
-  root mount requests and filesystem tooling.
+* **External POSIX/GNU compatibility surface:** filesystem and descriptor APIs expose a bounded
+  external ABI guided by `docs/linux-posix-compatibility.md`; Mirage internals remain GNU/Mirage
+  mechanisms rather than POSIX or Linux design assumptions.
+* **Native QFS object filesystem:** QFS is the native indexed object filesystem and default root
+  filesystem; ext4 and block backends remain available for explicit compatibility mounts and
+  filesystem tooling.
+* **Supervised driver services:** device-facing daemons are launched from the signed boot module set
+  and supervised as recoverable services, which is the preferred GNU/Mirage driver model.
 * **Security-aware IPC:** every message is tagged with a security class and must be authorised by
-  the L2 kernel before delivery.
-* **Composable design:** the separation between the L1 core and the L2 security kernel allows
-  experimentation with different scheduling policies or security models in isolation.
+  the brokered security layer before delivery.
+* **Composable design:** the separation between the mechanism-only kernel, supervisor policy and
+  security broker layers allows experimentation with different scheduling policies or security
+  models in isolation.
 
 ## Prerequisites
 
@@ -161,7 +168,7 @@ The ISO flow:
 1. Builds `target/x86_64-mirage/release/mirage-kernel`.
 2. Clones the pinned `LIMINE_VERSION` release into `build/limine` and builds the Limine host tool.
 3. Creates an ISO root containing `/boot/mirage-kernel.elf`, `/boot/limine/limine.conf`, BIOS
-   Limine files, and fallback UEFI bootloaders under `/EFI/BOOT`.
+   Limine files, signed boot module metadata, and fallback UEFI bootloaders under `/EFI/BOOT`.
 4. Runs `xorriso` and `limine bios-install` to make `build/mirage.iso` BIOS/UEFI bootable.
 
 To use a different Limine release, override the variable:
@@ -210,7 +217,8 @@ sync
 ```
 
 Then select the USB device in the firmware boot menu. The image contains both legacy BIOS and UEFI
-Limine paths. Secure Boot must be disabled unless you add your own signed Limine and kernel chain.
+Limine paths. Secure Boot must be disabled unless you add your own signed Limine, kernel, and
+boot-module chain.
 
 ## Status
 

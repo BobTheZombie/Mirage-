@@ -1,10 +1,10 @@
-//! L1 service supervisor policy.
+//! GNU/Mirage supervisor policy.
 //!
-//! This module owns early-boot service policy outside the mechanism-only kernel
-//! path: boot ordering, lifecycle state, signed manifest validation, and daemon
-//! registration. It deliberately avoids allocation: service descriptors live in a
-//! fixed-size manifest and startup progress is captured in a same-capacity
-//! report.
+//! This module is the policy/recovery/security broker outside the mechanism-only
+//! kernel path: boot ordering, lifecycle state, signed boot module validation,
+//! daemon registration and supervised driver service launch. It deliberately avoids
+//! allocation: service descriptors live in a fixed-size manifest and startup
+//! progress is captured in a same-capacity report.
 
 use crate::kernel::device::DeviceId;
 use crate::kernel::exec::SpawnTaskRequest;
@@ -18,13 +18,13 @@ use crate::subkernel::{
     IsolationLevel, SecurityLabel,
 };
 
-/// Number of services in the built-in L1 startup manifest.
+/// Number of services in the built-in signed boot module manifest.
 pub const MAX_STARTUP_SERVICES: usize = 4;
 
 /// Maximum number of dependencies a startup service can declare.
 pub const MAX_SERVICE_DEPENDENCIES: usize = 2;
 
-/// Well-known L1 startup services.
+/// Well-known GNU/Mirage startup services.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceId {
     L2Subkernel,
@@ -33,7 +33,7 @@ pub enum ServiceId {
     Inputd,
 }
 
-/// Startup state for a service supervised by L1.
+/// Startup state for a service supervised by the policy broker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartupState {
     Pending,
@@ -183,7 +183,7 @@ pub enum ServiceRecoveryState {
     Failed(KernelError),
 }
 
-/// Per-service startup and recovery state recorded by the L1 supervisor.
+/// Per-service startup and recovery state recorded by the supervisor broker.
 #[derive(Clone, Copy, Debug)]
 pub struct ServiceRuntime {
     pub descriptor: ServiceDescriptor,
@@ -250,7 +250,7 @@ impl ServiceRuntime {
     }
 }
 
-/// Fixed-capacity startup report produced by the L1 supervisor.
+/// Fixed-capacity startup report produced by the supervisor broker.
 #[derive(Clone, Copy, Debug)]
 pub struct ServiceStartupReport<const CAP: usize> {
     records: [Option<ServiceRuntime>; CAP],
@@ -733,9 +733,9 @@ fn default_capability_specs(
     capabilities
 }
 
-/// Validate static service-daemon signature metadata embedded in the L1 startup
-/// manifest. This models the signed-manifest gate for displayd, networkd,
-/// inputd, and future L2 driver daemons before they are launched.
+/// Validate static service-daemon signature metadata embedded in the signed boot
+/// module manifest. This models the signed-module gate for displayd, networkd,
+/// inputd, and future supervised driver services before they are launched.
 pub fn service_manifest_signature_valid(descriptor: ServiceDescriptor) -> bool {
     match descriptor.service_daemon {
         Some(ExecServiceDaemon::Display) => matches!(
