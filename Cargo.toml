@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/mirage-block", "crates/mirage-cap", "crates/mirage-fb", "crates/mirage-ipc", "crates/mirage-nvme", "crates/mirage-storage"]
+members = [".", "crates/mirage-block", "crates/mirage-cap", "crates/mirage-fb", "crates/mirage-gpu", "crates/mirage-ipc", "crates/mirage-nvme", "crates/mirage-storage"]
 resolver = "2"
 
 [package]
