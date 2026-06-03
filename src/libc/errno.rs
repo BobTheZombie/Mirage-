@@ -26,6 +26,8 @@ pub(super) fn libc_errno(error: KernelError) -> i32 {
         | KernelError::IsolationFault(
             IsolationError::CapabilityMissing | IsolationError::PolicyViolation,
         ) => MIRAGE_EACCES,
+        KernelError::SecurityViolation(IsolationError::CapabilityTableFull)
+        | KernelError::IsolationFault(IsolationError::CapabilityTableFull) => MIRAGE_ENOMEM,
         KernelError::DeviceNotFound => MIRAGE_ESRCH,
         KernelError::DeviceFault(_) => MIRAGE_EIO,
         KernelError::InvalidSyscall => MIRAGE_ENOSYS,
