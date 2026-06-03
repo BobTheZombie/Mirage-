@@ -236,6 +236,10 @@ unsafe fn load() {
 
 #[no_mangle]
 extern "C" fn __mirage_rust_interrupt_dispatch(vector: u64, error_code: u64) {
+    dispatch_interrupt(vector, error_code);
+}
+
+pub(crate) fn dispatch_interrupt(vector: u64, error_code: u64) {
     LAST_EXCEPTION_VECTOR.store(
         (vector << 32) | (error_code & 0xffff_ffff),
         Ordering::SeqCst,

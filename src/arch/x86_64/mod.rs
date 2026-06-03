@@ -4,13 +4,13 @@
 //! control to higher-level kernel subsystems.
 
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
 use crate::kernel::memory;
 use crate::kernel::syscall::{SyscallFrame, SYSCALL_MAX_ARGS};
 use crate::kernel::thread::{
-    ThreadControlBlock, ThreadId, SYSCALL_TRAP_VECTOR, TIMER_INTERRUPT_VECTOR,
+    CpuContext, ThreadControlBlock, ThreadId, SYSCALL_TRAP_VECTOR, TIMER_INTERRUPT_VECTOR,
 };
 
 pub mod boot;
@@ -40,6 +40,19 @@ pub enum ThreadRunOutcome {
 
 static INITIALISED: AtomicBool = AtomicBool::new(false);
 
+/// Version of the internal assembly/Rust CpuContext frame contract.
+///
+/// Keep this at 1 while `entry.S` stores fields in exactly the same order as
+/// `kernel::thread::CpuContext`; bump it if a future frame layout intentionally
+/// changes and all users are migrated together.
+pub const CPU_CONTEXT_ABI_VERSION: u64 = 1;
+
+#[no_mangle]
+pub static __mirage_current_core: AtomicUsize = AtomicUsize::new(usize::MAX);
+#[no_mangle]
+pub static __mirage_current_thread: AtomicU64 = AtomicU64::new(0);
+static CURRENT_CONTEXT: AtomicUsize = AtomicUsize::new(0);
+
 /// Perform one-time CPU and memory initialisation.
 ///
 /// Install descriptor tables, early paging, and interrupt controller state.
@@ -60,10 +73,10 @@ pub fn init_architecture(boot_info: &BootInfo) {
 /// Control comes back only after an interrupt or syscall entry stub saves a new
 /// frame in the same context. Unit tests use the same register ABI by staging a
 /// trap frame in the thread context before invoking the scheduler.
-pub fn run_thread_slice(thread: &mut ThreadControlBlock) -> ThreadRunOutcome {
+pub fn run_thread_slice(core_index: usize, thread: &mut ThreadControlBlock) -> ThreadRunOutcome {
     let timer_epoch = idt::timer_ticks();
 
-    switch_to_thread(thread);
+    enter_thread_slice(core_index, thread);
 
     match thread.context.trap_vector {
         SYSCALL_TRAP_VECTOR => ThreadRunOutcome::Syscall(SyscallTrap {
@@ -82,15 +95,31 @@ pub fn run_thread_slice(thread: &mut ThreadControlBlock) -> ThreadRunOutcome {
 
 #[cfg(not(test))]
 extern "C" {
-    fn __mirage_context_restore(context: *mut crate::kernel::thread::CpuContext) -> !;
+    fn __mirage_context_restore(context: *mut crate::kernel::thread::CpuContext);
 }
 
 /// Restore the saved CPU context for a thread.
 ///
-/// On hardware this never returns directly: `__mirage_context_restore` rebuilds
+/// On hardware this returns only after timer preemption or syscall trap: `__mirage_context_restore` rebuilds
 /// the CPU's interrupt-return frame and executes `iretq`. The interrupt and
 /// syscall stubs save the next frame before re-entering Rust scheduler code.
 pub fn switch_to_thread(thread: &mut ThreadControlBlock) {
+    enter_thread_slice(0, thread);
+}
+
+/// Publish the current hardware scheduler identity and restore a thread frame.
+///
+/// Interrupt and syscall assembly reads these atomics when it builds a
+/// [`CpuContext`] trap frame, then calls back into Rust to copy that frame into
+/// the running [`ThreadControlBlock`].
+pub fn enter_thread_slice(core_index: usize, thread: &mut ThreadControlBlock) {
+    __mirage_current_core.store(core_index, Ordering::SeqCst);
+    __mirage_current_thread.store(thread.id.raw(), Ordering::SeqCst);
+    CURRENT_CONTEXT.store(
+        core::ptr::addr_of_mut!(thread.context) as usize,
+        Ordering::SeqCst,
+    );
+
     #[cfg(not(test))]
     unsafe {
         __mirage_context_restore(core::ptr::addr_of_mut!(thread.context));
@@ -100,6 +129,32 @@ pub fn switch_to_thread(thread: &mut ThreadControlBlock) {
     {
         let _ = thread;
     }
+
+    CURRENT_CONTEXT.store(0, Ordering::SeqCst);
+    __mirage_current_thread.store(0, Ordering::SeqCst);
+    __mirage_current_core.store(usize::MAX, Ordering::SeqCst);
+}
+
+/// Rust callback used by x86_64 trap entry to persist the hardware frame.
+#[no_mangle]
+pub extern "C" fn __mirage_arch_save_trap_frame(
+    frame: *const CpuContext,
+    core_index: usize,
+    thread_raw: u64,
+) {
+    let context_ptr = CURRENT_CONTEXT.load(Ordering::SeqCst) as *mut CpuContext;
+    if !frame.is_null() && !context_ptr.is_null() {
+        unsafe {
+            *context_ptr = *frame;
+        }
+    }
+
+    let saved = unsafe { frame.as_ref() };
+    let (vector, error_code) = saved
+        .map(|context| (context.trap_vector, context.error_code))
+        .unwrap_or((0, 0));
+    let _ = (core_index, thread_raw, CPU_CONTEXT_ABI_VERSION);
+    idt::dispatch_interrupt(vector, error_code);
 }
 
 /// Hint to the CPU that the current core is in a spin loop.
