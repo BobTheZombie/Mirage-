@@ -5,6 +5,7 @@ pub mod cpu;
 pub mod device;
 pub mod exec;
 pub mod fs;
+pub mod futex;
 pub mod ipc;
 pub mod memory;
 pub mod process;
@@ -31,6 +32,7 @@ use crate::kernel::fs::{
     FileSystem, FileTable, FileTableError, FsCredentials, Path, PathError, PipeDirection,
     PipeEndpoint, PipeId, QfsFileSystem, SocketHandle, VfsError, MAX_PATH_BYTES,
 };
+use crate::kernel::futex::{FutexKey, FutexTable, MAX_FUTEX_WAITERS};
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{
@@ -104,6 +106,15 @@ const FIONREAD: u64 = 0x541b;
 const BLKSSZGET: u64 = 0x1268;
 const BLKGETSIZE64: u64 = 0x80081272;
 const MIRAGE_IOCTL_DEVICE_INFO: u64 = 0x4d01;
+const FUTEX_WAIT: u64 = 0;
+const FUTEX_WAKE: u64 = 1;
+const FUTEX_PRIVATE_FLAG: u64 = 0x80;
+const FUTEX_CMD_MASK: u64 = !(FUTEX_PRIVATE_FLAG);
+const ARCH_SET_GS: u64 = 0x1001;
+const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_GET_GS: u64 = 0x1004;
+const USER_CANONICAL_LIMIT: u64 = 0x0000_8000_0000_0000;
 
 const DEFAULT_ROOT_FILESYSTEM: &[u8] = b"qfs";
 
@@ -296,6 +307,7 @@ pub enum KernelError {
     AllocationFailed,
     FileTableFull,
     Filesystem(VfsError),
+    TimedOut,
 }
 
 pub type KernelResult<T> = core::result::Result<T, KernelError>;
@@ -321,6 +333,7 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     timers: TimerManager<MAX_SLEEP_ENTRIES, MAX_PROCESS_TIMERS>,
     pipes: [Option<PipeObject>; MAX_KERNEL_PIPES],
     eventfds: [Option<EventFdObject>; MAX_KERNEL_EVENTFDS],
+    futexes: FutexTable<MAX_FUTEX_WAITERS>,
     next_pid: u64,
     next_thread: u64,
     message_sequence: u64,
@@ -348,6 +361,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             timers: TimerManager::new(),
             pipes: [None; MAX_KERNEL_PIPES],
             eventfds: [None; MAX_KERNEL_EVENTFDS],
+            futexes: FutexTable::new(),
             next_pid: 1,
             next_thread: 1,
             message_sequence: 0,
@@ -368,6 +382,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.timers.reset();
         self.pipes = [None; MAX_KERNEL_PIPES];
         self.eventfds = [None; MAX_KERNEL_EVENTFDS];
+        self.futexes.reset();
         self.next_pid = 1;
         self.next_thread = 1;
         self.message_sequence = 0;
@@ -580,6 +595,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.security.revoke_task(pid);
             self.service_registry.revoke_owner(pid);
             self.timers.release_process(pid);
+            self.futexes.remove_owner(self.futex_owner_for_process(pid));
             let _ = self.queue_signal_to_parent(pid, SIGCHLD);
         }
     }
@@ -588,6 +604,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if let Ok(index) = self.locate_thread(thread) {
             if let Some(tcb) = self.thread_table[index] {
                 self.scheduler.remove_thread(thread);
+                self.futexes.remove_thread(thread);
                 self.remove_thread_from_cores(thread);
                 self.thread_table[index] = None;
                 self.update_process_thread_count(tcb.process, false);
@@ -1696,16 +1713,77 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.clone_thread(request).map(|thread| thread.raw())
     }
 
-    fn syscall_futex(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_futex(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let uaddr = context.arg(0);
+        let operation = context.arg(1);
+        let value = context.arg(2) as i32;
+        let timeout_ptr = context.arg(3);
+        let command = operation & FUTEX_CMD_MASK;
+        let key = self.futex_key(context.caller, uaddr)?;
+
+        match command {
+            FUTEX_WAIT => {
+                let thread = context.thread.ok_or(KernelError::UnknownThread)?;
+                let observed = read_user_value::<i32>(uaddr)?;
+                if observed != value {
+                    return Err(KernelError::MessageQueueEmpty);
+                }
+                let deadline = if timeout_ptr == 0 {
+                    None
+                } else {
+                    let requested = read_user_value::<MirageTimespec>(timeout_ptr)?;
+                    let duration_ns = timespec_to_nanos(requested)?;
+                    Some(KERNEL_TIME.now().as_nanos().saturating_add(duration_ns))
+                };
+                self.futexes
+                    .enqueue(key, thread, deadline)
+                    .map_err(|_| KernelError::AllocationFailed)?;
+                self.block_thread(thread)?;
+                Ok(0)
+            }
+            FUTEX_WAKE => {
+                let limit = if value < 0 { 0 } else { value as usize };
+                let mut woken_threads = [None; MAX_THREADS];
+                let count = self.futexes.wake(key, limit, &mut woken_threads);
+                self.wake_futex_threads(&woken_threads, count, 0)?;
+                Ok(count as u64)
+            }
+            _ => Err(KernelError::InvalidArgument),
+        }
     }
 
-    fn syscall_set_thread_area(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_set_thread_area(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let thread = context.thread.ok_or(KernelError::UnknownThread)?;
+        let base = context.arg(0);
+        validate_tls_base(base)?;
+        self.set_thread_fs_base(thread, base)
     }
 
-    fn syscall_arch_prctl(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_arch_prctl(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let thread = context.thread.ok_or(KernelError::UnknownThread)?;
+        match context.arg(0) {
+            ARCH_SET_FS => {
+                let base = context.arg(1);
+                validate_tls_base(base)?;
+                self.set_thread_fs_base(thread, base)
+            }
+            ARCH_SET_GS => {
+                let base = context.arg(1);
+                validate_tls_base(base)?;
+                self.set_thread_gs_base(thread, base)
+            }
+            ARCH_GET_FS => {
+                let base = self.thread_fs_base(thread)?;
+                write_user_value::<u64>(context.arg(1), base)?;
+                Ok(0)
+            }
+            ARCH_GET_GS => {
+                let base = self.thread_gs_base(thread)?;
+                write_user_value::<u64>(context.arg(1), base)?;
+                Ok(0)
+            }
+            _ => Err(KernelError::InvalidArgument),
+        }
     }
 
     fn syscall_spawn(&mut self, context: SyscallContext) -> KernelResult<u64> {
@@ -3155,7 +3233,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     pub fn tick(&mut self) {
         device::system_timer().tick();
         let timestamp = KERNEL_TIME.tick();
-        self.wake_expired_timeouts(timestamp.as_nanos());
+        let now_ns = timestamp.as_nanos();
+        self.wake_expired_timeouts(now_ns);
+        self.wake_expired_futexes(now_ns);
         let mut core_index = 0usize;
         while core_index < cpu::MAX_CORES {
             if self.core_states[core_index].online {
@@ -3173,6 +3253,16 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         while let Some(expired) = self.timers.expire_timer(now_ns) {
             let _ = self.wake_process_for_timeout(expired.owner);
         }
+    }
+
+    fn wake_expired_futexes(&mut self, now_ns: u128) {
+        let mut expired_threads = [None; MAX_THREADS];
+        let count = self.futexes.expire(now_ns, &mut expired_threads);
+        let _ = self.wake_futex_threads(
+            &expired_threads,
+            count,
+            encode_syscall_error(KernelError::TimedOut),
+        );
     }
 
     fn wake_process_for_timeout(&mut self, pid: ProcessId) -> KernelResult<()> {
@@ -3271,9 +3361,14 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 }
             }
 
+            let process_has_runnable_threads = self.has_runnable_thread(scheduled.process);
             if let Some(pcb) = self.process_table[process_index].as_mut() {
                 if pcb.state == ProcessState::Running {
-                    pcb.state = ProcessState::Ready;
+                    pcb.state = if process_has_runnable_threads {
+                        ProcessState::Ready
+                    } else {
+                        ProcessState::Blocked
+                    };
                 }
             }
 
@@ -3289,6 +3384,139 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         } else {
             self.core_states[core_index].idle_cycle();
         }
+    }
+
+    fn futex_owner_for_process(&self, pid: ProcessId) -> u64 {
+        if let Ok(process_index) = self.locate_process(pid) {
+            if let Some(pcb) = self.process_table[process_index].as_ref() {
+                if pcb.address_space_root != 0 {
+                    return pcb.address_space_root;
+                }
+            }
+        }
+        pid.raw()
+    }
+
+    fn futex_key(&self, pid: ProcessId, user_address: u64) -> KernelResult<FutexKey> {
+        let _ = user_out_ptr::<i32>(user_address)?;
+        let process_index = self.locate_process(pid)?;
+        let owner = self.process_table[process_index]
+            .as_ref()
+            .ok_or(KernelError::UnknownProcess)?
+            .address_space_root;
+        let owner = if owner == 0 { pid.raw() } else { owner };
+        Ok(FutexKey::new(owner, user_address))
+    }
+
+    fn set_thread_fs_base(&mut self, thread: ThreadId, base: u64) -> KernelResult<u64> {
+        let index = self.locate_thread(thread)?;
+        let tcb = self.thread_table[index]
+            .as_mut()
+            .ok_or(KernelError::UnknownThread)?;
+        tcb.set_fs_base(base);
+        Ok(0)
+    }
+
+    fn set_thread_gs_base(&mut self, thread: ThreadId, base: u64) -> KernelResult<u64> {
+        let index = self.locate_thread(thread)?;
+        let tcb = self.thread_table[index]
+            .as_mut()
+            .ok_or(KernelError::UnknownThread)?;
+        tcb.set_gs_base(base);
+        Ok(0)
+    }
+
+    fn thread_fs_base(&self, thread: ThreadId) -> KernelResult<u64> {
+        let index = self.locate_thread(thread)?;
+        self.thread_table[index]
+            .map(|tcb| tcb.fs_base)
+            .ok_or(KernelError::UnknownThread)
+    }
+
+    fn thread_gs_base(&self, thread: ThreadId) -> KernelResult<u64> {
+        let index = self.locate_thread(thread)?;
+        self.thread_table[index]
+            .map(|tcb| tcb.gs_base)
+            .ok_or(KernelError::UnknownThread)
+    }
+
+    fn block_thread(&mut self, thread: ThreadId) -> KernelResult<()> {
+        let index = self.locate_thread(thread)?;
+        let process = self.thread_table[index]
+            .as_ref()
+            .ok_or(KernelError::UnknownThread)?
+            .process;
+        if let Some(tcb) = self.thread_table[index].as_mut() {
+            tcb.block();
+        }
+        self.scheduler.remove_thread(thread);
+        if !self.has_runnable_thread(process) {
+            if let Ok(process_index) = self.locate_process(process) {
+                if let Some(pcb) = self.process_table[process_index].as_mut() {
+                    if pcb.state != ProcessState::Zombie {
+                        pcb.state = ProcessState::Blocked;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn wake_thread(&mut self, thread: ThreadId) -> KernelResult<()> {
+        let index = self.locate_thread(thread)?;
+        let mut scheduled = None;
+        if let Some(tcb) = self.thread_table[index].as_mut() {
+            if tcb.state == ThreadState::Blocked {
+                tcb.mark_ready();
+                scheduled = Some(ScheduledThread::new(tcb.id, tcb.process, tcb.priority));
+            }
+        }
+        if let Some(scheduled_thread) = scheduled {
+            self.scheduler
+                .enqueue(scheduled_thread)
+                .map_err(|_| KernelError::SchedulerFull)?;
+            let process = scheduled_thread.process;
+            if let Ok(process_index) = self.locate_process(process) {
+                if let Some(pcb) = self.process_table[process_index].as_mut() {
+                    if pcb.state == ProcessState::Blocked {
+                        pcb.state = ProcessState::Ready;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn has_runnable_thread(&self, pid: ProcessId) -> bool {
+        let mut idx = 0usize;
+        while idx < Self::THREAD_CAPACITY {
+            if let Some(thread) = self.thread_table[idx] {
+                if thread.process == pid
+                    && (thread.state == ThreadState::Ready || thread.state == ThreadState::Running)
+                {
+                    return true;
+                }
+            }
+            idx += 1;
+        }
+        false
+    }
+
+    fn wake_futex_threads(
+        &mut self,
+        threads: &[Option<ThreadId>],
+        count: usize,
+        result: u64,
+    ) -> KernelResult<()> {
+        let mut idx = 0usize;
+        while idx < count && idx < threads.len() {
+            if let Some(thread) = threads[idx] {
+                self.write_thread_syscall_result(thread, result);
+                self.wake_thread(thread)?;
+            }
+            idx += 1;
+        }
+        Ok(())
     }
 
     fn block_process_at_index(&mut self, pid: ProcessId, index: usize) {
@@ -3362,6 +3590,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             if let Some(thread) = self.thread_table[idx] {
                 if thread.process == pid {
                     self.scheduler.remove_thread(thread.id);
+                    self.futexes.remove_thread(thread.id);
                     self.remove_thread_from_cores(thread.id);
                     self.thread_table[idx] = None;
                 }
@@ -3398,6 +3627,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn rollback_thread_creation(&mut self, thread: ThreadId) {
         if let Ok(index) = self.locate_thread(thread) {
             if let Some(tcb) = self.thread_table[index] {
+                self.futexes.remove_thread(thread);
                 self.thread_table[index] = None;
                 self.update_process_thread_count(tcb.process, false);
             }
@@ -3659,6 +3889,14 @@ fn startup_service_to_registry(
     }
 }
 
+fn validate_tls_base(base: u64) -> KernelResult<()> {
+    if base < USER_CANONICAL_LIMIT {
+        Ok(())
+    } else {
+        Err(KernelError::InvalidArgument)
+    }
+}
+
 fn validate_user_range(ptr: u64, len: usize) -> KernelResult<()> {
     if len == 0 {
         return Ok(());
@@ -3828,6 +4066,7 @@ fn syscall_error_code(error: KernelError) -> SyscallErrorCode {
         KernelError::AllocationFailed => SyscallErrorCode::OutOfMemory,
         KernelError::FileTableFull => SyscallErrorCode::OutOfMemory,
         KernelError::Filesystem(error) => vfs_syscall_error_code(error),
+        KernelError::TimedOut => SyscallErrorCode::TimedOut,
     }
 }
 
@@ -4171,6 +4410,140 @@ mod tests {
                 .state,
             ThreadState::Ready
         );
+    }
+
+    #[test]
+    fn tls_syscalls_record_fs_and_gs_bases() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let thread = first_thread(&kernel, pid);
+        let mut out = 0u64;
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::SetThreadArea.raw(),
+                SyscallContext::new(pid, Some(thread), [0x7000, 0, 0, 0, 0, 0]),
+            )
+            .unwrap();
+        assert_eq!(kernel.thread_context(thread).unwrap().fs_base, 0x7000);
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::ArchPrctl.raw(),
+                SyscallContext::new(pid, Some(thread), [ARCH_SET_FS, 0x8000, 0, 0, 0, 0]),
+            )
+            .unwrap();
+        kernel
+            .handle_syscall(
+                SyscallNumber::ArchPrctl.raw(),
+                SyscallContext::new(
+                    pid,
+                    Some(thread),
+                    [ARCH_GET_FS, &mut out as *mut u64 as u64, 0, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        assert_eq!(out, 0x8000);
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::ArchPrctl.raw(),
+                SyscallContext::new(pid, Some(thread), [ARCH_SET_GS, 0x9000, 0, 0, 0, 0]),
+            )
+            .unwrap();
+        kernel
+            .handle_syscall(
+                SyscallNumber::ArchPrctl.raw(),
+                SyscallContext::new(
+                    pid,
+                    Some(thread),
+                    [ARCH_GET_GS, &mut out as *mut u64 as u64, 0, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        assert_eq!(out, 0x9000);
+    }
+
+    #[test]
+    fn futex_wait_blocks_and_wake_requeues_thread() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let thread = first_thread(&kernel, pid);
+        let word = 7i32;
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::Futex.raw(),
+                SyscallContext::new(
+                    pid,
+                    Some(thread),
+                    [&word as *const i32 as u64, FUTEX_WAIT, 7, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        assert_eq!(process_state(&kernel, pid), ProcessState::Blocked);
+        assert_eq!(
+            kernel.thread_table[kernel.locate_thread(thread).unwrap()]
+                .unwrap()
+                .state,
+            ThreadState::Blocked
+        );
+
+        let woken = kernel
+            .handle_syscall(
+                SyscallNumber::Futex.raw(),
+                SyscallContext::new(
+                    pid,
+                    None,
+                    [&word as *const i32 as u64, FUTEX_WAKE, 1, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(woken, 1);
+        assert_eq!(process_state(&kernel, pid), ProcessState::Ready);
+        assert_eq!(
+            kernel.thread_table[kernel.locate_thread(thread).unwrap()]
+                .unwrap()
+                .state,
+            ThreadState::Ready
+        );
+    }
+
+    #[test]
+    fn futex_wait_timeout_wakes_on_tick_with_timed_out_result() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let thread = first_thread(&kernel, pid);
+        let word = 3i32;
+        let timeout = MirageTimespec {
+            tv_sec: 0,
+            tv_nsec: 1,
+        };
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::Futex.raw(),
+                SyscallContext::new(
+                    pid,
+                    Some(thread),
+                    [
+                        &word as *const i32 as u64,
+                        FUTEX_WAIT,
+                        3,
+                        &timeout as *const MirageTimespec as u64,
+                        0,
+                        0,
+                    ],
+                ),
+            )
+            .unwrap();
+
+        kernel.tick();
+
+        let context = kernel.thread_context(thread).unwrap();
+        assert_eq!(process_state(&kernel, pid), ProcessState::Ready);
+        assert_eq!(context.rax, encode_syscall_error(KernelError::TimedOut));
     }
 
     #[test]

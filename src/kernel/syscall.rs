@@ -64,6 +64,7 @@ pub enum SyscallErrorCode {
     TooManyLinks = 25,
     UnsupportedFilesystem = 26,
     NameTooLong = 27,
+    TimedOut = 28,
 }
 
 impl SyscallErrorCode {
@@ -96,6 +97,7 @@ impl SyscallErrorCode {
             Self::TooManyLinks => MIRAGE_EMLINK,
             Self::UnsupportedFilesystem => MIRAGE_ENOTSUP,
             Self::NameTooLong => MIRAGE_ENAMETOOLONG,
+            Self::TimedOut => MIRAGE_ETIMEDOUT,
         }
     }
 }
@@ -126,6 +128,7 @@ pub const MIRAGE_ENAMETOOLONG: i32 = 36;
 pub const MIRAGE_ENOSYS: i32 = 38;
 pub const MIRAGE_ENOTSUP: i32 = 95;
 pub const MIRAGE_ENOBUFS: i32 = 105;
+pub const MIRAGE_ETIMEDOUT: i32 = 110;
 
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

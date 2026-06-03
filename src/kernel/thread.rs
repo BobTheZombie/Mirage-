@@ -68,6 +68,8 @@ pub struct CpuContext {
     pub ss: u64,
     pub fs: u64,
     pub gs: u64,
+    pub fs_base: u64,
+    pub gs_base: u64,
     pub trap_vector: u64,
     pub error_code: u64,
     pub privilege_mode: PrivilegeMode,
@@ -107,6 +109,8 @@ impl CpuContext {
             ss,
             fs: 0,
             gs: 0,
+            fs_base: 0,
+            gs_base: 0,
             trap_vector: 0,
             error_code: 0,
             privilege_mode,
@@ -158,6 +162,8 @@ pub struct ThreadControlBlock {
     pub active_signal: Option<u8>,
     pub thread_group: ProcessId,
     pub tls_base: u64,
+    pub fs_base: u64,
+    pub gs_base: u64,
     pub shares_address_space: bool,
     pub shares_descriptor_table: bool,
 }
@@ -183,6 +189,8 @@ impl ThreadControlBlock {
             active_signal: None,
             thread_group: process,
             tls_base: 0,
+            fs_base: 0,
+            gs_base: 0,
             shares_address_space: false,
             shares_descriptor_table: false,
         }
@@ -217,6 +225,8 @@ impl ThreadControlBlock {
         self.stack_pointer = stack_pointer;
         self.context = CpuContext::new(entry_point, stack_pointer, PrivilegeMode::User);
         self.tls_base = 0;
+        self.fs_base = 0;
+        self.gs_base = 0;
         self.state = ThreadState::Ready;
         self.active_signal = None;
     }
@@ -229,10 +239,22 @@ impl ThreadControlBlock {
         shares_descriptor_table: bool,
     ) {
         self.thread_group = thread_group;
-        self.tls_base = tls_base;
-        self.context.fs = tls_base;
+        self.set_fs_base(tls_base);
         self.shares_address_space = shares_address_space;
         self.shares_descriptor_table = shares_descriptor_table;
+    }
+
+    pub fn set_fs_base(&mut self, base: u64) {
+        self.tls_base = base;
+        self.fs_base = base;
+        self.context.fs = base;
+        self.context.fs_base = base;
+    }
+
+    pub fn set_gs_base(&mut self, base: u64) {
+        self.gs_base = base;
+        self.context.gs = base;
+        self.context.gs_base = base;
     }
 
     pub fn set_signal_mask(&mut self, mask: SignalMask) -> SignalMask {
