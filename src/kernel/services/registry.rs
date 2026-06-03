@@ -10,7 +10,7 @@ use crate::kernel::process::ProcessId;
 use crate::subkernel::SecurityClass;
 
 /// Maximum number of service endpoints tracked by the registry.
-pub const MAX_SERVICE_REGISTRATIONS: usize = 8;
+pub const MAX_SERVICE_REGISTRATIONS: usize = 12;
 
 /// Maximum number of L1 devices that can be claimed by service daemons.
 pub const MAX_DEVICE_CLAIMS: usize = 8;
@@ -24,6 +24,11 @@ pub enum ServiceId {
     /// Reserved IPC endpoint for POSIX-style socket operations routed through `networkd`.
     Networkd = 2,
     Inputd = 3,
+    Storaged = 4,
+    Usbd = 5,
+    Nvmed = 6,
+    Ahcid = 7,
+    AmdgpuDisplayd = 8,
     SerialDriver = 0x100,
     TimerDriver = 0x101,
     BlockDriver = 0x102,
@@ -47,6 +52,11 @@ impl ServiceId {
             1 => Some(Self::Displayd),
             2 => Some(Self::Networkd),
             3 => Some(Self::Inputd),
+            4 => Some(Self::Storaged),
+            5 => Some(Self::Usbd),
+            6 => Some(Self::Nvmed),
+            7 => Some(Self::Ahcid),
+            8 => Some(Self::AmdgpuDisplayd),
             0x100 => Some(Self::SerialDriver),
             0x101 => Some(Self::TimerDriver),
             0x102 => Some(Self::BlockDriver),
@@ -64,6 +74,11 @@ impl ServiceId {
             Self::Displayd => "displayd",
             Self::Networkd => "networkd",
             Self::Inputd => "inputd",
+            Self::Storaged => "storaged",
+            Self::Usbd => "usbd",
+            Self::Nvmed => "nvmed",
+            Self::Ahcid => "ahcid",
+            Self::AmdgpuDisplayd => "amdgpu-displayd",
             Self::SerialDriver => "driverd.serial",
             Self::TimerDriver => "driverd.timer",
             Self::BlockDriver => "driverd.block",
@@ -77,7 +92,14 @@ impl ServiceId {
 
     pub const fn security_class(self) -> SecurityClass {
         match self {
-            Self::Displayd | Self::Networkd | Self::Inputd => SecurityClass::Internal,
+            Self::Displayd
+            | Self::Networkd
+            | Self::Inputd
+            | Self::Storaged
+            | Self::Usbd
+            | Self::Nvmed
+            | Self::Ahcid
+            | Self::AmdgpuDisplayd => SecurityClass::Internal,
             Self::SerialDriver
             | Self::BlockDriver
             | Self::FramebufferDriver
@@ -108,6 +130,12 @@ impl ServiceId {
                 | (Self::Displayd, DeviceKind::GpuCapability)
                 | (Self::Networkd, DeviceKind::NetworkInterface)
                 | (Self::Inputd, DeviceKind::InputController)
+                | (Self::Storaged, DeviceKind::BlockStorage)
+                | (Self::Usbd, DeviceKind::InputController)
+                | (Self::Nvmed, DeviceKind::BlockStorage)
+                | (Self::Ahcid, DeviceKind::BlockStorage)
+                | (Self::AmdgpuDisplayd, DeviceKind::Framebuffer)
+                | (Self::AmdgpuDisplayd, DeviceKind::GpuCapability)
                 | (Self::SerialDriver, DeviceKind::SerialConsole)
                 | (Self::TimerDriver, DeviceKind::SystemTimer)
                 | (Self::BlockDriver, DeviceKind::BlockStorage)

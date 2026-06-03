@@ -1034,6 +1034,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .map_err(KernelError::SecurityViolation)
     }
 
+    pub fn revoke_task_capabilities(&mut self, owner: ProcessId) {
+        self.security.revoke_all_capabilities(owner);
+    }
+
     pub fn revoke_service_owner(&mut self, owner: ProcessId) {
         self.service_registry.revoke_owner(owner);
     }
@@ -4599,20 +4603,20 @@ mod tests {
     use crate::libc;
     use crate::subkernel::{CapabilitySet, IsolationLevel, SecurityLabel};
 
-    fn boot_kernel() -> Kernel<4, 4> {
-        let mut kernel = Kernel::<4, 4>::new();
+    fn boot_kernel() -> Kernel<16, 4> {
+        let mut kernel = Kernel::<16, 4>::new();
         kernel.bootstrap();
         kernel
     }
 
-    fn process_state(kernel: &Kernel<4, 4>, pid: ProcessId) -> ProcessState {
+    fn process_state(kernel: &Kernel<16, 4>, pid: ProcessId) -> ProcessState {
         let index = kernel.locate_process(pid).unwrap();
         kernel.process_table[index].unwrap().state
     }
 
-    fn first_thread(kernel: &Kernel<4, 4>, pid: ProcessId) -> ThreadId {
+    fn first_thread(kernel: &Kernel<16, 4>, pid: ProcessId) -> ThreadId {
         let mut idx = 0usize;
-        while idx < Kernel::<4, 4>::THREAD_CAPACITY {
+        while idx < Kernel::<16, 4>::THREAD_CAPACITY {
             if let Some(thread) = kernel.thread_table[idx] {
                 if thread.process == pid {
                     return thread.id;
@@ -4623,10 +4627,10 @@ mod tests {
         panic!("process has no thread")
     }
 
-    fn process_threads_blocked(kernel: &Kernel<4, 4>, pid: ProcessId) -> bool {
+    fn process_threads_blocked(kernel: &Kernel<16, 4>, pid: ProcessId) -> bool {
         let mut saw_thread = false;
         let mut idx = 0usize;
-        while idx < Kernel::<4, 4>::THREAD_CAPACITY {
+        while idx < Kernel::<16, 4>::THREAD_CAPACITY {
             if let Some(thread) = kernel.thread_table[idx] {
                 if thread.process == pid {
                     saw_thread = true;
@@ -4653,7 +4657,27 @@ mod tests {
             .unwrap();
         assert_eq!(l2.raw(), 1);
         assert_eq!(
+            report.state(crate::supervisor::ServiceId::Storaged),
+            Some(crate::supervisor::StartupState::Running)
+        );
+        assert_eq!(
+            report.state(crate::supervisor::ServiceId::Usbd),
+            Some(crate::supervisor::StartupState::Running)
+        );
+        assert_eq!(
+            report.state(crate::supervisor::ServiceId::Nvmed),
+            Some(crate::supervisor::StartupState::Running)
+        );
+        assert_eq!(
+            report.state(crate::supervisor::ServiceId::Ahcid),
+            Some(crate::supervisor::StartupState::Running)
+        );
+        assert_eq!(
             report.state(crate::supervisor::ServiceId::Displayd),
+            Some(crate::supervisor::StartupState::Running)
+        );
+        assert_eq!(
+            report.state(crate::supervisor::ServiceId::AmdgpuDisplayd),
             Some(crate::supervisor::StartupState::Running)
         );
         assert_eq!(
@@ -4667,7 +4691,7 @@ mod tests {
 
         let mut idx = 0usize;
         let mut child_count = 0usize;
-        while idx < Kernel::<4, 4>::THREAD_CAPACITY {
+        while idx < Kernel::<16, 4>::THREAD_CAPACITY {
             if idx < kernel.process_table.len() {
                 if let Some(pcb) = kernel.process_table[idx] {
                     if pcb.pid != l2 {
@@ -4678,7 +4702,7 @@ mod tests {
             }
             idx += 1;
         }
-        assert_eq!(child_count, 3);
+        assert_eq!(child_count, 8);
     }
 
     #[test]
