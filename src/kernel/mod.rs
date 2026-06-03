@@ -11,7 +11,6 @@ pub mod memory;
 pub mod process;
 pub mod scheduler;
 pub mod services;
-pub mod spawn;
 pub mod sync;
 pub mod syscall;
 pub mod thread;
@@ -49,11 +48,6 @@ use crate::kernel::services::network::{
 use crate::kernel::services::registry::{
     ServiceId as RegistryServiceId, ServiceRegistry, ServiceRegistryError, MAX_DEVICE_CLAIMS,
     MAX_SERVICE_REGISTRATIONS,
-};
-use crate::kernel::spawn::{
-    dependencies_ready, service_manifest_signature_valid, DefaultServiceStartupReport,
-    DependencyStatus, ServiceManifest, ServiceStartupReport, StartupState,
-    DEFAULT_STARTUP_MANIFEST,
 };
 use crate::kernel::syscall::{
     SyscallContext, SyscallErrorCode, SyscallNumber, MIRAGE_SYSCALL_ERROR_BIT,
@@ -446,103 +440,6 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         })
     }
 
-    pub fn bootstrap_services(&mut self) -> DefaultServiceStartupReport {
-        self.spawn_services(&DEFAULT_STARTUP_MANIFEST)
-    }
-
-    pub fn spawn_services<const CAP: usize>(
-        &mut self,
-        manifest: &ServiceManifest<CAP>,
-    ) -> ServiceStartupReport<CAP> {
-        let mut report = ServiceStartupReport::from_manifest(manifest);
-
-        loop {
-            let mut made_progress = false;
-            let mut pending = 0usize;
-            let mut idx = 0usize;
-
-            while idx < report.len() {
-                if let Some(record) = report.record(idx) {
-                    if record.state == StartupState::Pending {
-                        match dependencies_ready(record.descriptor, &report) {
-                            DependencyStatus::Ready(parent) => {
-                                if !service_manifest_signature_valid(record.descriptor) {
-                                    report.set_failed(
-                                        idx,
-                                        KernelError::SecurityViolation(
-                                            IsolationError::PolicyViolation,
-                                        ),
-                                    );
-                                    made_progress = true;
-                                    idx += 1;
-                                    continue;
-                                }
-
-                                report.set_starting(idx);
-                                let spawned = if let Some(parent_pid) = parent {
-                                    self.spawn_child_process(
-                                        parent_pid,
-                                        record.descriptor.entry_point,
-                                        record.descriptor.priority,
-                                        record.descriptor.credentials,
-                                    )
-                                } else {
-                                    self.spawn_initial_process(record.descriptor.credentials)
-                                };
-
-                                match spawned {
-                                    Ok(pid) => {
-                                        report.set_running(idx, pid);
-                                        if let Some(registry_service) =
-                                            startup_service_to_registry(record.descriptor.id)
-                                        {
-                                            if let Some(authorizer) = parent {
-                                                let _ = self.register_service(
-                                                    authorizer,
-                                                    registry_service,
-                                                    pid,
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(error) => report.set_failed(idx, error),
-                                }
-                                made_progress = true;
-                            }
-                            DependencyStatus::Waiting => {
-                                pending += 1;
-                            }
-                            DependencyStatus::Failed => {
-                                report.set_failed(idx, KernelError::InvalidArgument);
-                                made_progress = true;
-                            }
-                        }
-                    }
-                }
-                idx += 1;
-            }
-
-            if pending == 0 {
-                break;
-            }
-
-            if !made_progress {
-                let mut fail_idx = 0usize;
-                while fail_idx < report.len() {
-                    if let Some(record) = report.record(fail_idx) {
-                        if record.state == StartupState::Pending {
-                            report.set_failed(fail_idx, KernelError::InvalidArgument);
-                        }
-                    }
-                    fail_idx += 1;
-                }
-                break;
-            }
-        }
-
-        report
-    }
-
     pub fn spawn_child_process(
         &mut self,
         parent_pid: ProcessId,
@@ -628,6 +525,35 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.service_registry
             .register(service, owner)
             .map_err(map_service_registry_error)
+    }
+
+    pub fn register_endpoint(
+        &mut self,
+        authorizer: ProcessId,
+        service: RegistryServiceId,
+        owner: ProcessId,
+    ) -> KernelResult<()> {
+        self.register_service(authorizer, service, owner)
+    }
+
+    pub fn revoke_task(&mut self, pid: ProcessId) {
+        self.security.revoke_task(pid);
+    }
+
+    pub fn check_service_control_capability(&self, pid: ProcessId) -> KernelResult<()> {
+        self.security
+            .authorize_service_control(pid)
+            .map_err(KernelError::SecurityViolation)
+    }
+
+    pub fn check_service_registration_capability(
+        &self,
+        owner: ProcessId,
+        service: RegistryServiceId,
+    ) -> KernelResult<()> {
+        self.security
+            .authorize_service_registration(owner, service.security_class())
+            .map_err(KernelError::SecurityViolation)
     }
 
     pub fn service_owner(&self, service: RegistryServiceId) -> Option<ProcessId> {
@@ -3878,17 +3804,6 @@ fn decode_registry_service_id(raw: u64) -> KernelResult<RegistryServiceId> {
     RegistryServiceId::from_raw(raw).ok_or(KernelError::InvalidArgument)
 }
 
-fn startup_service_to_registry(
-    service: crate::kernel::spawn::ServiceId,
-) -> Option<RegistryServiceId> {
-    match service {
-        crate::kernel::spawn::ServiceId::Displayd => Some(RegistryServiceId::Displayd),
-        crate::kernel::spawn::ServiceId::Networkd => Some(RegistryServiceId::Networkd),
-        crate::kernel::spawn::ServiceId::Inputd => Some(RegistryServiceId::Inputd),
-        crate::kernel::spawn::ServiceId::L2Subkernel => None,
-    }
-}
-
 fn validate_tls_base(base: u64) -> KernelResult<()> {
     if base < USER_CANONICAL_LIMIT {
         Ok(())
@@ -4160,27 +4075,28 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_services_starts_l2_before_device_daemons() {
+    fn supervisor_starts_l2_before_device_daemons() {
         let mut kernel = boot_kernel();
+        let supervisor = crate::supervisor::Supervisor::new();
 
-        let report = kernel.bootstrap_services();
+        let report = supervisor.bootstrap_services(&mut kernel);
 
         assert!(report.all_running());
         let l2 = report
-            .pid(crate::kernel::spawn::ServiceId::L2Subkernel)
+            .pid(crate::supervisor::ServiceId::L2Subkernel)
             .unwrap();
         assert_eq!(l2.raw(), 1);
         assert_eq!(
-            report.state(crate::kernel::spawn::ServiceId::Displayd),
-            Some(crate::kernel::spawn::StartupState::Running)
+            report.state(crate::supervisor::ServiceId::Displayd),
+            Some(crate::supervisor::StartupState::Running)
         );
         assert_eq!(
-            report.state(crate::kernel::spawn::ServiceId::Networkd),
-            Some(crate::kernel::spawn::StartupState::Running)
+            report.state(crate::supervisor::ServiceId::Networkd),
+            Some(crate::supervisor::StartupState::Running)
         );
         assert_eq!(
-            report.state(crate::kernel::spawn::ServiceId::Inputd),
-            Some(crate::kernel::spawn::StartupState::Running)
+            report.state(crate::supervisor::ServiceId::Inputd),
+            Some(crate::supervisor::StartupState::Running)
         );
 
         let mut idx = 0usize;

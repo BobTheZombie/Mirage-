@@ -25,6 +25,7 @@ pub mod libc;
 pub mod librust;
 pub mod stdlib;
 pub mod subkernel;
+pub mod supervisor;
 
 #[cfg(not(any(test, feature = "qfs-std")))]
 use core::panic::PanicInfo;
