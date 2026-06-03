@@ -11,9 +11,9 @@ use core::ptr::addr_of;
 #[cfg(not(any(test, feature = "qfs-std")))]
 use core::ptr::write_bytes;
 
-use crate::boot::MemoryMapEntry as LimineMemoryMapEntry;
 #[cfg(not(any(test, feature = "qfs-std")))]
 use crate::boot::{self as limine, Framebuffer};
+use crate::boot::{LimineFile, MemoryMapEntry as LimineMemoryMapEntry};
 
 #[cfg(not(any(test, feature = "qfs-std")))]
 global_asm!(
@@ -87,6 +87,7 @@ pub struct BootInfo {
     pub rsdp: Option<PhysicalAddress>,
     pub hhdm_offset: Option<u64>,
     pub kernel: KernelImageInfo,
+    pub modules: BootModules,
 }
 
 impl BootInfo {
@@ -121,6 +122,13 @@ impl BootInfo {
                 sections,
                 load_range: executable,
             },
+            modules: raw
+                .modules
+                .map(|modules| BootModules {
+                    entries: modules.modules,
+                    entry_count: modules.module_count,
+                })
+                .unwrap_or(BootModules::empty()),
         }
     }
 }
@@ -181,6 +189,112 @@ impl BootString {
             &[]
         } else {
             unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootModules {
+    entries: *const *const LimineFile,
+    entry_count: u64,
+}
+
+impl BootModules {
+    pub const fn empty() -> Self {
+        Self {
+            entries: core::ptr::null(),
+            entry_count: 0,
+        }
+    }
+
+    pub const fn len(self) -> u64 {
+        self.entry_count
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.entry_count == 0
+    }
+
+    pub fn module(self, index: u64) -> Option<BootModule> {
+        if index >= self.entry_count || self.entries.is_null() {
+            return None;
+        }
+        let file_ptr = unsafe { self.entries.add(index as usize).read() };
+        let file = unsafe { file_ptr.as_ref()? };
+        Some(BootModule {
+            base: VirtualAddress(file.address as u64),
+            size: file.size,
+            path: BootString::from_cstr(file.path),
+            command_line: BootString::from_cstr(file.cmdline),
+            trust: BootModuleTrust {
+                media_type: BootModuleMediaType::from_limine(file.media_type),
+                partition_index: file.partition_index,
+                mbr_disk_id: file.mbr_disk_id,
+                gpt_disk_uuid: BootUuid::from_limine(file.gpt_disk_uuid),
+                gpt_part_uuid: BootUuid::from_limine(file.gpt_part_uuid),
+                part_uuid: BootUuid::from_limine(file.part_uuid),
+                tftp_ip: file.tftp_ip,
+                tftp_port: file.tftp_port,
+            },
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootModule {
+    pub base: VirtualAddress,
+    pub size: u64,
+    pub path: BootString,
+    pub command_line: BootString,
+    pub trust: BootModuleTrust,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootModuleTrust {
+    pub media_type: BootModuleMediaType,
+    pub partition_index: u32,
+    pub mbr_disk_id: u32,
+    pub gpt_disk_uuid: BootUuid,
+    pub gpt_part_uuid: BootUuid,
+    pub part_uuid: BootUuid,
+    pub tftp_ip: u32,
+    pub tftp_port: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootModuleMediaType {
+    Generic,
+    Optical,
+    Tftp,
+    Unknown(u32),
+}
+
+impl BootModuleMediaType {
+    fn from_limine(value: u32) -> Self {
+        match value {
+            0 => Self::Generic,
+            1 => Self::Optical,
+            2 => Self::Tftp,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootUuid {
+    pub a: u32,
+    pub b: u16,
+    pub c: u16,
+    pub d: [u8; 8],
+}
+
+impl BootUuid {
+    fn from_limine(value: crate::boot::LimineUuid) -> Self {
+        Self {
+            a: value.a,
+            b: value.b,
+            c: value.c,
+            d: value.d,
         }
     }
 }

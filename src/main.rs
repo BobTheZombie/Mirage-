@@ -13,6 +13,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
     let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
     kernel.bootstrap_with_framebuffer(boot_info.framebuffer);
+    let _ = kernel.mount_root_from_boot_sources(boot_info.modules);
 
     if cpu::MAX_CORES > 1 {
         kernel.bring_up_secondary_cores(cpu::MAX_CORES - 1);
@@ -21,6 +22,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
     // Start L2 first, then L1-supervised device-facing daemons.
     let supervisor = Supervisor::new();
     let _ = supervisor.bootstrap_services(&mut kernel);
+
+    let _ = kernel.bootstrap_userspace_init();
 
     loop {
         kernel.tick();
