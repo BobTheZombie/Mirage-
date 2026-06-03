@@ -11,6 +11,23 @@ name = "mirage-block"
 version = "0.1.0"
 
 [[package]]
+name = "mirage-cap"
+version = "0.1.0"
+
+[[package]]
+name = "mirage-ipc"
+version = "0.1.0"
+
+[[package]]
+name = "mirage-nvme"
+version = "0.1.0"
+dependencies = [
+ "mirage-block",
+ "mirage-cap",
+ "mirage-ipc",
+]
+
+[[package]]
 name = "mirage-storage"
 version = "0.1.0"
 dependencies = [
