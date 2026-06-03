@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/mirage-block"]
+members = [".", "crates/mirage-block", "crates/mirage-storage"]
 resolver = "2"
 
 [package]

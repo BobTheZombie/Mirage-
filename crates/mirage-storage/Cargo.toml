@@ -1,0 +1,10 @@
+[package]
+name = "mirage-storage"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Supervisor-mediated storage service primitives for Mirage"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+mirage-block = { path = "../mirage-block" }
