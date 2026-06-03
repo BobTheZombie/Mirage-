@@ -15,6 +15,7 @@ pub mod sync;
 pub mod syscall;
 pub mod thread;
 pub mod time;
+pub mod timer;
 
 use crate::arch::x86_64::{self, boot::FramebufferInfo, clock, ThreadRunOutcome};
 use crate::kernel::cpu::CpuCoreState;
@@ -52,6 +53,7 @@ use crate::kernel::syscall::{
 };
 use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS};
 use crate::kernel::time::KERNEL_TIME;
+use crate::kernel::timer::{TimerError, TimerManager, MAX_PROCESS_TIMERS, MAX_SLEEP_ENTRIES};
 use crate::subkernel::{
     Credentials, DeviceSecurity, IsolationError, SecurityClass, SecurityKernel,
 };
@@ -162,6 +164,13 @@ pub struct MirageTimespec {
     pub tv_nsec: i64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MirageItimerspec {
+    pub it_interval: MirageTimespec,
+    pub it_value: MirageTimespec,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum KernelError {
     ProcessTableFull,
@@ -203,6 +212,7 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     open_files: FileTable<MAX_OPEN_FILES>,
     core_states: [CpuCoreState; cpu::MAX_CORES],
     thread_table: [Option<ThreadControlBlock>; MAX_THREADS],
+    timers: TimerManager<MAX_SLEEP_ENTRIES, MAX_PROCESS_TIMERS>,
     next_pid: u64,
     next_thread: u64,
     message_sequence: u64,
@@ -226,6 +236,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             open_files: FileTable::new(),
             core_states: [CpuCoreState::new(); cpu::MAX_CORES],
             thread_table: [None; MAX_THREADS],
+            timers: TimerManager::new(),
             next_pid: 1,
             next_thread: 1,
             message_sequence: 0,
@@ -242,6 +253,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.devices.reset();
         self.service_registry.reset();
         self.open_files.clear();
+        self.timers.reset();
         self.next_pid = 1;
         self.next_thread = 1;
         self.message_sequence = 0;
@@ -452,6 +464,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             memory::release_process(pid);
             self.security.revoke_task(pid);
             self.service_registry.revoke_owner(pid);
+            self.timers.release_process(pid);
             let _ = self.queue_signal_to_parent(pid, SIGCHLD);
         }
     }
@@ -983,24 +996,103 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Ok(0)
     }
 
-    fn syscall_nanosleep(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_nanosleep(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let requested = read_user_value::<MirageTimespec>(context.arg(0))?;
+        if context.arg(1) != 0 {
+            let _ = user_out_ptr::<MirageTimespec>(context.arg(1))?;
+        }
+        let duration_ns = timespec_to_nanos(requested)?;
+        if duration_ns == 0 {
+            return Ok(0);
+        }
+
+        let wake_deadline = KERNEL_TIME.now().as_nanos().saturating_add(duration_ns);
+        self.timers
+            .add_sleep(context.caller, context.thread, wake_deadline)
+            .map_err(map_timer_error)?;
+        let process_index = self.locate_process(context.caller)?;
+        self.block_process_at_index(context.caller, process_index);
+
+        if context.arg(1) != 0 {
+            write_user_value(
+                context.arg(1),
+                MirageTimespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+            )?;
+        }
+
+        Ok(0)
     }
 
-    fn syscall_timer_create(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_timer_create(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.ensure_process_exists(context.caller)?;
+        let timer_id_out = context.arg(2);
+        let _ = user_out_ptr::<u64>(timer_id_out)?;
+        let id = self
+            .timers
+            .create_timer(context.caller)
+            .map_err(map_timer_error)?;
+        write_user_value(timer_id_out, id)?;
+        Ok(0)
     }
 
-    fn syscall_timer_settime(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_timer_settime(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        const TIMER_ABSTIME: u64 = 1;
+
+        let timer_id = context.arg(0);
+        let flags = context.arg(1);
+        if flags & !TIMER_ABSTIME != 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let requested = read_user_value::<MirageItimerspec>(context.arg(2))?;
+        let old_value_out = context.arg(3);
+        if old_value_out != 0 {
+            let _ = user_out_ptr::<MirageItimerspec>(old_value_out)?;
+        }
+        let value_ns = timespec_to_nanos(requested.it_value)?;
+        let interval_ns = timespec_to_nanos(requested.it_interval)?;
+        let now_ns = KERNEL_TIME.now().as_nanos();
+        let deadline = if value_ns == 0 {
+            None
+        } else if flags & TIMER_ABSTIME != 0 {
+            Some(value_ns)
+        } else {
+            Some(now_ns.saturating_add(value_ns))
+        };
+
+        let previous = self
+            .timers
+            .set_timer(context.caller, timer_id, deadline, interval_ns)
+            .map_err(map_timer_error)?;
+
+        if old_value_out != 0 {
+            write_user_value(old_value_out, timer_to_itimerspec(previous, now_ns))?;
+        }
+
+        Ok(0)
     }
 
-    fn syscall_timer_gettime(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_timer_gettime(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        let _ = user_out_ptr::<MirageItimerspec>(context.arg(1))?;
+        let timer = self
+            .timers
+            .timer(context.caller, context.arg(0))
+            .map_err(map_timer_error)?;
+        write_user_value(
+            context.arg(1),
+            timer_to_itimerspec(timer, KERNEL_TIME.now().as_nanos()),
+        )?;
+        Ok(0)
     }
 
-    fn syscall_timer_delete(&mut self, _context: SyscallContext) -> KernelResult<u64> {
-        Err(KernelError::InvalidSyscall)
+    fn syscall_timer_delete(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.timers
+            .delete_timer(context.caller, context.arg(0))
+            .map_err(map_timer_error)?;
+        Ok(0)
     }
 
     fn syscall_dup(&mut self, context: SyscallContext) -> KernelResult<u64> {
@@ -2047,6 +2139,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if let Some(pcb) = self.process_table[index] {
             self.security.revoke_task(pcb.pid);
             self.process_table[index] = None;
+            self.timers.release_process(pcb.pid);
         }
     }
 
@@ -2318,7 +2411,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
     pub fn tick(&mut self) {
         device::system_timer().tick();
-        let _timestamp = KERNEL_TIME.tick();
+        let timestamp = KERNEL_TIME.tick();
+        self.wake_expired_timeouts(timestamp.as_nanos());
         let mut core_index = 0usize;
         while core_index < cpu::MAX_CORES {
             if self.core_states[core_index].online {
@@ -2326,6 +2420,31 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             }
             core_index += 1;
         }
+    }
+
+    fn wake_expired_timeouts(&mut self, now_ns: u128) {
+        while let Some(expired) = self.timers.expire_sleep(now_ns) {
+            let _ = self.wake_process_for_timeout(expired.process);
+        }
+
+        while let Some(expired) = self.timers.expire_timer(now_ns) {
+            let _ = self.wake_process_for_timeout(expired.owner);
+        }
+    }
+
+    fn wake_process_for_timeout(&mut self, pid: ProcessId) -> KernelResult<()> {
+        let index = self.locate_process(pid)?;
+        let mut wake_threads = false;
+        if let Some(pcb) = self.process_table[index].as_mut() {
+            if pcb.state == ProcessState::Blocked {
+                pcb.state = ProcessState::Ready;
+                wake_threads = true;
+            }
+        }
+        if wake_threads {
+            self.make_threads_ready(pid)?;
+        }
+        Ok(())
     }
 
     fn run_core(&mut self, core_index: usize) {
@@ -2864,6 +2983,61 @@ fn user_out_ptr<T>(ptr: u64) -> KernelResult<*mut T> {
     Ok(ptr as *mut T)
 }
 
+fn read_user_value<T: Copy>(ptr: u64) -> KernelResult<T> {
+    validate_user_range(ptr, core::mem::size_of::<T>())?;
+    if !(ptr as *const T).is_aligned() {
+        return Err(KernelError::InvalidPointer);
+    }
+    Ok(unsafe { (ptr as *const T).read() })
+}
+
+fn write_user_value<T: Copy>(ptr: u64, value: T) -> KernelResult<()> {
+    let out = user_out_ptr::<T>(ptr)?;
+    unsafe { out.write(value) };
+    Ok(())
+}
+
+fn timespec_to_nanos(timespec: MirageTimespec) -> KernelResult<u128> {
+    if timespec.tv_sec < 0 || timespec.tv_nsec < 0 || timespec.tv_nsec >= 1_000_000_000 {
+        return Err(KernelError::InvalidArgument);
+    }
+    let seconds = timespec.tv_sec as u128;
+    let nanos = timespec.tv_nsec as u128;
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanos))
+        .ok_or(KernelError::InvalidArgument)
+}
+
+fn nanos_to_timespec(nanos: u128) -> MirageTimespec {
+    MirageTimespec {
+        tv_sec: (nanos / 1_000_000_000) as i64,
+        tv_nsec: (nanos % 1_000_000_000) as i64,
+    }
+}
+
+fn timer_to_itimerspec(
+    timer: crate::kernel::timer::ProcessTimer,
+    now_ns: u128,
+) -> MirageItimerspec {
+    let remaining = if timer.armed {
+        timer.wake_deadline_ns.saturating_sub(now_ns)
+    } else {
+        0
+    };
+    MirageItimerspec {
+        it_interval: nanos_to_timespec(timer.interval_ns),
+        it_value: nanos_to_timespec(remaining),
+    }
+}
+
+fn map_timer_error(error: TimerError) -> KernelError {
+    match error {
+        TimerError::Full => KernelError::AllocationFailed,
+        TimerError::InvalidTimer => KernelError::InvalidArgument,
+    }
+}
+
 fn user_cstr(ptr: u64) -> KernelResult<&'static [u8]> {
     validate_user_range(ptr, 1)?;
     let start = ptr as *const u8;
@@ -3211,6 +3385,201 @@ mod tests {
             encode_syscall_error(KernelError::MessageQueueFull),
             MIRAGE_SYSCALL_ERROR_BIT | SyscallErrorCode::QueueFull.raw()
         );
+    }
+
+    #[test]
+    fn nanosleep_blocks_until_kernel_time_deadline() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let thread = first_thread(&kernel, pid);
+        let req = MirageTimespec {
+            tv_sec: 0,
+            tv_nsec: 1,
+        };
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::Nanosleep.raw(),
+                SyscallContext::new(
+                    pid,
+                    Some(thread),
+                    [&req as *const MirageTimespec as u64, 0, 0, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(process_state(&kernel, pid), ProcessState::Blocked);
+        assert!(process_threads_blocked(&kernel, pid));
+
+        kernel.tick();
+
+        assert_eq!(process_state(&kernel, pid), ProcessState::Ready);
+        assert_eq!(
+            kernel.thread_table[kernel.locate_thread(thread).unwrap()]
+                .unwrap()
+                .state,
+            ThreadState::Ready
+        );
+    }
+
+    #[test]
+    fn nanosleep_rejects_malformed_timespec() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let req = MirageTimespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
+        };
+
+        assert!(matches!(
+            kernel.handle_syscall(
+                SyscallNumber::Nanosleep.raw(),
+                SyscallContext::new(
+                    pid,
+                    None,
+                    [&req as *const MirageTimespec as u64, 0, 0, 0, 0, 0,],
+                ),
+            ),
+            Err(KernelError::InvalidArgument)
+        ));
+        assert_eq!(process_state(&kernel, pid), ProcessState::Ready);
+    }
+
+    #[test]
+    fn process_timers_are_owned_and_reject_bad_ids() {
+        let mut kernel = boot_kernel();
+        let owner = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let other = kernel
+            .spawn_child_process(owner, 0, ProcessPriority::Normal, Credentials::user())
+            .unwrap();
+        let mut timer_id = 0u64;
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::TimerCreate.raw(),
+                SyscallContext::new(
+                    owner,
+                    None,
+                    [0, 0, &mut timer_id as *mut u64 as u64, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        assert_ne!(timer_id, 0);
+
+        assert!(matches!(
+            kernel.handle_syscall(
+                SyscallNumber::TimerGettime.raw(),
+                SyscallContext::new(
+                    other,
+                    None,
+                    [
+                        timer_id,
+                        &mut MirageItimerspec {
+                            it_interval: MirageTimespec {
+                                tv_sec: 0,
+                                tv_nsec: 0
+                            },
+                            it_value: MirageTimespec {
+                                tv_sec: 0,
+                                tv_nsec: 0
+                            },
+                        } as *mut MirageItimerspec as u64,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                ),
+            ),
+            Err(KernelError::InvalidArgument)
+        ));
+    }
+
+    #[test]
+    fn timer_settime_arms_gettime_and_delete() {
+        let mut kernel = boot_kernel();
+        let owner = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let mut timer_id = 0u64;
+        let new_value = MirageItimerspec {
+            it_interval: MirageTimespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: MirageTimespec {
+                tv_sec: 0,
+                tv_nsec: 1,
+            },
+        };
+        let mut current = MirageItimerspec {
+            it_interval: MirageTimespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: MirageTimespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+        };
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::TimerCreate.raw(),
+                SyscallContext::new(
+                    owner,
+                    None,
+                    [0, 0, &mut timer_id as *mut u64 as u64, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        kernel
+            .handle_syscall(
+                SyscallNumber::TimerSettime.raw(),
+                SyscallContext::new(
+                    owner,
+                    None,
+                    [
+                        timer_id,
+                        0,
+                        &new_value as *const MirageItimerspec as u64,
+                        0,
+                        0,
+                        0,
+                    ],
+                ),
+            )
+            .unwrap();
+        kernel
+            .handle_syscall(
+                SyscallNumber::TimerGettime.raw(),
+                SyscallContext::new(
+                    owner,
+                    None,
+                    [
+                        timer_id,
+                        &mut current as *mut MirageItimerspec as u64,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
+                ),
+            )
+            .unwrap();
+        assert!(current.it_value.tv_sec > 0 || current.it_value.tv_nsec > 0);
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::TimerDelete.raw(),
+                SyscallContext::new(owner, None, [timer_id, 0, 0, 0, 0, 0]),
+            )
+            .unwrap();
+        assert!(matches!(
+            kernel.handle_syscall(
+                SyscallNumber::TimerDelete.raw(),
+                SyscallContext::new(owner, None, [timer_id, 0, 0, 0, 0, 0]),
+            ),
+            Err(KernelError::InvalidArgument)
+        ));
     }
 
     #[test]
