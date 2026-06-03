@@ -1,0 +1,534 @@
+# AGENTS.md — Mirage Kernel Architecture
+
+## Project Identity
+
+Mirage is a Rust-based experimental operating system architecture designed as a modern GNU-compatible service kernel.
+
+Mirage is **not** Linux, Unix, or a Unix clone internally.
+
+Mirage provides a POSIX/Unix-compatible surface for existing GNU and C software, but its internal design is based on:
+
+* service supervision
+* capability-based authority
+* message-passing IPC
+* signed modules
+* restartable driver services
+* a privileged supervisor layer
+* QFS object-oriented filesystem indexing
+
+The target identity is:
+
+```text
+GNU/Mirage
+```
+
+Meaning:
+
+```text
+GNU/POSIX userspace
+running on top of
+the Mirage kernel and supervisor architecture
+```
+
+---
+
+## Core Rule
+
+Mirage separates **mechanism** from **policy**.
+
+```text
+Mirage Kernel      = mechanism
+Mirage Supervisor  = policy, authority, recovery
+Driver Services    = isolated execution units
+Applications       = POSIX/GNU-compatible programs
+```
+
+The kernel must stay small, strict, and low-level.
+
+The supervisor owns policy decisions.
+
+---
+
+## Layer Model
+
+```text
+Applications
+    │
+GNU / POSIX Compatibility Layer
+    │
+Mirage libc / Mirage Runtime
+    │
+IPC + Capability Layer
+    │
+Mirage Supervisor
+    │
+Mirage Kernel
+    │
+Hardware
+```
+
+---
+
+## Mirage Kernel Responsibilities
+
+The kernel is responsible only for core machine control.
+
+The kernel owns:
+
+* CPU scheduling
+* task/thread switching
+* interrupt handling
+* virtual memory
+* address spaces
+* page tables
+* syscall entry/exit
+* IPC transport
+* capability enforcement
+* low-level module loading
+* hardware privilege boundaries
+
+The kernel must not own high-level system policy.
+
+The kernel must not become a Linux-style monolith.
+
+The kernel should expose minimal, stable primitives that the supervisor and services build upon.
+
+---
+
+## Mirage Supervisor Responsibilities
+
+The Mirage Supervisor is a privileged system authority layer above the kernel.
+
+The supervisor owns:
+
+* service lifecycle
+* driver service management
+* crash detection
+* crash recovery
+* capability granting
+* capability revocation
+* service registration
+* signed module validation policy
+* boot service ordering
+* session management
+* process/service launch policy
+
+The supervisor is not a normal userspace init.
+
+It is closer to:
+
+```text
+PID 1 + service manager + driver manager + recovery manager + security broker
+```
+
+The supervisor is where Mirage becomes more than a kernel.
+
+---
+
+## Driver Model
+
+Mirage supports three driver execution models.
+
+### 1. Built-In Kernel Drivers
+
+Used only for unavoidable early boot or core machine support.
+
+Examples:
+
+* interrupt controller
+* boot console
+* minimal timer
+* early CPU/architecture support
+
+### 2. Loadable Kernel Modules
+
+Used for performance-critical or kernel-adjacent components.
+
+Examples:
+
+* low-level storage
+* filesystem module
+* GPU kernel interface
+* architecture-specific hardware module
+
+All kernel modules must be signed and verified before loading.
+
+### 3. Supervised Driver Services
+
+Preferred model for most drivers.
+
+Examples:
+
+* `netd`
+* `storaged`
+* `inputd`
+* `audiod`
+* `displayd`
+* `usbd`
+* `bluetoothd`
+
+Driver services run under supervisor control and communicate through IPC.
+
+If a driver service crashes, the supervisor must be able to:
+
+```text
+detect crash
+revoke capabilities
+reclaim resources
+restart service
+restore IPC endpoints
+continue system operation
+```
+
+A driver crash should not automatically become a kernel panic.
+
+---
+
+## Capability Model
+
+Mirage must not grant raw unrestricted hardware or kernel access to services.
+
+All authority is represented through capabilities.
+
+A capability may represent access to:
+
+* IPC endpoint
+* IRQ line
+* DMA region
+* PCI device
+* filesystem object
+* service control operation
+* module loading permission
+* process handle
+* memory object
+
+Services may only perform actions for which they hold valid capabilities.
+
+Capabilities must support:
+
+* grant
+* revoke
+* check
+* transfer
+* inheritance rules
+* crash cleanup
+
+The supervisor issues policy decisions.
+
+The kernel enforces capability validity.
+
+---
+
+## IPC Model
+
+IPC is the main system communication primitive.
+
+IPC must support:
+
+* message passing
+* request/reply calls
+* endpoint registration
+* capability passing
+* shared-memory transport for large data
+* service discovery through supervisor-controlled registries
+
+IPC is used for:
+
+* filesystem calls
+* networking
+* driver communication
+* service control
+* process management
+* POSIX compatibility translation
+
+Applications may appear to call POSIX APIs, but internally those calls may become IPC transactions.
+
+Example:
+
+```text
+write(fd, buf, len)
+    -> Mirage libc
+    -> Mirage runtime
+    -> IPC to console/filesystem service
+    -> kernel-enforced capability check
+```
+
+---
+
+## POSIX/GNU Compatibility
+
+Mirage is not Unix internally, but it must provide a Unix-like compatibility surface.
+
+C and GNU programs should see:
+
+* libc headers
+* POSIX-like ABI
+* ELF loading
+* files
+* pipes
+* sockets
+* signals
+* errno
+* pthreads
+* fork/exec or compatible spawn semantics
+
+Internally, Mirage may implement these through:
+
+* services
+* IPC
+* capabilities
+* supervisor mediation
+* QFS objects
+
+The rule is:
+
+```text
+Unix outside.
+Mirage inside.
+```
+
+C programs must not need to know that Mirage internals are not Unix.
+
+---
+
+## Mirage libc
+
+Mirage libc may be implemented in Rust while exporting a C ABI.
+
+Required pattern:
+
+```rust
+#[no_mangle]
+pub extern "C" fn write(fd: i32, buf: *const u8, len: usize) -> isize {
+    // translate POSIX write into Mirage runtime operation
+}
+```
+
+C programs link against normal libc-style symbols.
+
+The implementation language is irrelevant to C as long as the ABI, headers, and behavior are correct.
+
+Mirage libc should expose:
+
+* standard POSIX symbols
+* Mirage-native runtime hooks
+* errno handling
+* syscall/IPC wrappers
+* process startup support
+
+---
+
+## Header Strategy
+
+Mirage must provide a sysroot.
+
+Example:
+
+```text
+/sysroot
+├── usr/include
+│   ├── stdio.h
+│   ├── stdlib.h
+│   ├── unistd.h
+│   ├── fcntl.h
+│   ├── errno.h
+│   └── sys/
+├── usr/include/mirage
+│   ├── ipc.h
+│   ├── capability.h
+│   ├── service.h
+│   └── supervisor.h
+└── usr/lib
+    ├── crt0.o
+    ├── libc.a
+    ├── libmirage.a
+    └── ld-mirage.so
+```
+
+GNU/POSIX software should include normal headers.
+
+Mirage-native software may include Mirage-specific headers.
+
+---
+
+## QFS
+
+QFS is the native Mirage filesystem concept.
+
+QFS uses this conceptual hierarchy:
+
+```text
+Library / Book / Chapter / Page / Sector
+```
+
+Mapping:
+
+```text
+Library  = volume / namespace / collection
+Book     = package / service / domain
+Chapter  = directory / object group
+Page     = file / object
+Sector   = block / extent
+```
+
+QFS must be:
+
+* indexed
+* journaled
+* crash recoverable
+* object-aware
+* service-aware
+* capable of storing signatures and metadata
+* suitable for boot module discovery
+
+QFS is not merely a renamed Unix directory tree.
+
+The important part is the indexed object model.
+
+Each object should have:
+
+* object ID
+* path identity
+* metadata
+* extent map
+* permissions
+* optional signature
+* optional capability metadata
+* journal transaction state
+
+---
+
+## Boot Model
+
+Mirage should avoid a traditional Linux-style initrd.
+
+Instead, Mirage uses a signed boot module set.
+
+Boot flow:
+
+```text
+bootloader
+    -> Mirage kernel
+    -> Mirage supervisor
+    -> verify signed boot modules
+    -> load storage/filesystem services
+    -> mount QFS root
+    -> start core services
+    -> launch POSIX/GNU environment
+```
+
+The boot module set may contain:
+
+* kernel image
+* supervisor image
+* module verifier
+* storage service/module
+* QFS service/module
+* device manager
+* service manifest
+* signatures
+
+---
+
+## Graphics Policy
+
+Mirage is Wayland-only as a native graphics target.
+
+X11 must not be part of the base architecture.
+
+Future graphics stack:
+
+```text
+GPU module/service
+    -> displayd
+    -> Wayland compositor
+    -> Wayland clients
+```
+
+XWayland may exist later as an optional compatibility layer.
+
+---
+
+## Development Rule
+
+Do not fake completeness.
+
+Prefer:
+
+* clean traits
+* explicit boundaries
+* mock implementations
+* unit tests
+* clear TODOs
+
+over pretending hardware support exists.
+
+Initial goal:
+
+```text
+bootable architecture skeleton
+not production kernel
+```
+
+First proof target:
+
+```text
+kernel skeleton
+scheduler mock
+IPC mock
+capability table
+supervisor
+service crash/restart demo
+QFS object lookup
+Rust libc C ABI stubs
+hello.c compatibility demo
+```
+
+---
+
+## Non-Goals For Early Versions
+
+Do not implement these first:
+
+* full Linux compatibility
+* full glibc
+* full desktop stack
+* real GPU driver
+* full SMP scheduler
+* production filesystem
+* complete POSIX signal semantics
+* package manager integration
+* real cryptographic module verification
+
+These come after the architecture skeleton is proven.
+
+---
+
+## Design Standard
+
+Every contribution must preserve the Mirage architecture:
+
+```text
+small kernel
+privileged supervisor
+capability enforcement
+IPC-first services
+restartable drivers
+signed modules
+POSIX-compatible surface
+non-Unix internals
+```
+
+If a change makes Mirage more monolithic without a clear reason, reject it.
+
+If a change bypasses capability enforcement, reject it.
+
+If a change hardcodes Linux assumptions into the kernel, reject it.
+
+If a change improves POSIX compatibility without violating Mirage internals, prefer it.
+
+---
+
+## One-Sentence Definition
+
+Mirage is a Rust-based hybrid service kernel for GNU/POSIX software, using a small mechanism-focused kernel, a privileged supervisor, capability-secured IPC, restartable driver services, signed modules, and QFS as its native indexed journaling filesystem.
