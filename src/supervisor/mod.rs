@@ -1,15 +1,18 @@
-//! Fixed-capacity L1 startup service supervisor.
+//! L1 service supervisor policy.
 //!
-//! The supervisor deliberately avoids allocation: service descriptors live in a
+//! This module owns early-boot service policy outside the mechanism-only kernel
+//! path: boot ordering, lifecycle state, signed manifest validation, and daemon
+//! registration. It deliberately avoids allocation: service descriptors live in a
 //! fixed-size manifest and startup progress is captured in a same-capacity
-//! report. This mirrors the kernel process and IPC tables instead of relying on
-//! dynamic collections during early boot.
+//! report.
 
+use crate::kernel::exec::SpawnTaskRequest;
 use crate::kernel::process::{
     ExecServiceDaemon, ExecSignatureMetadata, ProcessId, ProcessPriority,
 };
-use crate::kernel::KernelError;
-use crate::subkernel::{CapabilitySet, Credentials, IsolationLevel, SecurityLabel};
+use crate::kernel::services::registry::ServiceId as RegistryServiceId;
+use crate::kernel::{Kernel, KernelError};
+use crate::subkernel::{CapabilitySet, Credentials, IsolationError, IsolationLevel, SecurityLabel};
 
 /// Number of services in the built-in L1 startup manifest.
 pub const MAX_STARTUP_SERVICES: usize = 4;
@@ -124,7 +127,7 @@ impl ServiceRuntime {
     }
 }
 
-/// Fixed-capacity startup report produced by `Kernel::spawn_services`.
+/// Fixed-capacity startup report produced by the L1 supervisor.
 #[derive(Clone, Copy, Debug)]
 pub struct ServiceStartupReport<const CAP: usize> {
     records: [Option<ServiceRuntime>; CAP],
@@ -185,7 +188,7 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
         true
     }
 
-    pub(crate) fn set_starting(&mut self, index: usize) {
+    fn set_starting(&mut self, index: usize) {
         if let Some(mut record) = self.records[index] {
             record.state = StartupState::Starting;
             record.failure = None;
@@ -193,7 +196,7 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
         }
     }
 
-    pub(crate) fn set_running(&mut self, index: usize, pid: ProcessId) {
+    fn set_running(&mut self, index: usize, pid: ProcessId) {
         if let Some(mut record) = self.records[index] {
             record.state = StartupState::Running;
             record.pid = Some(pid);
@@ -202,7 +205,7 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
         }
     }
 
-    pub(crate) fn set_failed(&mut self, index: usize, error: KernelError) {
+    fn set_failed(&mut self, index: usize, error: KernelError) {
         if let Some(mut record) = self.records[index] {
             record.state = StartupState::Failed;
             record.pid = None;
@@ -211,11 +214,11 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
         }
     }
 
-    pub(crate) fn dependency_state(&self, service: ServiceId) -> Option<StartupState> {
+    fn dependency_state(&self, service: ServiceId) -> Option<StartupState> {
         self.state(service)
     }
 
-    pub(crate) fn dependency_pid(&self, service: ServiceId) -> Option<ProcessId> {
+    fn dependency_pid(&self, service: ServiceId) -> Option<ProcessId> {
         self.pid(service)
     }
 
@@ -357,13 +360,13 @@ pub fn service_manifest_signature_valid(descriptor: ServiceDescriptor) -> bool {
 
 /// Dependency resolution result for one service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DependencyStatus {
+enum DependencyStatus {
     Ready(Option<ProcessId>),
     Waiting,
     Failed,
 }
 
-pub(crate) fn dependencies_ready<const CAP: usize>(
+fn dependencies_ready<const CAP: usize>(
     descriptor: ServiceDescriptor,
     report: &ServiceStartupReport<CAP>,
 ) -> DependencyStatus {
@@ -386,6 +389,124 @@ pub(crate) fn dependencies_ready<const CAP: usize>(
         dep_idx += 1;
     }
     DependencyStatus::Ready(parent)
+}
+
+/// Supervisor entry point for early service lifecycle management.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Supervisor;
+
+impl Supervisor {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Start the built-in services in dependency order.
+    pub fn bootstrap_services<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+    ) -> DefaultServiceStartupReport {
+        self.spawn_services(kernel, &DEFAULT_STARTUP_MANIFEST)
+    }
+
+    /// Start services from a signed manifest using only kernel mechanism primitives.
+    pub fn spawn_services<const CAP: usize, const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        manifest: &ServiceManifest<CAP>,
+    ) -> ServiceStartupReport<CAP> {
+        let mut report = ServiceStartupReport::from_manifest(manifest);
+
+        loop {
+            let mut made_progress = false;
+            let mut pending = 0usize;
+            let mut idx = 0usize;
+
+            while idx < report.len() {
+                if let Some(record) = report.record(idx) {
+                    if record.state == StartupState::Pending {
+                        match dependencies_ready(record.descriptor, &report) {
+                            DependencyStatus::Ready(parent) => {
+                                if !service_manifest_signature_valid(record.descriptor) {
+                                    report.set_failed(
+                                        idx,
+                                        KernelError::SecurityViolation(
+                                            IsolationError::PolicyViolation,
+                                        ),
+                                    );
+                                    made_progress = true;
+                                    idx += 1;
+                                    continue;
+                                }
+
+                                report.set_starting(idx);
+                                let request = SpawnTaskRequest {
+                                    parent,
+                                    entry_point: record.descriptor.entry_point,
+                                    priority: record.descriptor.priority,
+                                    credentials: record.descriptor.credentials,
+                                };
+
+                                match kernel.spawn_task(request) {
+                                    Ok(pid) => {
+                                        report.set_running(idx, pid);
+                                        if let Some(registry_service) =
+                                            startup_service_to_registry(record.descriptor.id)
+                                        {
+                                            if let Some(authorizer) = parent {
+                                                let _ = kernel.register_endpoint(
+                                                    authorizer,
+                                                    registry_service,
+                                                    pid,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(error) => report.set_failed(idx, error),
+                                }
+                                made_progress = true;
+                            }
+                            DependencyStatus::Waiting => {
+                                pending += 1;
+                            }
+                            DependencyStatus::Failed => {
+                                report.set_failed(idx, KernelError::InvalidArgument);
+                                made_progress = true;
+                            }
+                        }
+                    }
+                }
+                idx += 1;
+            }
+
+            if pending == 0 {
+                break;
+            }
+
+            if !made_progress {
+                let mut fail_idx = 0usize;
+                while fail_idx < report.len() {
+                    if let Some(record) = report.record(fail_idx) {
+                        if record.state == StartupState::Pending {
+                            report.set_failed(fail_idx, KernelError::InvalidArgument);
+                        }
+                    }
+                    fail_idx += 1;
+                }
+                break;
+            }
+        }
+
+        report
+    }
+}
+
+fn startup_service_to_registry(service: ServiceId) -> Option<RegistryServiceId> {
+    match service {
+        ServiceId::Displayd => Some(RegistryServiceId::Displayd),
+        ServiceId::Networkd => Some(RegistryServiceId::Networkd),
+        ServiceId::Inputd => Some(RegistryServiceId::Inputd),
+        ServiceId::L2Subkernel => None,
+    }
 }
 
 pub type DefaultServiceStartupReport = ServiceStartupReport<MAX_STARTUP_SERVICES>;
