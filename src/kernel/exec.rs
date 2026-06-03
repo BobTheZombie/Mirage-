@@ -397,6 +397,9 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
         }
         let mut tcb = ThreadControlBlock::new(id, pid, context.rip, priority, context.rsp);
         tcb.context = context;
+        tcb.fs_base = tcb.context.fs_base;
+        tcb.gs_base = tcb.context.gs_base;
+        tcb.tls_base = tcb.context.fs_base;
         tcb.thread_group = pid;
         self.thread_table[slot] = Some(tcb);
         self.update_process_thread_count(pid, true);
@@ -421,6 +424,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             .unwrap_or_else(|| self.allocate_stack_pointer(slot, id));
         if let Some(tls_base) = request.tls_base {
             context.fs = tls_base;
+            context.fs_base = tls_base;
         }
 
         let mut tcb = ThreadControlBlock::new(id, pid, context.rip, priority, context.rsp);
@@ -433,7 +437,8 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
         } else {
             pid
         };
-        tcb.tls_base = request.tls_base.unwrap_or(context.fs);
+        tcb.set_fs_base(request.tls_base.unwrap_or(context.fs_base));
+        tcb.set_gs_base(context.gs_base);
         tcb.shares_address_space = request.shares_address_space();
         tcb.shares_descriptor_table = request.shares_descriptors();
         self.thread_table[slot] = Some(tcb);

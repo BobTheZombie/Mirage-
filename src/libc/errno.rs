@@ -3,7 +3,7 @@
 use crate::kernel::fs::errno_from_vfs;
 use crate::kernel::syscall::{
     MIRAGE_EACCES, MIRAGE_EAGAIN, MIRAGE_EFAULT, MIRAGE_EINVAL, MIRAGE_EIO, MIRAGE_ENOBUFS,
-    MIRAGE_ENOMEM, MIRAGE_ENOSYS, MIRAGE_ESRCH,
+    MIRAGE_ENOMEM, MIRAGE_ENOSYS, MIRAGE_ESRCH, MIRAGE_ETIMEDOUT,
 };
 use crate::kernel::KernelError;
 use crate::subkernel::IsolationError;
@@ -31,6 +31,7 @@ pub(super) fn libc_errno(error: KernelError) -> i32 {
         KernelError::InvalidSyscall => MIRAGE_ENOSYS,
         KernelError::InvalidArgument => MIRAGE_EINVAL,
         KernelError::InvalidPointer => MIRAGE_EFAULT,
+        KernelError::TimedOut => MIRAGE_ETIMEDOUT,
         KernelError::Filesystem(error) => libc_vfs_errno(error),
     }
 }
