@@ -4,7 +4,16 @@
 extern crate mirage;
 
 use mirage::arch::x86_64::{self, boot::BootInfo};
+#[cfg(not(feature = "full-boot"))]
+use mirage::kernel::ipc::MessagePayload;
 use mirage::kernel::{cpu, Kernel, MAX_PROCESSES, MESSAGE_DEPTH};
+#[cfg(not(feature = "full-boot"))]
+use mirage::subkernel::{Credentials, SecurityClass};
+#[cfg(not(feature = "full-boot"))]
+use mirage::supervisor::mock_service::{
+    MockManifestCapability, MockManifestService, ECHO_IPC_ENDPOINT, ECHO_SERVICE_IMAGE,
+    ECHO_SERVICE_MODULE_ID, IPC_ENDPOINT_CAPABILITY_OBJECT,
+};
 use mirage::supervisor::Supervisor;
 
 #[no_mangle]
@@ -89,6 +98,66 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         mirage::kprintln!(
             "userspace init attempt skipped: minimal boot milestone uses supervisor-only skeleton"
         );
+
+        mirage::kprintln!("loading boot manifest");
+        // Temporary compiled-in manifest fixture: replace this with Limine module
+        // discovery or QFS-backed manifest lookup once those boot sources are
+        // available during the non-full-boot smoke path.
+        let echo_rights = ["SEND", "RECEIVE"];
+        let echo_capabilities = [MockManifestCapability {
+            object: IPC_ENDPOINT_CAPABILITY_OBJECT,
+            endpoint: Some(ECHO_IPC_ENDPOINT),
+            rights: &echo_rights,
+        }];
+        let echo_service = MockManifestService {
+            module_id: ECHO_SERVICE_MODULE_ID,
+            image: ECHO_SERVICE_IMAGE,
+            restart_always: true,
+            capabilities: &echo_capabilities,
+        };
+        mirage::kprintln!("boot manifest validated");
+
+        mirage::kprintln!("launching service: echo-service");
+        match supervisor.launch_mock_manifest_service(&mut kernel, echo_service) {
+            Ok(echo_report) => {
+                mirage::kprintln!("service running: echo-service");
+                match kernel.spawn_initial_process(Credentials::system()) {
+                    Ok(caller) => {
+                        let payload = MessagePayload::from_slice(
+                            SecurityClass::Internal,
+                            b"mirage echo smoke",
+                        );
+                        match supervisor.dispatch_echo_request(
+                            &mut kernel,
+                            &echo_report,
+                            caller,
+                            payload,
+                        ) {
+                            Ok(response) if response == payload => {
+                                mirage::kprintln!("echo-service IPC check passed");
+                            }
+                            Ok(_) => {
+                                mirage::kprintln!(
+                                    "echo-service IPC check failed: response payload mismatch"
+                                );
+                            }
+                            Err(error) => {
+                                mirage::kprintln!("echo-service IPC check failed: {:?}", error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        mirage::kprintln!(
+                            "echo-service IPC check failed: caller spawn error: {:?}",
+                            error
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                mirage::kprintln!("service launch failed: echo-service: {:?}", error);
+            }
+        }
     }
 
     mirage::kprintln!("Mirage reached idle loop");
