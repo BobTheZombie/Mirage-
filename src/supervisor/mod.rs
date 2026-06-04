@@ -117,7 +117,7 @@ impl<const CAP: usize> ServiceManifest<CAP> {
 }
 
 /// Maximum number of supervisor-managed capabilities recorded per service.
-pub const MAX_SERVICE_CAPABILITIES: usize = 8;
+pub const MAX_SERVICE_CAPABILITIES: usize = 9;
 
 /// Maximum number of supervisor-managed device claims recorded per service.
 pub const MAX_SERVICE_DEVICE_CLAIMS: usize = 4;
@@ -130,6 +130,61 @@ pub const MAX_SERVICE_ENDPOINTS: usize = 2;
 pub enum RestartPolicy {
     Never,
     Always,
+}
+
+/// Static policy inputs used to mint a hardware capability bundle for a driver service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HardwareCapabilityPolicy {
+    pub pci_device: u64,
+    pub mmio_base: u64,
+    pub mmio_length: u64,
+    pub dma_base: Option<u64>,
+    pub dma_length: Option<u64>,
+    pub irq_line: Option<u16>,
+    pub vram_base: Option<u64>,
+    pub vram_length: Option<u64>,
+    pub framebuffer_base: Option<u64>,
+    pub framebuffer_length: Option<u64>,
+}
+
+impl HardwareCapabilityPolicy {
+    pub const fn new(pci_device: u64, mmio_base: u64, mmio_length: u64) -> Self {
+        Self {
+            pci_device,
+            mmio_base,
+            mmio_length,
+            dma_base: None,
+            dma_length: None,
+            irq_line: None,
+            vram_base: None,
+            vram_length: None,
+            framebuffer_base: None,
+            framebuffer_length: None,
+        }
+    }
+
+    pub const fn with_dma(mut self, base: u64, length: u64) -> Self {
+        self.dma_base = Some(base);
+        self.dma_length = Some(length);
+        self
+    }
+
+    pub const fn with_irq(mut self, line: u16) -> Self {
+        self.irq_line = Some(line);
+        self
+    }
+
+    pub const fn with_vram(mut self, base: u64, length: u64) -> Self {
+        self.vram_base = Some(base);
+        self.vram_length = Some(length);
+        self
+    }
+
+    pub const fn with_framebuffer(mut self, base: u64, length: u64) -> Self {
+        self.framebuffer_base = Some(base);
+        self.framebuffer_length = Some(length);
+        self
+    }
 }
 
 /// Capability assignment owned by a supervisor runtime record.
@@ -356,7 +411,8 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
             return ServiceRecoveryState::NotSupervised;
         };
 
-        self.revoke_record_capabilities(kernel, index);
+        self.release_record_claims(kernel, index, report.pid);
+        self.revoke_record_hardware_resources(kernel, index);
         kernel.revoke_task(report.pid);
         kernel.revoke_service_owner(report.pid);
 
@@ -470,7 +526,7 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
         None
     }
 
-    fn revoke_record_capabilities<const NPROC: usize, const MSG_DEPTH: usize>(
+    fn revoke_record_hardware_resources<const NPROC: usize, const MSG_DEPTH: usize>(
         &mut self,
         kernel: &mut Kernel<NPROC, MSG_DEPTH>,
         index: usize,
@@ -479,14 +535,44 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
             let mut cap_idx = 0usize;
             while cap_idx < MAX_SERVICE_CAPABILITIES {
                 if let Some(capability) = record.assigned_capabilities[cap_idx] {
-                    if let Some(id) = capability.id {
-                        let _ = kernel.revoke_task_capability(id);
+                    if Self::is_crash_reclaimed_capability(capability.object) {
+                        if let Some(id) = capability.id {
+                            let _ = kernel.revoke_task_capability(id);
+                        }
+                        record.assigned_capabilities[cap_idx] = Some(capability.unassigned());
                     }
-                    record.assigned_capabilities[cap_idx] = Some(capability.unassigned());
                 }
                 cap_idx += 1;
             }
             self.records[index] = Some(record);
+        }
+    }
+
+    fn is_crash_reclaimed_capability(object: CapabilityObject) -> bool {
+        matches!(
+            object,
+            CapabilityObject::MmioRegion { .. }
+                | CapabilityObject::DmaRegion { .. }
+                | CapabilityObject::IrqLine(_)
+                | CapabilityObject::VramRegion { .. }
+                | CapabilityObject::Framebuffer { .. }
+        )
+    }
+
+    fn release_record_claims<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        index: usize,
+        owner: ProcessId,
+    ) {
+        if let Some(record) = self.records[index] {
+            let mut device_idx = 0usize;
+            while device_idx < MAX_SERVICE_DEVICE_CLAIMS {
+                if let Some(claim) = record.claimed_devices[device_idx] {
+                    let _ = kernel.release_service_device(owner, claim.service, claim.device);
+                }
+                device_idx += 1;
+            }
         }
     }
 
@@ -832,13 +918,12 @@ fn default_capability_specs(
                 &mut idx,
                 RegistryServiceId::Nvmed,
             );
-            assign_pci_mmio_dma_irq_capabilities(
+            assign_nvme_capability_bundle(
                 &mut capabilities,
                 &mut idx,
-                7,
-                0xfed0_0000,
-                0x20_000,
-                46,
+                HardwareCapabilityPolicy::new(7, 0xfed0_0000, 0x20_000)
+                    .with_dma(0x8000_0000, 0x20_000)
+                    .with_irq(46),
             );
         }
         ServiceId::Ahcid => {
@@ -847,13 +932,12 @@ fn default_capability_specs(
                 &mut idx,
                 RegistryServiceId::Ahcid,
             );
-            assign_pci_mmio_dma_irq_capabilities(
+            assign_ahci_capability_bundle(
                 &mut capabilities,
                 &mut idx,
-                7,
-                0xfed2_0000,
-                0x20_000,
-                47,
+                HardwareCapabilityPolicy::new(7, 0xfed2_0000, 0x20_000)
+                    .with_dma(0x8002_0000, 0x20_000)
+                    .with_irq(47),
             );
         }
         ServiceId::Displayd => {
@@ -875,13 +959,14 @@ fn default_capability_specs(
                 &mut idx,
                 RegistryServiceId::AmdgpuDisplayd,
             );
-            assign_pci_mmio_dma_irq_capabilities(
+            assign_amdgpu_capability_bundle(
                 &mut capabilities,
                 &mut idx,
-                3,
-                0xe000_0000,
-                0x100_0000,
-                48,
+                HardwareCapabilityPolicy::new(3, 0xe000_0000, 0x100_0000)
+                    .with_dma(0x9000_0000, 0x100_000)
+                    .with_irq(48)
+                    .with_vram(0xc000_0000, 0x1000_0000)
+                    .with_framebuffer(0xd000_0000, 0x0100_0000),
             );
         }
         ServiceId::Networkd => {
@@ -944,6 +1029,125 @@ fn assign_service_endpoint_capability(
     );
 }
 
+pub fn assign_nvme_capability_bundle(
+    capabilities: &mut [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES],
+    idx: &mut usize,
+    policy: HardwareCapabilityPolicy,
+) {
+    assign_pci_mmio_dma_irq_register_bundle(capabilities, idx, policy, true);
+    assign_capability(
+        capabilities,
+        idx,
+        CapabilityObject::BlockDeviceRegistry,
+        CapabilityRights::service_control(),
+    );
+}
+
+pub fn assign_ahci_capability_bundle(
+    capabilities: &mut [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES],
+    idx: &mut usize,
+    policy: HardwareCapabilityPolicy,
+) {
+    assign_pci_mmio_dma_irq_register_bundle(capabilities, idx, policy, true);
+    assign_capability(
+        capabilities,
+        idx,
+        CapabilityObject::BlockDeviceRegistry,
+        CapabilityRights::service_control(),
+    );
+}
+
+pub fn assign_xhci_usb_capability_bundle(
+    capabilities: &mut [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES],
+    idx: &mut usize,
+    policy: HardwareCapabilityPolicy,
+) {
+    assign_pci_mmio_dma_irq_register_bundle(capabilities, idx, policy, true);
+    assign_capability(
+        capabilities,
+        idx,
+        CapabilityObject::HotplugController(policy.pci_device),
+        CapabilityRights::service_control(),
+    );
+    assign_capability(
+        capabilities,
+        idx,
+        CapabilityObject::BlockDeviceRegistry,
+        CapabilityRights::service_control(),
+    );
+}
+
+pub fn assign_amdgpu_capability_bundle(
+    capabilities: &mut [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES],
+    idx: &mut usize,
+    policy: HardwareCapabilityPolicy,
+) {
+    assign_pci_mmio_dma_irq_register_bundle(capabilities, idx, policy, false);
+    if let (Some(base), Some(length)) = (policy.vram_base, policy.vram_length) {
+        assign_capability(
+            capabilities,
+            idx,
+            CapabilityObject::VramRegion { base, length },
+            CapabilityRights::memory(),
+        );
+    }
+    if let (Some(base), Some(length)) = (policy.framebuffer_base, policy.framebuffer_length) {
+        assign_capability(
+            capabilities,
+            idx,
+            CapabilityObject::Framebuffer { base, length },
+            CapabilityRights::memory(),
+        );
+    }
+    assign_capability(
+        capabilities,
+        idx,
+        CapabilityObject::DisplayRegistry,
+        CapabilityRights::service_control(),
+    );
+}
+
+fn assign_pci_mmio_dma_irq_register_bundle(
+    capabilities: &mut [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES],
+    idx: &mut usize,
+    policy: HardwareCapabilityPolicy,
+    require_dma: bool,
+) {
+    assign_capability(
+        capabilities,
+        idx,
+        CapabilityObject::PciDevice(policy.pci_device),
+        CapabilityRights::io(),
+    );
+    assign_capability(
+        capabilities,
+        idx,
+        CapabilityObject::MmioRegion {
+            base: policy.mmio_base,
+            length: policy.mmio_length,
+        },
+        CapabilityRights::io(),
+    );
+    if require_dma || policy.dma_base.is_some() {
+        if let (Some(base), Some(length)) = (policy.dma_base, policy.dma_length) {
+            assign_capability(
+                capabilities,
+                idx,
+                CapabilityObject::DmaRegion { base, length },
+                CapabilityRights::io(),
+            );
+        }
+    }
+    if let Some(line) = policy.irq_line {
+        assign_capability(
+            capabilities,
+            idx,
+            CapabilityObject::IrqLine(line),
+            CapabilityRights::io(),
+        );
+    }
+}
+
 fn assign_pci_mmio_dma_irq_capabilities(
     capabilities: &mut [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES],
     idx: &mut usize,
@@ -952,34 +1156,13 @@ fn assign_pci_mmio_dma_irq_capabilities(
     mmio_length: u64,
     irq_line: u16,
 ) {
-    assign_capability(
+    assign_pci_mmio_dma_irq_register_bundle(
         capabilities,
         idx,
-        CapabilityObject::PciDevice(pci_device),
-        CapabilityRights::io(),
-    );
-    // Mirage models scoped MMIO windows with memory-object capabilities until
-    // the lower-level capability object space grows a dedicated MMIO variant.
-    assign_capability(
-        capabilities,
-        idx,
-        CapabilityObject::MemoryObject(mmio_base),
-        CapabilityRights::memory(),
-    );
-    assign_capability(
-        capabilities,
-        idx,
-        CapabilityObject::DmaRegion {
-            base: mmio_base,
-            length: mmio_length,
-        },
-        CapabilityRights::io(),
-    );
-    assign_capability(
-        capabilities,
-        idx,
-        CapabilityObject::IrqLine(irq_line),
-        CapabilityRights::io(),
+        HardwareCapabilityPolicy::new(pci_device, mmio_base, mmio_length)
+            .with_dma(mmio_base, mmio_length)
+            .with_irq(irq_line),
+        true,
     );
 }
 
@@ -987,7 +1170,13 @@ fn assign_usb_controller_capabilities(
     capabilities: &mut [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES],
     idx: &mut usize,
 ) {
-    assign_pci_mmio_dma_irq_capabilities(capabilities, idx, 2, 0xfed6_0000, 0x20_000, 51);
+    assign_xhci_usb_capability_bundle(
+        capabilities,
+        idx,
+        HardwareCapabilityPolicy::new(2, 0xfed6_0000, 0x20_000)
+            .with_dma(0x8006_0000, 0x20_000)
+            .with_irq(51),
+    );
 }
 
 fn reset_spawned_service_capabilities<const NPROC: usize, const MSG_DEPTH: usize>(
@@ -1241,6 +1430,91 @@ mod tests {
     }
 
     #[test]
+    fn static_driver_bundles_include_service_specific_authority() {
+        let report = ServiceStartupReport::from_manifest(&DEFAULT_STARTUP_MANIFEST);
+
+        assert!(assigned_capability(
+            &report,
+            ServiceId::Nvmed,
+            CapabilityObject::BlockDeviceRegistry,
+        )
+        .is_some());
+        assert!(assigned_capability(
+            &report,
+            ServiceId::Usbd,
+            CapabilityObject::HotplugController(2),
+        )
+        .is_some());
+        assert!(assigned_capability(
+            &report,
+            ServiceId::Usbd,
+            CapabilityObject::BlockDeviceRegistry,
+        )
+        .is_some());
+        assert!(assigned_capability(
+            &report,
+            ServiceId::AmdgpuDisplayd,
+            CapabilityObject::VramRegion {
+                base: 0xc000_0000,
+                length: 0x1000_0000,
+            },
+        )
+        .is_some());
+        assert!(assigned_capability(
+            &report,
+            ServiceId::AmdgpuDisplayd,
+            CapabilityObject::Framebuffer {
+                base: 0xd000_0000,
+                length: 0x0100_0000,
+            },
+        )
+        .is_some());
+        assert!(assigned_capability(
+            &report,
+            ServiceId::AmdgpuDisplayd,
+            CapabilityObject::DisplayRegistry,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn restart_policy_never_stops_after_revoke_without_regranting_hardware() {
+        let mut kernel = Kernel::<16, 4>::new();
+        kernel.bootstrap();
+        let supervisor = Supervisor::new();
+        let mut report = supervisor.bootstrap_services(&mut kernel);
+        let nvmed = report.pid(ServiceId::Nvmed).unwrap();
+        let index = report.find_index(ServiceId::Nvmed).unwrap();
+        let old_irq = assigned_capability(&report, ServiceId::Nvmed, CapabilityObject::IrqLine(46))
+            .and_then(|capability| capability.id)
+            .unwrap();
+
+        let mut record = report.records[index].unwrap();
+        record.restart_policy = RestartPolicy::Never;
+        report.records[index] = Some(record);
+
+        let exit = kernel
+            .exit_process(nvmed, crate::kernel::process::ExitStatus::signaled(9))
+            .unwrap();
+        let recovery = report.handle_process_exit(&mut kernel, exit);
+
+        assert!(matches!(recovery, ServiceRecoveryState::Stopped));
+        assert_eq!(report.pid(ServiceId::Nvmed), None);
+        assert_eq!(report.state(ServiceId::Nvmed), Some(StartupState::Failed));
+        assert!(matches!(
+            kernel.revoke_task_capability(old_irq),
+            Err(KernelError::SecurityViolation(
+                IsolationError::CapabilityMissing
+            ))
+        ));
+        assert_eq!(
+            assigned_capability(&report, ServiceId::Nvmed, CapabilityObject::IrqLine(46))
+                .and_then(|capability| capability.id),
+            None
+        );
+    }
+
+    #[test]
     fn recovers_nvmed_and_reissues_scoped_hardware_capabilities() {
         let mut kernel = Kernel::<16, 4>::new();
         kernel.bootstrap();
@@ -1257,7 +1531,7 @@ mod tests {
             &report,
             ServiceId::Nvmed,
             CapabilityObject::DmaRegion {
-                base: 0xfed0_0000,
+                base: 0x8000_0000,
                 length: 0x20_000,
             },
         )
@@ -1266,7 +1540,10 @@ mod tests {
         let old_mmio = assigned_capability(
             &report,
             ServiceId::Nvmed,
-            CapabilityObject::MemoryObject(0xfed0_0000),
+            CapabilityObject::MmioRegion {
+                base: 0xfed0_0000,
+                length: 0x20_000,
+            },
         )
         .and_then(|capability| capability.id)
         .unwrap();
@@ -1304,7 +1581,7 @@ mod tests {
             &report,
             ServiceId::Nvmed,
             CapabilityObject::DmaRegion {
-                base: 0xfed0_0000,
+                base: 0x8000_0000,
                 length: 0x20_000,
             },
         )
@@ -1313,7 +1590,10 @@ mod tests {
         let new_mmio = assigned_capability(
             &report,
             ServiceId::Nvmed,
-            CapabilityObject::MemoryObject(0xfed0_0000),
+            CapabilityObject::MmioRegion {
+                base: 0xfed0_0000,
+                length: 0x20_000,
+            },
         )
         .and_then(|capability| capability.id)
         .unwrap();
