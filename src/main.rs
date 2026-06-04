@@ -23,17 +23,72 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
     #[cfg(feature = "full-boot")]
     {
-        let _ = kernel.mount_root_from_boot_sources(boot_info.modules);
+        match kernel.mount_root_from_boot_sources(boot_info.modules) {
+            Ok(source) => {
+                mirage::kprintln!("root mount attempt succeeded: {:?}", source);
+            }
+            Err(error) => {
+                mirage::kprintln!("root mount attempt failed: {:?}", error);
+            }
+        }
+
         // Start L2 first, then L1-supervised device-facing daemons.
-        let _ = supervisor.bootstrap_services(&mut kernel);
-        mirage::kprintln!("supervisor initialized with full service manifest");
-        let _ = kernel.bootstrap_userspace_init();
+        let service_report = supervisor.bootstrap_services(&mut kernel);
+        if service_report.all_running() {
+            mirage::kprintln!("supervisor initialization succeeded: full service manifest running");
+        } else {
+            mirage::kprintln!("supervisor initialization failed: full service manifest incomplete");
+            let mut index = 0usize;
+            while index < service_report.len() {
+                if let Some(record) = service_report.record(index) {
+                    if record.state != mirage::supervisor::StartupState::Running {
+                        mirage::kprintln!(
+                            "supervisor service '{}' did not reach Running: state={:?} failure={:?}",
+                            record.descriptor.name,
+                            record.state,
+                            record.failure
+                        );
+                    }
+                }
+                index += 1;
+            }
+        }
+
+        match kernel.bootstrap_userspace_init() {
+            Ok(pid) => {
+                mirage::kprintln!("userspace init attempt succeeded: pid={:?}", pid);
+            }
+            Err(error) => {
+                mirage::kprintln!(
+                    "userspace init attempt skipped/stubbed for minimal boot milestone: {:?}",
+                    error
+                );
+            }
+        }
     }
 
     #[cfg(not(feature = "full-boot"))]
     {
-        let _ = supervisor.bootstrap_minimal(&mut kernel);
-        mirage::kprintln!("minimal supervisor initialized");
+        mirage::kprintln!(
+            "root mount attempt skipped: minimal boot milestone does not require QFS root yet"
+        );
+
+        let minimal_report = supervisor.bootstrap_minimal(&mut kernel);
+        match minimal_report.failure {
+            Some(error) => {
+                mirage::kprintln!("supervisor initialization failed: {:?}", error);
+            }
+            None => {
+                mirage::kprintln!(
+                    "supervisor initialization succeeded: minimal registry entries={}",
+                    minimal_report.len()
+                );
+            }
+        }
+
+        mirage::kprintln!(
+            "userspace init attempt skipped: minimal boot milestone uses supervisor-only skeleton"
+        );
     }
 
     mirage::kprintln!("Mirage reached idle loop");
