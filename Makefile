@@ -5,6 +5,7 @@ LIMINE_VERSION ?= v12.3.2
 LIMINE_VERSION_NUMBER := $(patsubst v%,%,$(LIMINE_VERSION))
 LIMINE_URL := https://github.com/limine-bootloader/limine/releases/download/$(LIMINE_VERSION)/limine-binary.tar.xz
 TARGET_JSON := targets/x86_64-mirage.json
+CARGO_JSON_TARGET_SPEC_FLAG := $(shell RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) -Z help 2>/dev/null | sed -n "s/.*-Z json-target-spec.*/-Z json-target-spec/p")
 KERNEL_ELF := target/x86_64-mirage/release/mirage-kernel
 BUILD_DIR := build
 ISO_ROOT := $(BUILD_DIR)/iso_root
@@ -22,6 +23,7 @@ rust-src:
 kernel: rust-src
 	RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --bin mirage-kernel \
 		--target $(TARGET_JSON) \
+		$(CARGO_JSON_TARGET_SPEC_FLAG) \
 		-Z build-std=core,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
 
