@@ -9,6 +9,7 @@ use mirage::supervisor::Supervisor;
 
 #[no_mangle]
 pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
+    mirage::kprintln!("Mirage kernel booting...");
     x86_64::init_architecture(&boot_info);
 
     let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
@@ -22,9 +23,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
     // Start L2 first, then L1-supervised device-facing daemons.
     let supervisor = Supervisor::new();
     let _ = supervisor.bootstrap_services(&mut kernel);
+    mirage::kprintln!("supervisor initialized");
 
     let _ = kernel.bootstrap_userspace_init();
 
+    mirage::kprintln!("Mirage reached idle loop");
     loop {
         kernel.tick();
         x86_64::cpu_relax();

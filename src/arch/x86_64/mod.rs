@@ -84,6 +84,9 @@ pub fn init_architecture(boot_info: &BootInfo) {
         return;
     }
 
+    uart16550::init_early_serial();
+    crate::kprintln!("serial initialized");
+
     configure_cpu_modes();
     initialize_per_cpu_state();
     setup_memory_layout(boot_info);
@@ -238,15 +241,19 @@ pub fn panic_halt() -> ! {
 fn configure_cpu_modes() {
     interrupts::disable();
     gdt::initialize();
+    crate::kprintln!("GDT initialized");
 }
 
 fn setup_memory_layout(boot_info: &BootInfo) {
     paging::initialize(boot_info);
     memory::initialize_from_boot_info(boot_info);
+    crate::kprintln!("memory map parsed");
+    crate::kprintln!("heap initialized");
 }
 
 fn configure_interrupts() {
     idt::initialize();
+    crate::kprintln!("IDT initialized");
     pic::initialize();
     interrupts::enable();
 }
