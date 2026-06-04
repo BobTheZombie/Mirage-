@@ -122,8 +122,13 @@ The Makefile exposes a few variables for local environments and reproducible bui
 * `RUSTC_BOOTSTRAP=1` enables the nightly-only Cargo `-Z build-std` flags used for the custom
   freestanding target; override it only if your toolchain setup provides another path for those
   flags.
-* `CARGO` and `RUSTUP` select the Cargo and Rustup executables used by `make kernel` and
-  `make rust-src`, which is useful for wrappers or non-default toolchain locations.
+* `CARGO`, `RUSTC`, and `RUSTUP` select the Cargo, Rust compiler, and Rustup executables
+  used by `make kernel` and `make rust-src`, which is useful for wrappers or non-default
+  toolchain locations. For example:
+
+  ```sh
+  make kernel CARGO="$(rustup which cargo)" RUSTC="$(rustup which rustc)"
+  ```
 
 ## Build the kernel ELF
 

@@ -1,4 +1,5 @@
 CARGO ?= cargo
+RUSTC ?= rustc
 RUSTUP ?= rustup
 RUSTC_BOOTSTRAP ?= 1
 LIMINE_VERSION ?= v12.3.2
@@ -21,7 +22,7 @@ rust-src:
 	$(RUSTUP) component add rust-src
 
 kernel: rust-src
-	RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --bin mirage-kernel \
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --bin mirage-kernel \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
 		-Z build-std=core,compiler_builtins \
