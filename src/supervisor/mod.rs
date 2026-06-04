@@ -1638,6 +1638,7 @@ pub type DefaultServiceStartupReport = ServiceStartupReport<MAX_STARTUP_SERVICES
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subkernel::SecurityClass;
 
     fn assigned_capability(
         report: &DefaultServiceStartupReport,
@@ -1910,6 +1911,225 @@ mod tests {
         assert_eq!(
             kernel.service_owner(RegistryServiceId::Displayd),
             Some(new_displayd)
+        );
+    }
+
+    const ECHO_RIGHTS: [&str; 2] = ["SEND", "RECEIVE"];
+    const ECHO_CAPABILITIES: [mock_service::MockManifestCapability<'static>; 1] =
+        [mock_service::MockManifestCapability {
+            object: mock_service::IPC_ENDPOINT_CAPABILITY_OBJECT,
+            endpoint: Some(mock_service::ECHO_IPC_ENDPOINT),
+            rights: &ECHO_RIGHTS,
+        }];
+    const ECHO_MANIFEST_SERVICE: mock_service::MockManifestService<'static> =
+        mock_service::MockManifestService {
+            module_id: mock_service::ECHO_SERVICE_MODULE_ID,
+            image: mock_service::ECHO_SERVICE_IMAGE,
+            restart_always: true,
+            capabilities: &ECHO_CAPABILITIES,
+        };
+
+    fn launch_manifest_echo<const NPROC: usize, const MSG_DEPTH: usize>(
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+    ) -> mock_service::MockServiceLaunchReport {
+        Supervisor::new()
+            .launch_mock_manifest_service(kernel, ECHO_MANIFEST_SERVICE)
+            .unwrap()
+    }
+
+    #[test]
+    fn manifest_echo_ipc_is_denied_without_sender_capability() {
+        let mut kernel = Kernel::<8, 4>::new();
+        kernel.bootstrap();
+        let report = launch_manifest_echo(&mut kernel);
+        let caller = kernel.spawn_initial_process(Credentials::user()).unwrap();
+        kernel.revoke_task_capabilities(caller);
+
+        let payload = crate::kernel::ipc::MessagePayload::from_slice(
+            SecurityClass::Internal,
+            b"capability denied",
+        );
+        assert!(matches!(
+            kernel.send_message(caller, report.service_pid, payload),
+            Err(KernelError::SecurityViolation(
+                IsolationError::CapabilityMissing
+            ))
+        ));
+        assert_eq!(kernel.receive_or_block(report.service_pid).unwrap(), None);
+    }
+
+    #[test]
+    fn manifest_echo_ipc_is_allowed_with_sender_capability() {
+        let mut kernel = Kernel::<8, 4>::new();
+        kernel.bootstrap();
+        let report = launch_manifest_echo(&mut kernel);
+        let caller = kernel.spawn_initial_process(Credentials::user()).unwrap();
+        kernel.revoke_task_capabilities(caller);
+        kernel
+            .grant_task_capability(
+                caller,
+                CapabilityObject::IpcEndpoint(caller),
+                CapabilityRights::ipc_endpoint(),
+            )
+            .unwrap();
+        kernel
+            .grant_task_capability(
+                caller,
+                CapabilityObject::IpcEndpoint(report.service_pid),
+                CapabilityRights::ipc_endpoint(),
+            )
+            .unwrap();
+
+        let payload = crate::kernel::ipc::MessagePayload::from_slice(
+            SecurityClass::Internal,
+            b"capability allowed",
+        );
+        kernel
+            .send_message(caller, report.service_pid, payload)
+            .unwrap();
+
+        let request = kernel
+            .receive_or_block(report.service_pid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.sender, caller);
+        assert_eq!(request.receiver, report.service_pid);
+        assert_eq!(request.payload, payload);
+    }
+
+    #[test]
+    fn manifest_echo_service_cannot_register_echo_ipc_without_receive_endpoint_capability() {
+        let mut kernel = Kernel::<8, 4>::new();
+        kernel.bootstrap();
+        let supervisor_pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let service_pid = kernel
+            .spawn_task(SpawnTaskRequest {
+                parent: Some(supervisor_pid),
+                entry_point: 0,
+                priority: ProcessPriority::Normal,
+                credentials: Credentials::user(),
+            })
+            .unwrap();
+        kernel.revoke_task_capabilities(service_pid);
+
+        assert!(matches!(
+            kernel.register_endpoint(supervisor_pid, RegistryServiceId::EchoIpc, service_pid),
+            Err(KernelError::SecurityViolation(
+                IsolationError::CapabilityMissing
+            ))
+        ));
+        assert_eq!(kernel.service_owner(RegistryServiceId::EchoIpc), None);
+    }
+
+    #[test]
+    fn manifest_echo_service_registers_echo_ipc_after_supervisor_grant() {
+        let mut kernel = Kernel::<8, 4>::new();
+        kernel.bootstrap();
+        let supervisor_pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let service_pid = kernel
+            .spawn_task(SpawnTaskRequest {
+                parent: Some(supervisor_pid),
+                entry_point: 0,
+                priority: ProcessPriority::Normal,
+                credentials: Credentials::user(),
+            })
+            .unwrap();
+        kernel.revoke_task_capabilities(service_pid);
+        kernel
+            .grant_task_capability(
+                service_pid,
+                CapabilityObject::IpcEndpoint(service_pid),
+                CapabilityRights::ipc_endpoint(),
+            )
+            .unwrap();
+
+        kernel
+            .register_endpoint(supervisor_pid, RegistryServiceId::EchoIpc, service_pid)
+            .unwrap();
+        assert_eq!(
+            kernel.service_owner(RegistryServiceId::EchoIpc),
+            Some(service_pid)
+        );
+    }
+
+    #[test]
+    fn manifest_echo_request_returns_payload_unchanged() {
+        let mut kernel = Kernel::<8, 4>::new();
+        kernel.bootstrap();
+        let supervisor = Supervisor::new();
+        let report = supervisor
+            .launch_mock_manifest_service(&mut kernel, ECHO_MANIFEST_SERVICE)
+            .unwrap();
+        let caller = kernel.spawn_initial_process(Credentials::user()).unwrap();
+        let payload = crate::kernel::ipc::MessagePayload::from_slice(
+            SecurityClass::Internal,
+            b"echo this payload",
+        );
+
+        let response = supervisor
+            .dispatch_echo_request(&mut kernel, &report, caller, payload)
+            .unwrap();
+
+        assert_eq!(response, payload);
+    }
+
+    #[test]
+    fn manifest_echo_capabilities_are_revoked_when_service_crashes() {
+        let mut kernel = Kernel::<8, 4>::new();
+        kernel.bootstrap();
+        let report = launch_manifest_echo(&mut kernel);
+        let old_endpoint_capability = report.endpoint_capability_id;
+
+        kernel
+            .exit_process(
+                report.service_pid,
+                crate::kernel::process::ExitStatus::signaled(11),
+            )
+            .unwrap();
+        kernel.revoke_task_capabilities(report.service_pid);
+        kernel.revoke_task(report.service_pid);
+        kernel.revoke_service_owner(report.service_pid);
+
+        assert!(matches!(
+            kernel.revoke_task_capability(old_endpoint_capability),
+            Err(KernelError::SecurityViolation(
+                IsolationError::CapabilityMissing
+            ))
+        ));
+        assert_eq!(kernel.service_owner(RegistryServiceId::EchoIpc), None);
+    }
+
+    #[test]
+    fn manifest_echo_restart_uses_fresh_capability_instead_of_revoked_authority() {
+        let mut kernel = Kernel::<12, 4>::new();
+        kernel.bootstrap();
+        let first = launch_manifest_echo(&mut kernel);
+        let old_service_pid = first.service_pid;
+        let old_endpoint_capability = first.endpoint_capability_id;
+
+        kernel
+            .exit_process(
+                old_service_pid,
+                crate::kernel::process::ExitStatus::signaled(6),
+            )
+            .unwrap();
+        kernel.revoke_task_capabilities(old_service_pid);
+        kernel.revoke_task(old_service_pid);
+        kernel.revoke_service_owner(old_service_pid);
+        assert!(matches!(
+            kernel.revoke_task_capability(old_endpoint_capability),
+            Err(KernelError::SecurityViolation(
+                IsolationError::CapabilityMissing
+            ))
+        ));
+
+        let restarted = launch_manifest_echo(&mut kernel);
+
+        assert_ne!(restarted.service_pid, old_service_pid);
+        assert_ne!(restarted.endpoint_capability_id, old_endpoint_capability);
+        assert_eq!(
+            kernel.service_owner(RegistryServiceId::EchoIpc),
+            Some(restarted.service_pid)
         );
     }
 

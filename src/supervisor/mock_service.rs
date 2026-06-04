@@ -140,6 +140,7 @@ pub struct MockServiceLaunchReport {
     pub supervisor_pid: ProcessId,
     pub service_pid: ProcessId,
     pub endpoint: RegistryServiceId,
+    pub endpoint_capability_id: crate::subkernel::CapabilityId,
     pub service: EchoService,
 }
 
@@ -252,7 +253,7 @@ pub(crate) fn launch_echo_service_from_validated_manifest<
     })?;
 
     reset_spawned_service_capabilities(kernel, service_pid)?;
-    kernel.grant_task_capability(
+    let endpoint_capability_id = kernel.grant_task_capability(
         service_pid,
         CapabilityObject::IpcEndpoint(ProcessId::new(RegistryServiceId::EchoIpc.raw())),
         endpoint_capability.rights,
@@ -267,6 +268,7 @@ pub(crate) fn launch_echo_service_from_validated_manifest<
         supervisor_pid,
         service_pid,
         endpoint: RegistryServiceId::EchoIpc,
+        endpoint_capability_id,
         service: echo,
     })
 }
