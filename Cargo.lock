@@ -35,6 +35,7 @@ name = "mirage"
 version = "0.1.0"
 dependencies = [
  "mirage-block",
+ "mirage-boot",
  "mirage-storage",
 ]
 

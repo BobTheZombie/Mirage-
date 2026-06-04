@@ -70,3 +70,6 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[dev-dependencies]
+mirage-boot = { path = "crates/mirage-boot" }

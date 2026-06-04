@@ -40,6 +40,7 @@ mod tests {
         assert_eq!(module.signature.value, "mock-valid");
         assert_eq!(module.restart, RestartPolicy::Always);
         assert_eq!(module.capabilities[0].object, "IPC_ENDPOINT");
+        assert_eq!(module.capabilities[0].endpoint.as_deref(), Some("echo.ipc"));
         assert_eq!(module.capabilities[0].rights, ["SEND", "RECEIVE"]);
     }
 

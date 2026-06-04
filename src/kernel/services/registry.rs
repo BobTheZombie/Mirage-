@@ -29,6 +29,7 @@ pub enum ServiceId {
     Nvmed = 6,
     Ahcid = 7,
     AmdgpuDisplayd = 8,
+    EchoIpc = 9,
     Kernel = 0x80,
     Supervisor = 0x81,
     Console = 0x82,
@@ -61,6 +62,7 @@ impl ServiceId {
             6 => Some(Self::Nvmed),
             7 => Some(Self::Ahcid),
             8 => Some(Self::AmdgpuDisplayd),
+            9 => Some(Self::EchoIpc),
             0x80 => Some(Self::Kernel),
             0x81 => Some(Self::Supervisor),
             0x82 => Some(Self::Console),
@@ -91,6 +93,7 @@ impl ServiceId {
             Self::Nvmed => "nvmed",
             Self::Ahcid => "ahcid",
             Self::AmdgpuDisplayd => "amdgpu-displayd",
+            Self::EchoIpc => "echo.ipc",
             Self::SerialDriver => "driverd.serial",
             Self::TimerDriver => "driverd.timer",
             Self::BlockDriver => "driverd.block",
@@ -113,7 +116,8 @@ impl ServiceId {
             | Self::Usbd
             | Self::Nvmed
             | Self::Ahcid
-            | Self::AmdgpuDisplayd => SecurityClass::Internal,
+            | Self::AmdgpuDisplayd
+            | Self::EchoIpc => SecurityClass::Internal,
             Self::SerialDriver
             | Self::BlockDriver
             | Self::FramebufferDriver
