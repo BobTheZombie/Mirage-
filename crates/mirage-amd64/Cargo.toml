@@ -1,0 +1,14 @@
+[package]
+name = "mirage-amd64"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "AMD64 mechanism primitives for the Mirage kernel and supervised services"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+hw-amd64 = []
+hw-instructions = ["hw-amd64"]
+
+[dependencies]

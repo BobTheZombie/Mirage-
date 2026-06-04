@@ -1,0 +1,17 @@
+[package]
+name = "mirage-amd-chipset"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "AMD chipset service handoff descriptors for Mirage"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+hw-amd-chipset = ["mirage-ryzen/hw-ryzen", "mirage-pci"]
+
+[dependencies]
+mirage-cap = { path = "../mirage-cap" }
+mirage-ipc = { path = "../mirage-ipc" }
+mirage-pci = { path = "../mirage-pci", optional = true }
+mirage-ryzen = { path = "../mirage-ryzen" }

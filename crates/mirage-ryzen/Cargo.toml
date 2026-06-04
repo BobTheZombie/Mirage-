@@ -1,0 +1,15 @@
+[package]
+name = "mirage-ryzen"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Ryzen platform mechanism descriptors for Mirage"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+hw-ryzen = ["mirage-amd64/hw-amd64"]
+hw-amd-telemetry = ["hw-ryzen"]
+
+[dependencies]
+mirage-amd64 = { path = "../mirage-amd64" }
