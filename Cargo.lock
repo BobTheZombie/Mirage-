@@ -27,6 +27,8 @@ dependencies = [
  "mirage-cap",
  "mirage-fb",
  "mirage-gpu",
+ "mirage-hw",
+ "mirage-pci",
 ]
 
 [[package]]
