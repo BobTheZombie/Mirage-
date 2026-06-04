@@ -19,7 +19,7 @@ all: iso
 rust-src:
 	$(RUSTUP) component add rust-src
 
-kernel:
+kernel: rust-src
 	RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --bin mirage-kernel \
 		--target $(TARGET_JSON) \
 		-Z build-std=core,compiler_builtins \
