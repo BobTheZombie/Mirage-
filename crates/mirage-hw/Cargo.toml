@@ -1,0 +1,9 @@
+[package]
+name = "mirage-hw"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Hardware resource descriptors and backend selection primitives for Mirage services"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

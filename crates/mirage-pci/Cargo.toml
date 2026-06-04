@@ -1,0 +1,9 @@
+[package]
+name = "mirage-pci"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "PCI identity and enumeration primitives for capability-mediated Mirage hardware services"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

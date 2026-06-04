@@ -49,6 +49,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirage-hw"
+version = "0.1.0"
+
+[[package]]
 name = "mirage-ipc"
 version = "0.1.0"
 
@@ -60,6 +64,10 @@ dependencies = [
  "mirage-cap",
  "mirage-ipc",
 ]
+
+[[package]]
+name = "mirage-pci"
+version = "0.1.0"
 
 [[package]]
 name = "mirage-storage"
