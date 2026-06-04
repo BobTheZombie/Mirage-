@@ -2,7 +2,10 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(not(any(test, feature = "qfs-std")))]
+use super::interrupts;
 use super::{gdt, msr, pic};
+use crate::kernel::thread::CpuContext;
 
 pub const DOUBLE_FAULT_VECTOR: u8 = 8;
 pub const PAGE_FAULT_VECTOR: u8 = 14;
@@ -55,6 +58,7 @@ impl IdtEntry {
     }
 }
 
+#[cfg(not(any(test, feature = "qfs-std")))]
 #[repr(C, packed)]
 struct DescriptorTablePointer {
     limit: u16,
@@ -240,13 +244,20 @@ extern "C" fn __mirage_rust_interrupt_dispatch(vector: u64, error_code: u64) {
 }
 
 pub(crate) fn dispatch_interrupt(vector: u64, error_code: u64) {
+    dispatch_interrupt_with_context(vector, error_code, None);
+}
+
+pub(crate) fn dispatch_interrupt_frame(context: &CpuContext) {
+    dispatch_interrupt_with_context(context.trap_vector, context.error_code, Some(context));
+}
+
+fn dispatch_interrupt_with_context(vector: u64, error_code: u64, context: Option<&CpuContext>) {
     LAST_EXCEPTION_VECTOR.store(
         (vector << 32) | (error_code & 0xffff_ffff),
         Ordering::SeqCst,
     );
 
     match vector as u8 {
-        PAGE_FAULT_VECTOR => LAST_PAGE_FAULT_ADDRESS.store(read_cr2(), Ordering::SeqCst),
         vector if vector == pic::TIMER_VECTOR => {
             TIMER_TICKS.fetch_add(1, Ordering::SeqCst);
             pic::end_of_interrupt(vector);
@@ -254,8 +265,107 @@ pub(crate) fn dispatch_interrupt(vector: u64, error_code: u64) {
         SYSCALL_TRAP_VECTOR => {
             SYSCALL_TRAPS.fetch_add(1, Ordering::SeqCst);
         }
+        3 => print_exception_diagnostics("breakpoint", vector, error_code, context, None),
+        DOUBLE_FAULT_VECTOR => {
+            print_exception_diagnostics("double fault", vector, error_code, context, None);
+            crate::kprintln!("x86_64: double fault is fatal; halting safely");
+            halt_safely();
+        }
+        13 => {
+            print_exception_diagnostics(
+                "general protection fault",
+                vector,
+                error_code,
+                context,
+                None,
+            );
+            crate::kprintln!("x86_64: general protection fault is fatal; halting safely");
+            halt_safely();
+        }
+        PAGE_FAULT_VECTOR => {
+            let cr2 = read_cr2();
+            LAST_PAGE_FAULT_ADDRESS.store(cr2, Ordering::SeqCst);
+            print_exception_diagnostics("page fault", vector, error_code, context, Some(cr2));
+        }
         _ => {}
     }
+}
+
+fn print_exception_diagnostics(
+    name: &str,
+    vector: u64,
+    error_code: u64,
+    context: Option<&CpuContext>,
+    cr2: Option<u64>,
+) {
+    crate::kprintln!(
+        "x86_64 exception: {} vector={} error_code={:#x}",
+        name,
+        vector,
+        error_code
+    );
+
+    if let Some(cr2) = cr2 {
+        crate::kprintln!("  cr2={:#018x}", cr2);
+    }
+
+    if let Some(context) = context {
+        crate::kprintln!(
+            "  rip={:#018x} rsp={:#018x} rflags={:#018x} cs={:#x} ss={:#x} mode={:?}",
+            context.rip,
+            context.rsp,
+            context.rflags,
+            context.cs,
+            context.ss,
+            context.privilege_mode
+        );
+        crate::kprintln!(
+            "  rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}",
+            context.rax,
+            context.rbx,
+            context.rcx,
+            context.rdx
+        );
+        crate::kprintln!(
+            "  rsi={:#018x} rdi={:#018x} rbp={:#018x}",
+            context.rsi,
+            context.rdi,
+            context.rbp
+        );
+        crate::kprintln!(
+            "  r8={:#018x} r9={:#018x} r10={:#018x} r11={:#018x}",
+            context.r8,
+            context.r9,
+            context.r10,
+            context.r11
+        );
+        crate::kprintln!(
+            "  r12={:#018x} r13={:#018x} r14={:#018x} r15={:#018x}",
+            context.r12,
+            context.r13,
+            context.r14,
+            context.r15
+        );
+        crate::kprintln!(
+            "  fs={:#x} gs={:#x} fs_base={:#018x} gs_base={:#018x}",
+            context.fs,
+            context.gs,
+            context.fs_base,
+            context.gs_base
+        );
+    } else {
+        crate::kprintln!("  register frame unavailable");
+    }
+}
+
+#[cfg(not(any(test, feature = "qfs-std")))]
+fn halt_safely() -> ! {
+    interrupts::halt_forever()
+}
+
+#[cfg(any(test, feature = "qfs-std"))]
+fn halt_safely() -> ! {
+    panic!("fatal x86_64 trap halted safely")
 }
 
 fn read_cr2() -> u64 {

@@ -178,11 +178,12 @@ pub extern "C" fn __mirage_arch_save_trap_frame(
     }
 
     let saved = unsafe { frame.as_ref() };
-    let (vector, error_code) = saved
-        .map(|context| (context.trap_vector, context.error_code))
-        .unwrap_or((0, 0));
     let _ = (core_index, thread_raw, CPU_CONTEXT_ABI_VERSION);
-    idt::dispatch_interrupt(vector, error_code);
+    if let Some(context) = saved {
+        idt::dispatch_interrupt_frame(context);
+    } else {
+        idt::dispatch_interrupt(0, 0);
+    }
 }
 
 pub fn kernel_stack_top(core_index: usize) -> u64 {
