@@ -60,6 +60,27 @@ use core::panic::PanicInfo;
 
 #[cfg(not(any(test, feature = "qfs-std")))]
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    crate::arch::x86_64::uart16550::early_print(::core::format_args!(
+        "\n=== Mirage kernel panic ===\n"
+    ));
+
+    if let Some(location) = info.location() {
+        crate::arch::x86_64::uart16550::early_print(::core::format_args!(
+            "file: {}\nline: {}\n",
+            location.file(),
+            location.line()
+        ));
+    } else {
+        crate::arch::x86_64::uart16550::early_print(::core::format_args!(
+            "file: <unknown>\nline: <unknown>\n"
+        ));
+    }
+
+    crate::arch::x86_64::uart16550::early_print(::core::format_args!(
+        "message: {}\n",
+        info.message()
+    ));
+
     crate::arch::x86_64::panic_halt()
 }

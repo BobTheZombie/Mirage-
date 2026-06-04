@@ -233,7 +233,12 @@ pub fn cpu_relax() {
     spin_loop();
 }
 
-/// Halt the CPU in a panic scenario. In a real system an IPI or watchdog would reset us.
+/// Halt the CPU after panic diagnostics are written to COM1.
+///
+/// This is the final architecture-specific panic path: maskable interrupts are
+/// disabled before the CPU enters an infinite `hlt` loop, so no scheduler or IRQ
+/// policy runs after the panic output has been emitted. In a real system an IPI
+/// or watchdog would reset us.
 pub fn panic_halt() -> ! {
     interrupts::halt_forever()
 }
