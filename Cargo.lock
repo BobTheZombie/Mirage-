@@ -80,7 +80,12 @@ version = "0.1.0"
 name = "mirage-storage"
 version = "0.1.0"
 dependencies = [
+ "mirage-ahci",
  "mirage-block",
+ "mirage-cap",
+ "mirage-nvme",
+ "mirage-pci",
+ "mirage-usb",
 ]
 
 [[package]]

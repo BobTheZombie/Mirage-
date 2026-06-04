@@ -458,6 +458,507 @@ fn scan_partition_table(device: &mut dyn BlockDevice) -> PartitionTable {
     PartitionTable::Unknown
 }
 
+#[cfg(feature = "discovery")]
+pub mod discovery {
+    #[cfg(any(
+        feature = "discovery-nvme",
+        feature = "discovery-ahci",
+        feature = "discovery-xhci"
+    ))]
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+
+    use mirage_cap::CapabilitySet;
+    use mirage_pci::PciBus;
+    #[cfg(any(
+        feature = "discovery-nvme",
+        feature = "discovery-ahci",
+        feature = "discovery-xhci"
+    ))]
+    use mirage_pci::PciDevice;
+
+    use super::{StorageDeviceHandle, StorageDeviceRegistry, StorageError, StorageService};
+
+    /// Feature-gated storage discovery error.
+    ///
+    /// The concrete driver error stays inside the owning driver crate; storage discovery only
+    /// reports which backend phase failed so generic storage and QFS code remain decoupled from
+    /// PCI/NVMe/AHCI/USB policy and hardware details.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum DiscoveryError {
+        DriverInitFailed { backend: StorageBackendKind },
+        Storage(StorageError),
+    }
+
+    impl From<StorageError> for DiscoveryError {
+        fn from(error: StorageError) -> Self {
+            Self::Storage(error)
+        }
+    }
+
+    /// Storage backend classes recognized by the optional PCI discovery flow.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum StorageBackendKind {
+        Nvme,
+        Ahci,
+        UsbStorage,
+    }
+
+    /// Controller/DMA numbering policy supplied by the supervisor.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct DiscoveryConfig {
+        pub controller_id_base: u64,
+        pub dma_region_base: u64,
+        pub dma_region_stride: u64,
+    }
+
+    impl DiscoveryConfig {
+        pub const fn new(
+            controller_id_base: u64,
+            dma_region_base: u64,
+            dma_region_stride: u64,
+        ) -> Self {
+            Self {
+                controller_id_base,
+                dma_region_base,
+                dma_region_stride,
+            }
+        }
+
+        #[cfg(any(
+            feature = "discovery-nvme",
+            feature = "discovery-ahci",
+            feature = "discovery-xhci"
+        ))]
+        const fn controller_id(self, ordinal: u64) -> u64 {
+            self.controller_id_base.wrapping_add(ordinal)
+        }
+
+        #[cfg(any(
+            feature = "discovery-nvme",
+            feature = "discovery-ahci",
+            feature = "discovery-xhci"
+        ))]
+        const fn dma_region(self, ordinal: u64) -> u64 {
+            self.dma_region_base
+                .wrapping_add(self.dma_region_stride.wrapping_mul(ordinal))
+        }
+    }
+
+    impl Default for DiscoveryConfig {
+        fn default() -> Self {
+            Self::new(1, 0x1000_0000, 0x10_0000)
+        }
+    }
+
+    /// Handles registered by one discovery pass, grouped by backend.
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub struct DiscoveryReport {
+        pub nvme: Vec<StorageDeviceHandle>,
+        pub ahci: Vec<StorageDeviceHandle>,
+        pub usb_storage: Vec<StorageDeviceHandle>,
+    }
+
+    impl DiscoveryReport {
+        pub const fn new() -> Self {
+            Self {
+                nvme: Vec::new(),
+                ahci: Vec::new(),
+                usb_storage: Vec::new(),
+            }
+        }
+
+        pub fn len(&self) -> usize {
+            self.nvme.len() + self.ahci.len() + self.usb_storage.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.len() == 0
+        }
+
+        #[cfg(any(
+            feature = "discovery-nvme",
+            feature = "discovery-ahci",
+            feature = "discovery-xhci"
+        ))]
+        fn push(&mut self, backend: StorageBackendKind, handle: StorageDeviceHandle) {
+            match backend {
+                StorageBackendKind::Nvme => self.nvme.push(handle),
+                StorageBackendKind::Ahci => self.ahci.push(handle),
+                StorageBackendKind::UsbStorage => self.usb_storage.push(handle),
+            }
+        }
+    }
+
+    /// Scan a PCI bus, initialize enabled storage backends, and register block devices.
+    pub fn discover_into_registry(
+        bus: &PciBus,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        registry: &mut StorageDeviceRegistry,
+    ) -> Result<DiscoveryReport, DiscoveryError> {
+        #[cfg_attr(
+            not(any(
+                feature = "discovery-nvme",
+                feature = "discovery-ahci",
+                feature = "discovery-xhci"
+            )),
+            allow(unused_mut)
+        )]
+        let mut report = DiscoveryReport::new();
+        #[cfg(not(any(
+            feature = "discovery-nvme",
+            feature = "discovery-ahci",
+            feature = "discovery-xhci"
+        )))]
+        let _ = (bus, authority, config, registry);
+
+        #[cfg(any(
+            feature = "discovery-nvme",
+            feature = "discovery-ahci",
+            feature = "discovery-xhci"
+        ))]
+        let mut ordinal = 0;
+
+        #[cfg(any(
+            feature = "discovery-nvme",
+            feature = "discovery-ahci",
+            feature = "discovery-xhci"
+        ))]
+        for device in bus.devices() {
+            #[cfg(feature = "discovery-nvme")]
+            if device.is_nvme() {
+                let handles = init_nvme(device, authority.clone(), config, ordinal, registry)?;
+                for handle in handles {
+                    report.push(StorageBackendKind::Nvme, handle);
+                }
+                ordinal += 1;
+                continue;
+            }
+
+            #[cfg(feature = "discovery-ahci")]
+            if device.is_ahci() {
+                let handles = init_ahci(device, authority.clone(), config, ordinal, registry)?;
+                for handle in handles {
+                    report.push(StorageBackendKind::Ahci, handle);
+                }
+                ordinal += 1;
+                continue;
+            }
+
+            #[cfg(feature = "discovery-xhci")]
+            if device.is_xhci() {
+                let handles = init_xhci(device, authority.clone(), config, ordinal, registry)?;
+                for handle in handles {
+                    report.push(StorageBackendKind::UsbStorage, handle);
+                }
+                ordinal += 1;
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Scan a PCI bus and register discovered devices through [`StorageService`].
+    pub fn discover_into_service(
+        bus: &PciBus,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        service: &mut StorageService,
+    ) -> Result<DiscoveryReport, DiscoveryError> {
+        #[cfg_attr(
+            not(any(
+                feature = "discovery-nvme",
+                feature = "discovery-ahci",
+                feature = "discovery-xhci"
+            )),
+            allow(unused_mut)
+        )]
+        let mut report = DiscoveryReport::new();
+        #[cfg(not(any(
+            feature = "discovery-nvme",
+            feature = "discovery-ahci",
+            feature = "discovery-xhci"
+        )))]
+        let _ = (bus, authority, config, service);
+
+        #[cfg(any(
+            feature = "discovery-nvme",
+            feature = "discovery-ahci",
+            feature = "discovery-xhci"
+        ))]
+        let mut ordinal = 0;
+
+        #[cfg(any(
+            feature = "discovery-nvme",
+            feature = "discovery-ahci",
+            feature = "discovery-xhci"
+        ))]
+        for device in bus.devices() {
+            #[cfg(feature = "discovery-nvme")]
+            if device.is_nvme() {
+                let handles =
+                    init_nvme_service(device, authority.clone(), config, ordinal, service)?;
+                for handle in handles {
+                    report.push(StorageBackendKind::Nvme, handle);
+                }
+                ordinal += 1;
+                continue;
+            }
+
+            #[cfg(feature = "discovery-ahci")]
+            if device.is_ahci() {
+                let handles =
+                    init_ahci_service(device, authority.clone(), config, ordinal, service)?;
+                for handle in handles {
+                    report.push(StorageBackendKind::Ahci, handle);
+                }
+                ordinal += 1;
+                continue;
+            }
+
+            #[cfg(feature = "discovery-xhci")]
+            if device.is_xhci() {
+                let handles =
+                    init_xhci_service(device, authority.clone(), config, ordinal, service)?;
+                for handle in handles {
+                    report.push(StorageBackendKind::UsbStorage, handle);
+                }
+                ordinal += 1;
+            }
+        }
+
+        Ok(report)
+    }
+
+    #[cfg(feature = "discovery-nvme")]
+    fn init_nvme(
+        device: &PciDevice,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        ordinal: u64,
+        registry: &mut StorageDeviceRegistry,
+    ) -> Result<Vec<StorageDeviceHandle>, DiscoveryError> {
+        let block_devices = nvme_block_devices(device, authority, config, ordinal)?;
+        let mut handles = Vec::new();
+        for block_device in block_devices {
+            handles.push(registry.register(block_device)?);
+        }
+        Ok(handles)
+    }
+
+    #[cfg(feature = "discovery-nvme")]
+    fn init_nvme_service(
+        device: &PciDevice,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        ordinal: u64,
+        service: &mut StorageService,
+    ) -> Result<Vec<StorageDeviceHandle>, DiscoveryError> {
+        let block_devices = nvme_block_devices(device, authority, config, ordinal)?;
+        let mut handles = Vec::new();
+        for block_device in block_devices {
+            handles.push(service.register_device(block_device)?);
+        }
+        Ok(handles)
+    }
+
+    #[cfg(feature = "discovery-nvme")]
+    fn nvme_block_devices(
+        device: &PciDevice,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        ordinal: u64,
+    ) -> Result<Vec<Box<dyn mirage_block::BlockDevice>>, DiscoveryError> {
+        use mirage_nvme::{NvmeController, NvmeControllerId, RealNvmeBlockDevice};
+
+        let mut controller = NvmeController::from_pci_device(
+            NvmeControllerId::new(config.controller_id(ordinal)),
+            device,
+            authority,
+            config.dma_region(ordinal),
+        )
+        .map_err(|_| DiscoveryError::DriverInitFailed {
+            backend: StorageBackendKind::Nvme,
+        })?;
+        controller
+            .reset()
+            .and_then(|_| controller.init_admin_queue(16))
+            .and_then(|_| controller.identify_controller().map(|_| ()))
+            .and_then(|_| controller.create_io_queue_pair(1, 16))
+            .map_err(|_| DiscoveryError::DriverInitFailed {
+                backend: StorageBackendKind::Nvme,
+            })?;
+
+        let namespaces = controller
+            .identify_namespaces()
+            .map_err(|_| DiscoveryError::DriverInitFailed {
+                backend: StorageBackendKind::Nvme,
+            })?
+            .to_vec();
+        let mut devices: Vec<Box<dyn mirage_block::BlockDevice>> = Vec::new();
+        for namespace in namespaces {
+            devices.push(Box::new(RealNvmeBlockDevice::new(
+                controller.clone(),
+                namespace,
+            )));
+        }
+        Ok(devices)
+    }
+
+    #[cfg(feature = "discovery-ahci")]
+    fn init_ahci(
+        device: &PciDevice,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        ordinal: u64,
+        registry: &mut StorageDeviceRegistry,
+    ) -> Result<Vec<StorageDeviceHandle>, DiscoveryError> {
+        let block_devices = ahci_block_devices(device, authority, config, ordinal)?;
+        let mut handles = Vec::new();
+        for block_device in block_devices {
+            handles.push(registry.register(block_device)?);
+        }
+        Ok(handles)
+    }
+
+    #[cfg(feature = "discovery-ahci")]
+    fn init_ahci_service(
+        device: &PciDevice,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        ordinal: u64,
+        service: &mut StorageService,
+    ) -> Result<Vec<StorageDeviceHandle>, DiscoveryError> {
+        let block_devices = ahci_block_devices(device, authority, config, ordinal)?;
+        let mut handles = Vec::new();
+        for block_device in block_devices {
+            handles.push(service.register_device(block_device)?);
+        }
+        Ok(handles)
+    }
+
+    #[cfg(feature = "discovery-ahci")]
+    fn ahci_block_devices(
+        device: &PciDevice,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        ordinal: u64,
+    ) -> Result<Vec<Box<dyn mirage_block::BlockDevice>>, DiscoveryError> {
+        use mirage_ahci::{AhciController, AhciControllerId, RealAhciBlockDevice};
+
+        let mut controller = AhciController::from_pci_device(
+            AhciControllerId::new(config.controller_id(ordinal)),
+            device,
+            authority,
+            config.dma_region(ordinal),
+        )
+        .map_err(|_| DiscoveryError::DriverInitFailed {
+            backend: StorageBackendKind::Ahci,
+        })?;
+        let ports = controller.probe_ports();
+        let mut devices: Vec<Box<dyn mirage_block::BlockDevice>> = Vec::new();
+        for port in ports {
+            let identify =
+                controller
+                    .identify_device(port)
+                    .map_err(|_| DiscoveryError::DriverInitFailed {
+                        backend: StorageBackendKind::Ahci,
+                    })?;
+            devices.push(Box::new(RealAhciBlockDevice::new(
+                controller.clone(),
+                port,
+                identify,
+            )));
+        }
+        Ok(devices)
+    }
+
+    #[cfg(feature = "discovery-xhci")]
+    fn init_xhci(
+        device: &PciDevice,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        ordinal: u64,
+        registry: &mut StorageDeviceRegistry,
+    ) -> Result<Vec<StorageDeviceHandle>, DiscoveryError> {
+        let block_devices = xhci_block_devices(device, authority, config, ordinal)?;
+        let mut handles = Vec::new();
+        for block_device in block_devices {
+            handles.push(registry.register(block_device)?);
+        }
+        Ok(handles)
+    }
+
+    #[cfg(feature = "discovery-xhci")]
+    fn init_xhci_service(
+        device: &PciDevice,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        ordinal: u64,
+        service: &mut StorageService,
+    ) -> Result<Vec<StorageDeviceHandle>, DiscoveryError> {
+        let block_devices = xhci_block_devices(device, authority, config, ordinal)?;
+        let mut handles = Vec::new();
+        for block_device in block_devices {
+            handles.push(service.register_device(block_device)?);
+        }
+        Ok(handles)
+    }
+
+    #[cfg(feature = "discovery-xhci")]
+    fn xhci_block_devices(
+        device: &PciDevice,
+        authority: CapabilitySet,
+        config: DiscoveryConfig,
+        ordinal: u64,
+    ) -> Result<Vec<Box<dyn mirage_block::BlockDevice>>, DiscoveryError> {
+        use mirage_block::{BlockDeviceId, BlockSize, SectorCount};
+        use mirage_usb::{
+            RealUsbBlockDevice, UsbControllerId, UsbDeviceClass, UsbScsiBlockInfo, XhciController,
+        };
+
+        let mut controller = XhciController::from_pci_device(
+            UsbControllerId::new(config.controller_id(ordinal)),
+            device,
+            authority,
+            config.dma_region(ordinal),
+        )
+        .map_err(|_| DiscoveryError::DriverInitFailed {
+            backend: StorageBackendKind::UsbStorage,
+        })?;
+        let descriptors = controller
+            .enumerate_usb()
+            .map_err(|_| DiscoveryError::DriverInitFailed {
+                backend: StorageBackendKind::UsbStorage,
+            })?
+            .to_vec();
+        let mut devices: Vec<Box<dyn mirage_block::BlockDevice>> = Vec::new();
+        for descriptor in descriptors {
+            if descriptor.class != UsbDeviceClass::MassStorage {
+                continue;
+            }
+            let info = UsbScsiBlockInfo {
+                id: BlockDeviceId::new(
+                    (config.controller_id(ordinal) << 8) | u64::from(descriptor.address.get()),
+                ),
+                block_size: BlockSize::new(512).map_err(|_| DiscoveryError::DriverInitFailed {
+                    backend: StorageBackendKind::UsbStorage,
+                })?,
+                sectors: SectorCount::new(1024),
+                read_only: false,
+                write_cache: true,
+            };
+            devices.push(Box::new(RealUsbBlockDevice::new(
+                controller.clone(),
+                descriptor.address,
+                info,
+            )));
+        }
+        Ok(devices)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
