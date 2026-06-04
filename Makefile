@@ -25,7 +25,7 @@ kernel: rust-src
 	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --bin mirage-kernel \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
-		-Z build-std=core,compiler_builtins \
+		-Z build-std=core,alloc,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
 
 limine: $(LIMINE_BIN)

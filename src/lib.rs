@@ -1,4 +1,8 @@
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(all(not(test), not(feature = "qfs-std"), target_os = "none"), no_std)]
+#![cfg_attr(
+    all(not(test), not(feature = "qfs-std"), target_os = "none"),
+    feature(alloc_error_handler)
+)]
 
 //! Mirage is a conceptual 64-bit, Rust-based GNU/Mirage kernel organized around a
 //! mechanism/policy split.
@@ -15,6 +19,9 @@
 //! on the standard library. POSIX/GNU compatibility is documented as an external ABI surface;
 //! internally, QFS is treated as the native indexed object filesystem and boot assumptions are
 //! expressed as a signed boot module set rather than compatibility-driven startup conventions.
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+extern crate alloc;
 
 #[cfg(feature = "qfs-std")]
 extern crate std;
@@ -55,10 +62,10 @@ macro_rules! kprintln {
     };
 }
 
-#[cfg(not(any(test, feature = "qfs-std")))]
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 use core::panic::PanicInfo;
 
-#[cfg(not(any(test, feature = "qfs-std")))]
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     crate::arch::x86_64::uart16550::early_print(::core::format_args!(
