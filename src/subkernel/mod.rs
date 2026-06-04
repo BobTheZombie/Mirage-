@@ -97,6 +97,12 @@ pub enum CapabilityObject {
     IrqLine(u16),
     DmaRegion { base: u64, length: u64 },
     PciDevice(u64),
+    MmioRegion { base: u64, length: u64 },
+    VramRegion { base: u64, length: u64 },
+    Framebuffer { base: u64, length: u64 },
+    HotplugController(u64),
+    BlockDeviceRegistry,
+    DisplayRegistry,
     FsObject(u64),
     ServiceControl,
     ModuleLoad,
@@ -943,6 +949,15 @@ impl<const MAX: usize> SecurityKernel<MAX> {
                 CapabilityRights::io(),
                 None,
             )?;
+            self.insert_capability(
+                pid,
+                CapabilityObject::MmioRegion {
+                    base: 0,
+                    length: u64::MAX,
+                },
+                CapabilityRights::io(),
+                None,
+            )?;
         }
 
         if caps.allows_kernel_access() || creds.label().level() == SecurityLevel::System {
@@ -1039,6 +1054,7 @@ impl<const MAX: usize> SecurityKernel<MAX> {
             }
             (CapabilityObject::PciDevice(id), CapabilityObject::PciDevice(_))
             | (CapabilityObject::FsObject(id), CapabilityObject::FsObject(_))
+            | (CapabilityObject::HotplugController(id), CapabilityObject::HotplugController(_))
             | (CapabilityObject::MemoryObject(id), CapabilityObject::MemoryObject(_)) => {
                 id == u64::MAX
             }
@@ -1047,8 +1063,32 @@ impl<const MAX: usize> SecurityKernel<MAX> {
                 CapabilityObject::DmaRegion {
                     base: granted_base,
                     length: granted_length,
+                }
+                | CapabilityObject::MmioRegion {
+                    base: granted_base,
+                    length: granted_length,
+                }
+                | CapabilityObject::VramRegion {
+                    base: granted_base,
+                    length: granted_length,
+                }
+                | CapabilityObject::Framebuffer {
+                    base: granted_base,
+                    length: granted_length,
                 },
                 CapabilityObject::DmaRegion {
+                    base: requested_base,
+                    length: requested_length,
+                }
+                | CapabilityObject::MmioRegion {
+                    base: requested_base,
+                    length: requested_length,
+                }
+                | CapabilityObject::VramRegion {
+                    base: requested_base,
+                    length: requested_length,
+                }
+                | CapabilityObject::Framebuffer {
                     base: requested_base,
                     length: requested_length,
                 },

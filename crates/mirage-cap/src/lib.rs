@@ -11,9 +11,15 @@ pub enum CapabilityObject {
     PciDevice(u64),
     MmioRegion { base: u64, length: u64 },
     DmaRegion(u64),
+    DmaBuffer { base: u64, length: u64 },
     MemoryObject(u64),
+    VramRegion { base: u64, length: u64 },
+    Framebuffer { base: u64, length: u64 },
     IrqLine(u16),
     IpcEndpoint(u64),
+    HotplugController(u64),
+    BlockDeviceRegistry,
+    DisplayRegistry,
 }
 
 /// Fine-grained operation right attached to a capability object.
