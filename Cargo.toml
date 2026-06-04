@@ -1,5 +1,19 @@
 [workspace]
-members = [".", "crates/mirage-ahci", "crates/mirage-amdgpu", "crates/mirage-block", "crates/mirage-cap", "crates/mirage-fb", "crates/mirage-gpu", "crates/mirage-ipc", "crates/mirage-nvme", "crates/mirage-storage", "crates/mirage-usb"]
+members = [
+    ".",
+    "crates/mirage-ahci",
+    "crates/mirage-amdgpu",
+    "crates/mirage-block",
+    "crates/mirage-cap",
+    "crates/mirage-fb",
+    "crates/mirage-gpu",
+    "crates/mirage-hw",
+    "crates/mirage-ipc",
+    "crates/mirage-nvme",
+    "crates/mirage-pci",
+    "crates/mirage-storage",
+    "crates/mirage-usb",
+]
 resolver = "2"
 
 [package]
@@ -25,7 +39,14 @@ path = "src/bin/qfsprogs.rs"
 required-features = ["qfs-std"]
 
 [features]
-default = []
+default = ["mock"]
+mock = []
+hw-pci = []
+hw-nvme = ["hw-pci"]
+hw-ahci = ["hw-pci"]
+hw-xhci = ["hw-pci"]
+hw-framebuffer = []
+hw-amdgpu = ["hw-pci", "hw-framebuffer"]
 # Enables host/testing QFS adapters backed by the Rust standard library.
 qfs-std = ["dep:mirage-block", "dep:mirage-storage"]
 
