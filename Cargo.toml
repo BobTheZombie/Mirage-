@@ -2,6 +2,9 @@
 members = [
     ".",
     "crates/mirage-ahci",
+    "crates/mirage-amd-chipset",
+    "crates/mirage-amd-iommu",
+    "crates/mirage-amd64",
     "crates/mirage-amdgpu",
     "crates/mirage-block",
     "crates/mirage-boot",
@@ -12,6 +15,8 @@ members = [
     "crates/mirage-ipc",
     "crates/mirage-nvme",
     "crates/mirage-pci",
+    "crates/mirage-platform",
+    "crates/mirage-ryzen",
     "crates/mirage-storage",
     "crates/mirage-usb",
 ]
@@ -45,6 +50,11 @@ required-features = ["qfs-std"]
 default = ["mock"]
 mock = []
 hw-pci = []
+hw-amd64 = []
+hw-ryzen = ["hw-amd64"]
+hw-amd-chipset = ["hw-ryzen", "hw-pci"]
+hw-amd-iommu = ["hw-ryzen", "hw-pci"]
+hw-amd-telemetry = ["hw-ryzen"]
 hw-nvme = ["hw-pci"]
 hw-ahci = ["hw-pci"]
 hw-xhci = ["hw-pci"]

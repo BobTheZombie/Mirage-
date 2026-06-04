@@ -1,0 +1,25 @@
+[package]
+name = "mirage-platform"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Supervisor-facing platform orchestration policy for Mirage"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+hw-amd64 = ["mirage-amd64/hw-amd64"]
+hw-ryzen = ["hw-amd64", "mirage-ryzen/hw-ryzen"]
+hw-amd-chipset = ["hw-ryzen", "hw-pci", "mirage-amd-chipset/hw-amd-chipset"]
+hw-amd-iommu = ["hw-ryzen", "hw-pci", "mirage-amd-iommu/hw-amd-iommu"]
+hw-amd-telemetry = ["hw-ryzen", "mirage-ryzen/hw-amd-telemetry"]
+hw-pci = ["mirage-pci"]
+
+[dependencies]
+mirage-amd-chipset = { path = "../mirage-amd-chipset", optional = true }
+mirage-amd-iommu = { path = "../mirage-amd-iommu", optional = true }
+mirage-amd64 = { path = "../mirage-amd64", optional = true }
+mirage-cap = { path = "../mirage-cap" }
+mirage-ipc = { path = "../mirage-ipc" }
+mirage-pci = { path = "../mirage-pci", optional = true }
+mirage-ryzen = { path = "../mirage-ryzen", optional = true }

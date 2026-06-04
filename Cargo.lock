@@ -50,6 +50,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirage-amd-chipset"
+version = "0.1.0"
+dependencies = [
+ "mirage-cap",
+ "mirage-ipc",
+ "mirage-pci",
+ "mirage-ryzen",
+]
+
+[[package]]
+name = "mirage-amd-iommu"
+version = "0.1.0"
+dependencies = [
+ "mirage-cap",
+ "mirage-ipc",
+ "mirage-pci",
+ "mirage-ryzen",
+]
+
+[[package]]
+name = "mirage-amd64"
+version = "0.1.0"
+
+[[package]]
 name = "mirage-amdgpu"
 version = "0.1.0"
 dependencies = [
@@ -112,6 +136,26 @@ dependencies = [
 [[package]]
 name = "mirage-pci"
 version = "0.1.0"
+
+[[package]]
+name = "mirage-platform"
+version = "0.1.0"
+dependencies = [
+ "mirage-amd-chipset",
+ "mirage-amd-iommu",
+ "mirage-amd64",
+ "mirage-cap",
+ "mirage-ipc",
+ "mirage-pci",
+ "mirage-ryzen",
+]
+
+[[package]]
+name = "mirage-ryzen"
+version = "0.1.0"
+dependencies = [
+ "mirage-amd64",
+]
 
 [[package]]
 name = "mirage-storage"
