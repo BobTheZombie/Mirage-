@@ -9,9 +9,9 @@ use crate::kernel::exec::SpawnTaskRequest;
 use crate::kernel::ipc::MessagePayload;
 use crate::kernel::process::{ProcessId, ProcessPriority};
 use crate::kernel::services::registry::ServiceId as RegistryServiceId;
-use crate::kernel::{Kernel, KernelError};
+use crate::kernel::{Kernel, KernelError, ProcessExitReport};
 use crate::subkernel::{CapabilityObject, CapabilityRight, CapabilityRights, Credentials};
-use crate::supervisor::reset_spawned_service_capabilities;
+use crate::supervisor::{reset_spawned_service_capabilities, StartupState};
 
 /// Manifest module id for the echo service.
 pub const ECHO_SERVICE_MODULE_ID: &str = "echo-service";
@@ -144,6 +144,17 @@ pub struct MockServiceLaunchReport {
     pub service: EchoService,
 }
 
+/// Recovery result for a supervised mock service crash/restart cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MockServiceRecoveryReport {
+    /// Lifecycle state observed after the supervisor handled the crashed task.
+    pub crashed_state: StartupState,
+    /// Registry owner observed after stale service claims were removed.
+    pub registry_owner_after_revoke: Option<ProcessId>,
+    /// Fresh service instance admitted from the restart policy in the manifest.
+    pub restarted: MockServiceLaunchReport,
+}
+
 /// Failures from manifest-launched mock service admission and IPC dispatch.
 #[derive(Clone, Copy, Debug)]
 pub enum MockServiceLaunchError {
@@ -270,6 +281,38 @@ pub(crate) fn launch_echo_service_from_validated_manifest<
         endpoint: RegistryServiceId::EchoIpc,
         endpoint_capability_id,
         service: echo,
+    })
+}
+
+pub(crate) fn recover_echo_service_after_crash<const NPROC: usize, const MSG_DEPTH: usize>(
+    kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+    previous: &MockServiceLaunchReport,
+    service: MockManifestService<'_>,
+    exit: ProcessExitReport,
+) -> Result<MockServiceRecoveryReport, MockServiceLaunchError> {
+    if exit.pid != previous.service_pid {
+        return Err(MockServiceLaunchError::Kernel(KernelError::InvalidArgument));
+    }
+
+    // Supervisor recovery policy observes the crashed service, drops all stale
+    // authority, and removes registry claims before applying manifest restart
+    // policy. `exit_process` already removed the task domain, but these calls are
+    // deliberately idempotent to model the explicit recovery checklist.
+    let crashed_state = StartupState::Crashed;
+    kernel.revoke_task_capabilities(previous.service_pid);
+    kernel.revoke_task(previous.service_pid);
+    kernel.revoke_service_owner(previous.service_pid);
+    let registry_owner_after_revoke = kernel.service_owner(RegistryServiceId::EchoIpc);
+
+    if !service.restart_always {
+        return Err(MockServiceLaunchError::RestartPolicyUnsupported);
+    }
+
+    let restarted = launch_echo_service_from_validated_manifest(kernel, service)?;
+    Ok(MockServiceRecoveryReport {
+        crashed_state,
+        registry_owner_after_revoke,
+        restarted,
     })
 }
 
