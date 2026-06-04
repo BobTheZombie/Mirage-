@@ -3,6 +3,9 @@
 use crate::arch::x86_64::io::{inb, outb};
 use crate::kernel::device::{DeviceDriver, DeviceError, DeviceKind};
 use crate::kernel::sync::SpinLock;
+use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::subkernel::{DeviceSecurity, SecurityClass};
 
 const COM1: u16 = 0x3f8;
@@ -16,6 +19,80 @@ const DLAB: u8 = 0x80;
 const LCR_8N1: u8 = 0x03;
 const LSR_DATA_READY: u8 = 0x01;
 const LSR_TRANSMIT_EMPTY: u8 = 0x20;
+
+/// Early, allocation-free serial console for boot diagnostics.
+///
+/// This writer is intentionally mechanism-only: it performs direct programmed I/O
+/// to COM1 so early kernel code can emit milestones before the supervised device
+/// manager and logging policy exist.
+pub struct EarlyCom1;
+
+static EARLY_COM1_LOCK: SpinLock<()> = SpinLock::new(());
+static EARLY_COM1_INITIALISED: AtomicBool = AtomicBool::new(false);
+
+/// Initialise the legacy COM1 port for polling-based early output.
+///
+/// Safe to call repeatedly; the UART programming sequence runs once and does not
+/// allocate or depend on kernel device registration.
+pub fn init_early_serial() {
+    if EARLY_COM1_INITIALISED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    unsafe {
+        initialise_com1();
+    }
+}
+
+/// Write formatted text to COM1 using the early boot console.
+///
+/// Formatting is handled by `core::fmt` and does not allocate.
+pub fn early_print(args: fmt::Arguments<'_>) {
+    let _guard = EARLY_COM1_LOCK.lock();
+    init_early_serial();
+    let _ = EarlyCom1.write_fmt(args);
+}
+
+impl EarlyCom1 {
+    fn write_byte(&mut self, byte: u8) {
+        #[cfg(any(test, feature = "qfs-std"))]
+        {
+            let _ = byte;
+        }
+
+        #[cfg(not(any(test, feature = "qfs-std")))]
+        {
+            let mut spins = 0usize;
+            while unsafe { inb(COM1 + LINE_STATUS) } & LSR_TRANSMIT_EMPTY == 0 && spins < 100_000 {
+                core::hint::spin_loop();
+                spins += 1;
+            }
+            unsafe { outb(COM1 + DATA, byte) };
+        }
+    }
+}
+
+impl fmt::Write for EarlyCom1 {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for byte in s.bytes() {
+            if byte == b'\n' {
+                self.write_byte(b'\r');
+            }
+            self.write_byte(byte);
+        }
+        Ok(())
+    }
+}
+
+unsafe fn initialise_com1() {
+    outb(COM1 + INTERRUPT_ENABLE, 0x00);
+    outb(COM1 + LINE_CONTROL, DLAB);
+    outb(COM1 + DATA, 0x03); // 38400 baud divisor low byte.
+    outb(COM1 + INTERRUPT_ENABLE, 0x00);
+    outb(COM1 + LINE_CONTROL, LCR_8N1);
+    outb(COM1 + FIFO_CONTROL, 0xc7); // Enable FIFO, clear RX/TX, 14-byte threshold.
+    outb(COM1 + MODEM_CONTROL, 0x0b); // IRQs enabled, RTS/DSR set.
+}
 
 pub struct Uart16550Driver {
     state: SpinLock<UartState>,
@@ -38,15 +115,7 @@ impl Uart16550Driver {
         if state.initialised {
             return;
         }
-        unsafe {
-            outb(COM1 + INTERRUPT_ENABLE, 0x00);
-            outb(COM1 + LINE_CONTROL, DLAB);
-            outb(COM1 + DATA, 0x03); // 38400 baud divisor low byte.
-            outb(COM1 + INTERRUPT_ENABLE, 0x00);
-            outb(COM1 + LINE_CONTROL, LCR_8N1);
-            outb(COM1 + FIFO_CONTROL, 0xc7); // Enable FIFO, clear RX/TX, 14-byte threshold.
-            outb(COM1 + MODEM_CONTROL, 0x0b); // IRQs enabled, RTS/DSR set.
-        }
+        init_early_serial();
         state.initialised = true;
     }
 

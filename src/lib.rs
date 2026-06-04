@@ -30,6 +30,31 @@ pub mod stdlib;
 pub mod subkernel;
 pub mod supervisor;
 
+/// Print formatted text to the early COM1 serial console.
+///
+/// The early console is a mechanism-only diagnostic path for boot milestones;
+/// higher-level logging policy belongs above the kernel.
+#[macro_export]
+macro_rules! kprint {
+    ($($arg:tt)*) => {
+        $crate::arch::x86_64::uart16550::early_print(::core::format_args!($($arg)*));
+    };
+}
+
+/// Print a line to the early COM1 serial console.
+#[macro_export]
+macro_rules! kprintln {
+    () => {
+        $crate::kprint!("\n");
+    };
+    ($fmt:expr) => {
+        $crate::kprint!(::core::concat!($fmt, "\n"));
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        $crate::kprint!(::core::concat!($fmt, "\n"), $($arg)*);
+    };
+}
+
 #[cfg(not(any(test, feature = "qfs-std")))]
 use core::panic::PanicInfo;
 
