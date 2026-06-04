@@ -1487,6 +1487,17 @@ impl Supervisor {
         mock_service::launch_echo_service_from_validated_manifest(kernel, service)
     }
 
+    /// Recover a manifest-launched mock echo service through supervisor crash policy.
+    pub fn recover_mock_manifest_service_crash<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        previous: &mock_service::MockServiceLaunchReport,
+        service: mock_service::MockManifestService<'_>,
+        exit: ProcessExitReport,
+    ) -> Result<mock_service::MockServiceRecoveryReport, mock_service::MockServiceLaunchError> {
+        mock_service::recover_echo_service_after_crash(kernel, previous, service, exit)
+    }
+
     /// Run one echo request/reply transaction through the registered `echo.ipc` endpoint.
     pub fn dispatch_echo_request<const NPROC: usize, const MSG_DEPTH: usize>(
         &self,
@@ -2130,6 +2141,105 @@ mod tests {
         assert_eq!(
             kernel.service_owner(RegistryServiceId::EchoIpc),
             Some(restarted.service_pid)
+        );
+    }
+
+    #[test]
+    fn test_echo_service_crash_restart() {
+        let manifest =
+            mirage_boot::parse_manifest_toml(include_str!("../../boot/manifest.mock.toml"))
+                .expect("boot/manifest.mock.toml parses");
+        let plans = mirage_boot::build_service_launch_plan(&manifest)
+            .expect("boot/manifest.mock.toml validates");
+        let plan = plans
+            .iter()
+            .find(|plan| plan.module_id.as_str() == mock_service::ECHO_SERVICE_MODULE_ID)
+            .expect("echo-service launch plan exists");
+        assert_eq!(plan.restart, mirage_boot::RestartPolicy::Always);
+
+        let rights: Vec<&str> = plan.capabilities[0]
+            .rights
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let capability = mock_service::MockManifestCapability {
+            object: plan.capabilities[0].object.as_str(),
+            endpoint: plan.capabilities[0].endpoint.as_deref(),
+            rights: rights.as_slice(),
+        };
+        let capabilities = [capability];
+        let service = mock_service::MockManifestService {
+            module_id: plan.module_id.as_str(),
+            image: plan.image.as_str(),
+            restart_always: plan.restart == mirage_boot::RestartPolicy::Always,
+            capabilities: &capabilities,
+        };
+
+        let mut kernel = Kernel::<16, 8>::new();
+        kernel.bootstrap();
+        let supervisor = Supervisor::new();
+        let first = supervisor
+            .launch_mock_manifest_service(&mut kernel, service)
+            .expect("supervisor launches echo-service");
+        let old_service_pid = first.service_pid;
+        let old_endpoint_capability = first.endpoint_capability_id;
+
+        assert!(first.service.is_registered());
+        assert_eq!(first.endpoint, RegistryServiceId::EchoIpc);
+        assert_eq!(
+            kernel.service_owner(RegistryServiceId::EchoIpc),
+            Some(old_service_pid)
+        );
+
+        let caller = kernel.spawn_initial_process(Credentials::user()).unwrap();
+        let before_crash = crate::kernel::ipc::MessagePayload::from_slice(
+            SecurityClass::Internal,
+            b"echo before crash",
+        );
+        assert_eq!(
+            supervisor
+                .dispatch_echo_request(&mut kernel, &first, caller, before_crash)
+                .expect("echo IPC works before crash"),
+            before_crash
+        );
+
+        let exit = kernel
+            .exit_process(
+                old_service_pid,
+                crate::kernel::process::ExitStatus::signaled(11),
+            )
+            .expect("crashed echo-service produces an exit report");
+        let recovery = supervisor
+            .recover_mock_manifest_service_crash(&mut kernel, &first, service, exit)
+            .expect("restart=always relaunches echo-service");
+
+        assert_eq!(recovery.crashed_state, StartupState::Crashed);
+        assert_eq!(recovery.registry_owner_after_revoke, None);
+        assert!(matches!(
+            kernel.revoke_task_capability(old_endpoint_capability),
+            Err(KernelError::SecurityViolation(
+                IsolationError::CapabilityMissing
+            ))
+        ));
+
+        let restarted = recovery.restarted;
+        assert_ne!(restarted.service_pid, old_service_pid);
+        assert_ne!(restarted.endpoint_capability_id, old_endpoint_capability);
+        assert!(restarted.service.is_registered());
+        assert_eq!(
+            kernel.service_owner(RegistryServiceId::EchoIpc),
+            Some(restarted.service_pid)
+        );
+
+        let after_restart = crate::kernel::ipc::MessagePayload::from_slice(
+            SecurityClass::Internal,
+            b"echo after restart",
+        );
+        assert_eq!(
+            supervisor
+                .dispatch_echo_request(&mut kernel, &restarted, caller, after_restart)
+                .expect("echo IPC works after restart"),
+            after_restart
         );
     }
 
