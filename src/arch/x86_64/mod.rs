@@ -3,7 +3,6 @@
 //! This module owns the processor-facing initialization sequence before Mirage hands
 //! control to higher-level kernel subsystems.
 
-use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
@@ -227,10 +226,32 @@ fn prepare_core_entry_state(core_index: usize) {
     msr::write_kernel_gs_base(per_cpu_state_ptr(index));
 }
 
+/// Return the number of hardware timer interrupts observed by the architecture layer.
+pub fn timer_ticks() -> u64 {
+    idt::timer_ticks()
+}
+
+/// Report whether a new hardware timer tick needs kernel-level dispatch.
+pub fn timer_tick_pending(last_observed_tick: &mut u64) -> bool {
+    let current_tick = timer_ticks();
+    if current_tick != *last_observed_tick {
+        *last_observed_tick = current_tick;
+        true
+    } else {
+        false
+    }
+}
+
+/// Halt the CPU while the boot core is idle until the next interrupt arrives.
+#[inline(always)]
+pub fn idle_halt() {
+    interrupts::halt();
+}
+
 /// Hint to the CPU that the current core is in a spin loop.
 #[inline(always)]
 pub fn cpu_relax() {
-    spin_loop();
+    core::hint::spin_loop();
 }
 
 /// Halt the CPU after panic diagnostics are written to COM1.

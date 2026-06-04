@@ -28,8 +28,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
     let _ = kernel.bootstrap_userspace_init();
 
     mirage::kprintln!("Mirage reached idle loop");
+    let mut observed_timer_ticks = x86_64::timer_ticks();
     loop {
-        kernel.tick();
-        x86_64::cpu_relax();
+        if x86_64::timer_tick_pending(&mut observed_timer_ticks) {
+            kernel.tick();
+        }
+        x86_64::idle_halt();
     }
 }
