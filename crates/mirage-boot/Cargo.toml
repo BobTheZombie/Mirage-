@@ -1,0 +1,11 @@
+[package]
+name = "mirage-boot"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Boot manifest policy data for GNU/Mirage supervised module startup"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

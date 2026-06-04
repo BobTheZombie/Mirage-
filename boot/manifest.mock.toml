@@ -1,0 +1,12 @@
+[[modules]]
+id = "echo-service"
+kind = "Service"
+image = "/boot/services/echo-service.mmod"
+restart = "always"
+
+[modules.signature]
+value = "mock-valid"
+
+[[modules.capabilities]]
+object = "IPC_ENDPOINT"
+rights = ["SEND", "RECEIVE"]
