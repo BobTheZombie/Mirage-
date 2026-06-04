@@ -11,6 +11,33 @@ use alloc::vec::Vec;
 /// The byte order is the order stored in linear framebuffer memory. For `Xrgb`,
 /// the unused byte is written as zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct PixelMasks {
+    pub red: u32,
+    pub green: u32,
+    pub blue: u32,
+    pub reserved: u32,
+}
+
+impl PixelMasks {
+    pub const fn new(red: u32, green: u32, blue: u32, reserved: u32) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            reserved,
+        }
+    }
+
+    pub const fn rgb888() -> Self {
+        Self::new(0x00ff_0000, 0x0000_ff00, 0x0000_00ff, 0xff00_0000)
+    }
+
+    pub const fn bgr888() -> Self {
+        Self::new(0x0000_00ff, 0x0000_ff00, 0x00ff_0000, 0xff00_0000)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum PixelFormat {
     /// Red, green, blue byte order. Supported at 24 or 32 bits per pixel.
     Rgb,
@@ -18,6 +45,8 @@ pub enum PixelFormat {
     Bgr,
     /// Unused byte, red, green, blue byte order. Supported at 32 bits per pixel.
     Xrgb,
+    /// Bit-mask described packed pixels supplied by boot firmware.
+    Masks(PixelMasks),
 }
 
 impl PixelFormat {
@@ -25,6 +54,7 @@ impl PixelFormat {
         match self {
             Self::Rgb | Self::Bgr => bits_per_pixel == 24 || bits_per_pixel == 32,
             Self::Xrgb => bits_per_pixel == 32,
+            Self::Masks(_) => bits_per_pixel <= 32 && bits_per_pixel >= 8,
         }
     }
 }
@@ -189,14 +219,14 @@ pub enum FramebufferError {
     OutOfBounds,
 }
 
-/// Linear framebuffer backed by mock memory.
+/// Linear framebuffer backed by mock memory for tests and display-service demos.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Framebuffer {
+pub struct MockFramebuffer {
     mode: FramebufferMode,
     memory: Vec<u8>,
 }
 
-impl Framebuffer {
+impl MockFramebuffer {
     pub fn new(mode: FramebufferMode) -> Result<Self, FramebufferError> {
         let len = mode.framebuffer_len()?;
         Ok(Self {
@@ -263,26 +293,41 @@ impl Framebuffer {
         height: usize,
         color: (u8, u8, u8),
     ) -> Result<(), FramebufferError> {
-        if width == 0 || height == 0 {
-            return Ok(());
-        }
+        validate_rect(self.mode, x, y, width, height)?;
 
-        let end_x = x.checked_add(width).ok_or(FramebufferError::SizeOverflow)?;
-        let end_y = y
-            .checked_add(height)
-            .ok_or(FramebufferError::SizeOverflow)?;
-        if x >= self.mode.width()
-            || y >= self.mode.height()
-            || end_x > self.mode.width()
-            || end_y > self.mode.height()
-        {
-            return Err(FramebufferError::OutOfBounds);
-        }
-
+        let end_x = x + width;
+        let end_y = y + height;
         for row in y..end_y {
             for column in x..end_x {
                 let offset = self.mode.pixel_offset(column, row)?;
-                self.write_pixel_at_offset(offset, color);
+                write_pixel_at_offset(self.mode, &mut self.memory, offset, color);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn blit(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        pixels: &[(u8, u8, u8)],
+    ) -> Result<(), FramebufferError> {
+        validate_rect(self.mode, x, y, width, height)?;
+        let required_pixels = width
+            .checked_mul(height)
+            .ok_or(FramebufferError::SizeOverflow)?;
+        if pixels.len() < required_pixels {
+            return Err(FramebufferError::BufferTooSmall);
+        }
+
+        for row in 0..height {
+            for column in 0..width {
+                let offset = self.mode.pixel_offset(x + column, y + row)?;
+                let color = pixels[row * width + column];
+                write_pixel_at_offset(self.mode, &mut self.memory, offset, color);
             }
         }
 
@@ -290,31 +335,384 @@ impl Framebuffer {
     }
 
     fn write_pixel_at_offset(&mut self, offset: usize, color: (u8, u8, u8)) {
-        let (red, green, blue) = color;
-        match self.mode.pixel_format() {
-            PixelFormat::Rgb => {
-                self.memory[offset] = red;
-                self.memory[offset + 1] = green;
-                self.memory[offset + 2] = blue;
-                if self.mode.bytes_per_pixel() == 4 {
-                    self.memory[offset + 3] = 0;
-                }
-            }
-            PixelFormat::Bgr => {
-                self.memory[offset] = blue;
-                self.memory[offset + 1] = green;
-                self.memory[offset + 2] = red;
-                if self.mode.bytes_per_pixel() == 4 {
-                    self.memory[offset + 3] = 0;
-                }
-            }
-            PixelFormat::Xrgb => {
-                self.memory[offset] = 0;
-                self.memory[offset + 1] = red;
-                self.memory[offset + 2] = green;
-                self.memory[offset + 3] = blue;
+        write_pixel_at_offset(self.mode, &mut self.memory, offset, color);
+    }
+}
+
+fn validate_rect(
+    mode: FramebufferMode,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Result<(), FramebufferError> {
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
+
+    let end_x = x.checked_add(width).ok_or(FramebufferError::SizeOverflow)?;
+    let end_y = y
+        .checked_add(height)
+        .ok_or(FramebufferError::SizeOverflow)?;
+    if x >= mode.width() || y >= mode.height() || end_x > mode.width() || end_y > mode.height() {
+        return Err(FramebufferError::OutOfBounds);
+    }
+
+    Ok(())
+}
+
+fn write_pixel_at_offset(
+    mode: FramebufferMode,
+    memory: &mut [u8],
+    offset: usize,
+    color: (u8, u8, u8),
+) {
+    let (red, green, blue) = color;
+    match mode.pixel_format() {
+        PixelFormat::Rgb => {
+            memory[offset] = red;
+            memory[offset + 1] = green;
+            memory[offset + 2] = blue;
+            if mode.bytes_per_pixel() == 4 {
+                memory[offset + 3] = 0;
             }
         }
+        PixelFormat::Bgr => {
+            memory[offset] = blue;
+            memory[offset + 1] = green;
+            memory[offset + 2] = red;
+            if mode.bytes_per_pixel() == 4 {
+                memory[offset + 3] = 0;
+            }
+        }
+        PixelFormat::Xrgb => {
+            memory[offset] = 0;
+            memory[offset + 1] = red;
+            memory[offset + 2] = green;
+            memory[offset + 3] = blue;
+        }
+        PixelFormat::Masks(masks) => {
+            let packed = encode_masked_pixel(masks, red, green, blue);
+            let bytes = packed.to_le_bytes();
+            let bytes_per_pixel = mode.bytes_per_pixel();
+            memory[offset..offset + bytes_per_pixel].copy_from_slice(&bytes[..bytes_per_pixel]);
+        }
+    }
+}
+
+fn encode_masked_pixel(masks: PixelMasks, red: u8, green: u8, blue: u8) -> u32 {
+    encode_masked_channel(masks.red, red)
+        | encode_masked_channel(masks.green, green)
+        | encode_masked_channel(masks.blue, blue)
+}
+
+fn encode_masked_channel(mask: u32, value: u8) -> u32 {
+    if mask == 0 {
+        return 0;
+    }
+
+    let shift = mask.trailing_zeros();
+    let width = mask.count_ones();
+    let max = if width >= u32::BITS {
+        u32::MAX
+    } else {
+        (1u32 << width) - 1
+    };
+    let scaled = (u32::from(value) * max + 127) / 255;
+    (scaled << shift) & mask
+}
+
+#[cfg(feature = "hw-framebuffer")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct BootFramebuffer {
+    pub physical_address: u64,
+    pub width: usize,
+    pub height: usize,
+    pub pitch: usize,
+    pub bits_per_pixel: usize,
+    pub pixel_format: PixelFormat,
+    pub red_mask: u32,
+    pub green_mask: u32,
+    pub blue_mask: u32,
+    pub reserved_mask: u32,
+}
+
+#[cfg(feature = "hw-framebuffer")]
+impl BootFramebuffer {
+    pub const fn masks(self) -> PixelMasks {
+        PixelMasks::new(
+            self.red_mask,
+            self.green_mask,
+            self.blue_mask,
+            self.reserved_mask,
+        )
+    }
+
+    pub const fn mode(self) -> Result<FramebufferMode, FramebufferError> {
+        FramebufferMode::new(
+            self.width,
+            self.height,
+            self.pitch,
+            self.bits_per_pixel,
+            self.pixel_format,
+        )
+    }
+}
+
+#[cfg(feature = "hw-framebuffer")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct PhysicalFramebuffer {
+    boot_info: BootFramebuffer,
+    mode: FramebufferMode,
+    byte_len: usize,
+}
+
+#[cfg(feature = "hw-framebuffer")]
+impl PhysicalFramebuffer {
+    pub const fn from_boot_info(boot_info: BootFramebuffer) -> Result<Self, FramebufferError> {
+        let mode = match boot_info.mode() {
+            Ok(mode) => mode,
+            Err(error) => return Err(error),
+        };
+        let byte_len = match mode.framebuffer_len() {
+            Ok(value) => value,
+            Err(error) => return Err(error),
+        };
+
+        Ok(Self {
+            boot_info,
+            mode,
+            byte_len,
+        })
+    }
+
+    pub const fn boot_info(&self) -> BootFramebuffer {
+        self.boot_info
+    }
+
+    pub const fn physical_address(&self) -> u64 {
+        self.boot_info.physical_address
+    }
+
+    pub const fn mode(&self) -> FramebufferMode {
+        self.mode
+    }
+
+    pub const fn info(&self) -> FramebufferInfo {
+        FramebufferInfo {
+            mode: self.mode,
+            byte_len: self.byte_len,
+        }
+    }
+
+    pub fn map<'map>(
+        &self,
+        memory: &'map mut [u8],
+    ) -> Result<FramebufferMapping<'map>, FramebufferError> {
+        FramebufferInfo::new(self.mode, memory.len())?;
+        Ok(FramebufferMapping {
+            info: self.info(),
+            memory,
+        })
+    }
+}
+
+#[cfg(feature = "hw-framebuffer")]
+impl MockFramebuffer {
+    pub const fn from_boot_info(
+        boot_info: BootFramebuffer,
+    ) -> Result<PhysicalFramebuffer, FramebufferError> {
+        PhysicalFramebuffer::from_boot_info(boot_info)
+    }
+}
+
+#[cfg(feature = "hw-framebuffer")]
+#[derive(Debug)]
+pub struct FramebufferMapping<'map> {
+    info: FramebufferInfo,
+    memory: &'map mut [u8],
+}
+
+#[cfg(feature = "hw-framebuffer")]
+impl<'map> FramebufferMapping<'map> {
+    pub const fn info(&self) -> FramebufferInfo {
+        self.info
+    }
+
+    pub const fn mode(&self) -> FramebufferMode {
+        self.info.mode()
+    }
+
+    pub fn memory(&self) -> &[u8] {
+        self.memory
+    }
+
+    pub fn memory_mut(&mut self) -> &mut [u8] {
+        self.memory
+    }
+
+    pub fn writer(&mut self) -> FramebufferWriter<'_> {
+        FramebufferWriter {
+            mode: self.mode(),
+            memory: self.memory,
+        }
+    }
+
+    pub fn clear(&mut self, color: (u8, u8, u8)) {
+        self.writer().clear(color);
+    }
+
+    pub fn put_pixel(
+        &mut self,
+        x: usize,
+        y: usize,
+        color: (u8, u8, u8),
+    ) -> Result<(), FramebufferError> {
+        self.writer().put_pixel(x, y, color)
+    }
+
+    pub fn blit(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        pixels: &[(u8, u8, u8)],
+    ) -> Result<(), FramebufferError> {
+        self.writer().blit(x, y, width, height, pixels)
+    }
+}
+
+#[cfg(feature = "hw-framebuffer")]
+#[derive(Debug)]
+pub struct FramebufferWriter<'map> {
+    mode: FramebufferMode,
+    memory: &'map mut [u8],
+}
+
+#[cfg(feature = "hw-framebuffer")]
+impl<'map> FramebufferWriter<'map> {
+    pub const fn mode(&self) -> FramebufferMode {
+        self.mode
+    }
+
+    pub fn clear(&mut self, color: (u8, u8, u8)) {
+        for y in 0..self.mode.height() {
+            for x in 0..self.mode.width() {
+                if let Ok(offset) = self.mode.pixel_offset(x, y) {
+                    write_pixel_at_offset(self.mode, self.memory, offset, color);
+                }
+            }
+        }
+    }
+
+    pub fn put_pixel(
+        &mut self,
+        x: usize,
+        y: usize,
+        color: (u8, u8, u8),
+    ) -> Result<(), FramebufferError> {
+        let offset = self.mode.pixel_offset(x, y)?;
+        write_pixel_at_offset(self.mode, self.memory, offset, color);
+        Ok(())
+    }
+
+    pub fn draw_rectangle(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: (u8, u8, u8),
+    ) -> Result<(), FramebufferError> {
+        validate_rect(self.mode, x, y, width, height)?;
+        for row in y..y + height {
+            for column in x..x + width {
+                let offset = self.mode.pixel_offset(column, row)?;
+                write_pixel_at_offset(self.mode, self.memory, offset, color);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn blit(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        pixels: &[(u8, u8, u8)],
+    ) -> Result<(), FramebufferError> {
+        validate_rect(self.mode, x, y, width, height)?;
+        let required_pixels = width
+            .checked_mul(height)
+            .ok_or(FramebufferError::SizeOverflow)?;
+        if pixels.len() < required_pixels {
+            return Err(FramebufferError::BufferTooSmall);
+        }
+
+        for row in 0..height {
+            for column in 0..width {
+                let offset = self.mode.pixel_offset(x + column, y + row)?;
+                write_pixel_at_offset(self.mode, self.memory, offset, pixels[row * width + column]);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Backwards-compatible name for the memory-backed framebuffer backend.
+///
+/// New code that intentionally wants the in-memory test backend should use
+/// [`MockFramebuffer`] so it is not confused with bootloader-provided physical
+/// framebuffers behind the `hw-framebuffer` feature.
+pub type Framebuffer = MockFramebuffer;
+
+pub trait FramebufferTarget {
+    fn mode(&self) -> FramebufferMode;
+
+    fn draw_rectangle(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: (u8, u8, u8),
+    ) -> Result<(), FramebufferError>;
+}
+
+impl FramebufferTarget for MockFramebuffer {
+    fn mode(&self) -> FramebufferMode {
+        self.mode()
+    }
+
+    fn draw_rectangle(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: (u8, u8, u8),
+    ) -> Result<(), FramebufferError> {
+        MockFramebuffer::draw_rectangle(self, x, y, width, height, color)
+    }
+}
+
+#[cfg(feature = "hw-framebuffer")]
+impl<'map> FramebufferTarget for FramebufferWriter<'map> {
+    fn mode(&self) -> FramebufferMode {
+        self.mode()
+    }
+
+    fn draw_rectangle(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: (u8, u8, u8),
+    ) -> Result<(), FramebufferError> {
+        FramebufferWriter::draw_rectangle(self, x, y, width, height, color)
     }
 }
 
@@ -324,19 +722,19 @@ impl Framebuffer {
 /// blocks rather than embedding a production font renderer in the kernel-facing
 /// framebuffer crate.
 #[derive(Debug)]
-pub struct FramebufferConsole<'fb> {
-    framebuffer: &'fb mut Framebuffer,
+pub struct FramebufferConsole<'fb, F: FramebufferTarget + ?Sized = MockFramebuffer> {
+    framebuffer: &'fb mut F,
     cursor_column: usize,
     cursor_row: usize,
     foreground: (u8, u8, u8),
     background: (u8, u8, u8),
 }
 
-impl<'fb> FramebufferConsole<'fb> {
+impl<'fb, F: FramebufferTarget + ?Sized> FramebufferConsole<'fb, F> {
     pub const CELL_WIDTH: usize = 8;
     pub const CELL_HEIGHT: usize = 16;
 
-    pub fn new(framebuffer: &'fb mut Framebuffer) -> Self {
+    pub fn new(framebuffer: &'fb mut F) -> Self {
         Self {
             framebuffer,
             cursor_column: 0,
@@ -523,5 +921,118 @@ mod tests {
             framebuffer.draw_rectangle(1, 0, usize::MAX, 1, (1, 1, 1)),
             Err(FramebufferError::SizeOverflow)
         );
+    }
+
+    #[test]
+    fn mock_framebuffer_name_is_available() {
+        let mode = rgb_mode(1, 1, 3);
+        let framebuffer = MockFramebuffer::new(mode).unwrap();
+
+        assert_eq!(framebuffer.mode(), mode);
+    }
+
+    #[test]
+    fn blit_checks_bounds_and_buffer_size() {
+        let mode = rgb_mode(3, 3, 12);
+        let mut framebuffer = MockFramebuffer::new(mode).unwrap();
+        let pixels = [(1, 2, 3), (4, 5, 6), (7, 8, 9), (10, 11, 12)];
+
+        assert_eq!(framebuffer.blit(1, 1, 2, 2, &pixels), Ok(()));
+        assert_eq!(&framebuffer.memory()[15..18], &[1, 2, 3]);
+        assert_eq!(&framebuffer.memory()[18..21], &[4, 5, 6]);
+        assert_eq!(
+            framebuffer.blit(2, 2, 2, 2, &pixels),
+            Err(FramebufferError::OutOfBounds)
+        );
+        assert_eq!(
+            framebuffer.blit(0, 0, 2, 2, &pixels[..3]),
+            Err(FramebufferError::BufferTooSmall)
+        );
+    }
+
+    #[cfg(feature = "hw-framebuffer")]
+    fn boot_framebuffer() -> BootFramebuffer {
+        BootFramebuffer {
+            physical_address: 0xfeed_cafe,
+            width: 3,
+            height: 2,
+            pitch: 16,
+            bits_per_pixel: 32,
+            pixel_format: PixelFormat::Masks(PixelMasks::rgb888()),
+            red_mask: PixelMasks::rgb888().red,
+            green_mask: PixelMasks::rgb888().green,
+            blue_mask: PixelMasks::rgb888().blue,
+            reserved_mask: PixelMasks::rgb888().reserved,
+        }
+    }
+
+    #[cfg(feature = "hw-framebuffer")]
+    #[test]
+    fn boot_framebuffer_maps_physical_description_without_linux_api() {
+        let physical = Framebuffer::from_boot_info(boot_framebuffer()).unwrap();
+        let mut memory = vec![0; physical.info().byte_len()];
+        let mapping = physical.map(&mut memory).unwrap();
+
+        assert_eq!(physical.physical_address(), 0xfeed_cafe);
+        assert_eq!(mapping.mode().pixel_offset(2, 1), Ok(24));
+    }
+
+    #[cfg(feature = "hw-framebuffer")]
+    #[test]
+    fn mapping_converts_masked_pixels_and_preserves_pitch_padding() {
+        let physical = Framebuffer::from_boot_info(boot_framebuffer()).unwrap();
+        let mut memory = vec![0xaa; physical.info().byte_len()];
+        let mut mapping = physical.map(&mut memory).unwrap();
+
+        mapping.clear((0, 0, 0));
+        assert_eq!(&mapping.memory()[12..16], &[0xaa, 0xaa, 0xaa, 0xaa]);
+        mapping.put_pixel(1, 1, (0xff, 0x80, 0x00)).unwrap();
+
+        assert_eq!(&mapping.memory()[20..24], &[0x00, 0x80, 0xff, 0x00]);
+    }
+
+    #[cfg(feature = "hw-framebuffer")]
+    #[test]
+    fn mapping_bounds_checks_pixel_and_blit_operations() {
+        let physical = Framebuffer::from_boot_info(boot_framebuffer()).unwrap();
+        let mut memory = vec![0; physical.info().byte_len()];
+        let mut mapping = physical.map(&mut memory).unwrap();
+        let pixels = [(1, 2, 3), (4, 5, 6)];
+
+        assert_eq!(
+            mapping.put_pixel(3, 0, (1, 2, 3)),
+            Err(FramebufferError::OutOfBounds)
+        );
+        assert_eq!(
+            mapping.blit(2, 1, 2, 1, &pixels),
+            Err(FramebufferError::OutOfBounds)
+        );
+        assert_eq!(
+            mapping.blit(0, 0, 2, 1, &pixels[..1]),
+            Err(FramebufferError::BufferTooSmall)
+        );
+    }
+
+    #[cfg(feature = "hw-framebuffer")]
+    #[test]
+    fn console_writes_to_memory_backed_mapping() {
+        let boot_info = BootFramebuffer {
+            width: 16,
+            height: 16,
+            pitch: 64,
+            ..boot_framebuffer()
+        };
+        let physical = Framebuffer::from_boot_info(boot_info).unwrap();
+        let mut memory = vec![0; physical.info().byte_len()];
+        let mut mapping = physical.map(&mut memory).unwrap();
+
+        {
+            let mut writer = mapping.writer();
+            let mut console = FramebufferConsole::new(&mut writer);
+            assert_eq!(console.write_str("A\nB"), Ok(3));
+            assert_eq!(console.cursor(), (1, 0));
+        }
+
+        assert!(mapping.memory().iter().any(|byte| *byte == 0xff));
     }
 }
