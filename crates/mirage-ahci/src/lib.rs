@@ -125,14 +125,14 @@ impl From<AhciError> for BlockError {
 
 /// AHCI command-list header metadata used by the mock command scheduler.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AhciCommandHeader {
+pub struct MockAhciCommandHeader {
     pub command_fis_len_dwords: u8,
     pub write: bool,
     pub prdt_length: u16,
     pub prdt_byte_count: u32,
 }
 
-impl AhciCommandHeader {
+impl MockAhciCommandHeader {
     pub const fn new(
         command_fis_len_dwords: u8,
         write: bool,
@@ -158,13 +158,13 @@ impl AhciCommandHeader {
 
 /// Mock physical-region descriptor used by an AHCI command table.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AhciPrdtEntry {
+pub struct MockAhciPrdtEntry {
     pub dma_region: u64,
     pub byte_count: u32,
     pub interrupt_on_completion: bool,
 }
 
-impl AhciPrdtEntry {
+impl MockAhciPrdtEntry {
     pub const fn new(dma_region: u64, byte_count: u32, interrupt_on_completion: bool) -> Self {
         Self {
             dma_region,
@@ -176,14 +176,14 @@ impl AhciPrdtEntry {
 
 /// AHCI command table containing a command FIS and mock PRDT entries.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AhciCommandTable {
+pub struct MockAhciCommandTable {
     pub command_fis: Fis,
     pub atapi_command: [u8; 16],
-    pub prdt_entries: Vec<AhciPrdtEntry>,
+    pub prdt_entries: Vec<MockAhciPrdtEntry>,
 }
 
-impl AhciCommandTable {
-    pub fn new(command_fis: Fis, prdt_entries: Vec<AhciPrdtEntry>) -> Self {
+impl MockAhciCommandTable {
+    pub fn new(command_fis: Fis, prdt_entries: Vec<MockAhciPrdtEntry>) -> Self {
         Self {
             command_fis,
             atapi_command: [0; 16],
@@ -303,8 +303,8 @@ pub struct AhciPort {
     endpoint: EndpointId,
     implemented: bool,
     device: Option<SataDevice>,
-    command_headers: Vec<AhciCommandHeader>,
-    command_tables: Vec<AhciCommandTable>,
+    command_headers: Vec<MockAhciCommandHeader>,
+    command_tables: Vec<MockAhciCommandTable>,
     received_fis: Option<Fis>,
 }
 
@@ -349,11 +349,11 @@ impl AhciPort {
         self.device.as_ref()
     }
 
-    pub fn command_headers(&self) -> &[AhciCommandHeader] {
+    pub fn command_headers(&self) -> &[MockAhciCommandHeader] {
         &self.command_headers
     }
 
-    pub fn command_tables(&self) -> &[AhciCommandTable] {
+    pub fn command_tables(&self) -> &[MockAhciCommandTable] {
         &self.command_tables
     }
 
@@ -364,10 +364,11 @@ impl AhciPort {
             lba: Lba::new(0),
             sector_count: SectorCount::new(1),
         };
-        self.command_headers.push(AhciCommandHeader::read(1, 512));
-        self.command_tables.push(AhciCommandTable::new(
+        self.command_headers
+            .push(MockAhciCommandHeader::read(1, 512));
+        self.command_tables.push(MockAhciCommandTable::new(
             fis,
-            vec![AhciPrdtEntry::new(dma_region, 512, true)],
+            vec![MockAhciPrdtEntry::new(dma_region, 512, true)],
         ));
         self.received_fis = Some(Fis::RegisterDeviceToHost {
             status: 0x50,
@@ -380,7 +381,7 @@ impl AhciPort {
 
 /// Mock AHCI controller service state.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AhciController {
+pub struct MockAhciController {
     id: AhciControllerId,
     resources: AhciHardwareResources,
     authority: CapabilitySet,
@@ -388,7 +389,7 @@ pub struct AhciController {
     state: BlockDeviceState,
 }
 
-impl AhciController {
+impl MockAhciController {
     pub fn new(
         id: AhciControllerId,
         resources: AhciHardwareResources,
@@ -446,7 +447,7 @@ impl AhciController {
         Ok(discovered)
     }
 
-    pub fn register_block_devices(mut self) -> Result<Vec<AhciBlockDevice>, AhciError> {
+    pub fn register_block_devices(mut self) -> Result<Vec<MockAhciBlockDevice>, AhciError> {
         self.check_hardware_authority()?;
         self.state.ensure_available()?;
         let mut devices = Vec::new();
@@ -455,7 +456,7 @@ impl AhciController {
                 continue;
             }
             if let Some(device) = port.device {
-                devices.push(AhciBlockDevice::new(
+                devices.push(MockAhciBlockDevice::new(
                     self.id,
                     port.id,
                     self.resources,
@@ -475,7 +476,7 @@ impl AhciController {
 
 /// BlockDevice adapter for a single SATA device behind one AHCI port.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AhciBlockDevice {
+pub struct MockAhciBlockDevice {
     controller_id: AhciControllerId,
     port_id: AhciPortId,
     resources: AhciHardwareResources,
@@ -484,7 +485,7 @@ pub struct AhciBlockDevice {
     state: BlockDeviceState,
 }
 
-impl AhciBlockDevice {
+impl MockAhciBlockDevice {
     pub const fn new(
         controller_id: AhciControllerId,
         port_id: AhciPortId,
@@ -522,7 +523,7 @@ impl AhciBlockDevice {
     }
 }
 
-impl BlockDevice for AhciBlockDevice {
+impl BlockDevice for MockAhciBlockDevice {
     fn info(&self) -> BlockDeviceInfo {
         self.device.info()
     }
@@ -606,6 +607,614 @@ const fn mock_serial_number() -> [u8; 20] {
     serial_number
 }
 
+#[cfg(feature = "hw-ahci")]
+pub mod hw_ahci {
+    use super::*;
+    use mirage_pci::PciDevice;
+
+    const AHCI_BAR: usize = 5;
+    const DEFAULT_POLL_TICKS: u32 = 64;
+    pub const SATA_SIG_ATA: u32 = 0x0000_0101;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum AhciHwError {
+        Capability(CapabilityError),
+        NotAhciDevice,
+        MissingMmioBar,
+        PortNotFound,
+        NoDevice,
+        InvalidSlot,
+        CommandListFull,
+        Timeout { operation: &'static str, ticks: u32 },
+        TaskFileError { status: u8, error: u8 },
+        BufferSizeMismatch,
+        OutOfBounds,
+        ReadOnly,
+        Offline,
+    }
+    impl From<CapabilityError> for AhciHwError {
+        fn from(error: CapabilityError) -> Self {
+            Self::Capability(error)
+        }
+    }
+    impl From<BlockError> for AhciHwError {
+        fn from(error: BlockError) -> Self {
+            match error {
+                BlockError::BufferSizeMismatch => Self::BufferSizeMismatch,
+                BlockError::OutOfBounds | BlockError::EmptyRange | BlockError::RangeOverflow => {
+                    Self::OutOfBounds
+                }
+                BlockError::ReadOnly => Self::ReadOnly,
+                BlockError::DeviceOffline | BlockError::DeviceFaulted => Self::Offline,
+                _ => Self::TaskFileError {
+                    status: 0x51,
+                    error: 0x04,
+                },
+            }
+        }
+    }
+    impl From<AhciHwError> for BlockError {
+        fn from(error: AhciHwError) -> Self {
+            match error {
+                AhciHwError::BufferSizeMismatch => Self::BufferSizeMismatch,
+                AhciHwError::OutOfBounds => Self::OutOfBounds,
+                AhciHwError::ReadOnly => Self::ReadOnly,
+                AhciHwError::Offline => Self::DeviceOffline,
+                _ => Self::Io,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AhciHbaMemory {
+        pub mmio_base: u64,
+        pub mmio_length: u64,
+        pub host_capabilities: u32,
+        pub global_host_control: u32,
+        pub ports_implemented: u32,
+    }
+    impl AhciHbaMemory {
+        pub const fn new(mmio_base: u64, mmio_length: u64, ports_implemented: u32) -> Self {
+            Self {
+                mmio_base,
+                mmio_length,
+                host_capabilities: 0,
+                global_host_control: 0,
+                ports_implemented,
+            }
+        }
+        pub const fn port_implemented(&self, port: AhciPortId) -> bool {
+            (self.ports_implemented & (1u32 << port.get())) != 0
+        }
+        pub fn enable(&mut self) {
+            self.global_host_control |= 1 << 31;
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AhciPortRegisters {
+        pub id: AhciPortId,
+        pub command_list_base: u64,
+        pub fis_base: u64,
+        pub interrupt_status: u32,
+        pub command_status: u32,
+        pub task_file_data: u32,
+        pub signature: SataSignature,
+        pub sata_status: u32,
+        pub command_issue: u32,
+    }
+    impl AhciPortRegisters {
+        pub const fn new(id: AhciPortId, signature: SataSignature) -> Self {
+            Self {
+                id,
+                command_list_base: 0,
+                fis_base: 0,
+                interrupt_status: 0,
+                command_status: 0,
+                task_file_data: 0,
+                signature,
+                sata_status: 0x133,
+                command_issue: 0,
+            }
+        }
+        pub const fn device_present(&self) -> bool {
+            (self.sata_status & 0x0f) == 0x03 && self.signature.is_ata()
+        }
+        pub fn issue_slot(&mut self, slot: u8) -> Result<(), AhciHwError> {
+            if slot >= 32 {
+                return Err(AhciHwError::InvalidSlot);
+            }
+            self.command_issue |= 1u32 << slot;
+            Ok(())
+        }
+        pub fn complete_slot(&mut self, slot: u8) {
+            self.command_issue &= !(1u32 << slot);
+            self.interrupt_status |= 1;
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct SataSignature(pub u32);
+    impl SataSignature {
+        pub const ATA: Self = Self(SATA_SIG_ATA);
+        pub const ATAPI: Self = Self(0xeb14_0101);
+        pub const PORT_MULTIPLIER: Self = Self(0x9669_0101);
+        pub const fn is_ata(self) -> bool {
+            self.0 == SATA_SIG_ATA
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct AhciPrdtEntry {
+        pub data_base: u64,
+        pub byte_count: u32,
+        pub interrupt_on_completion: bool,
+    }
+    impl AhciPrdtEntry {
+        pub const fn new(data_base: u64, byte_count: u32, interrupt_on_completion: bool) -> Self {
+            Self {
+                data_base,
+                byte_count,
+                interrupt_on_completion,
+            }
+        }
+        pub fn encode(self) -> [u32; 4] {
+            [
+                self.data_base as u32,
+                (self.data_base >> 32) as u32,
+                0,
+                (self.byte_count.saturating_sub(1) & 0x3f_ffff)
+                    | ((self.interrupt_on_completion as u32) << 31),
+            ]
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct FisRegisterH2D {
+        pub command: AtaCommand,
+        pub lba: Lba,
+        pub sector_count: SectorCount,
+        pub write: bool,
+    }
+    impl FisRegisterH2D {
+        pub const fn new(
+            command: AtaCommand,
+            lba: Lba,
+            sector_count: SectorCount,
+            write: bool,
+        ) -> Self {
+            Self {
+                command,
+                lba,
+                sector_count,
+                write,
+            }
+        }
+        pub fn encode(&self) -> [u8; 20] {
+            let mut fis = [0u8; 20];
+            fis[0] = 0x27;
+            fis[1] = 0x80;
+            fis[2] = match self.command {
+                AtaCommand::IdentifyDevice => 0xec,
+                AtaCommand::ReadDmaExt => 0x25,
+                AtaCommand::WriteDmaExt => 0x35,
+                AtaCommand::FlushCacheExt => 0xea,
+            };
+            let lba = self.lba.get();
+            fis[4] = lba as u8;
+            fis[5] = (lba >> 8) as u8;
+            fis[6] = (lba >> 16) as u8;
+            fis[7] = 1 << 6;
+            fis[8] = (lba >> 24) as u8;
+            fis[9] = (lba >> 32) as u8;
+            fis[10] = (lba >> 40) as u8;
+            fis[12] = self.sector_count.get() as u8;
+            fis[13] = (self.sector_count.get() >> 8) as u8;
+            fis
+        }
+    }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct FisRegisterD2H {
+        pub status: u8,
+        pub error: u8,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AhciCommandHeader {
+        pub fis_len_dwords: u8,
+        pub write: bool,
+        pub prdt_length: u16,
+        pub prdt_byte_count: u32,
+        pub command_table_base: u64,
+    }
+    impl AhciCommandHeader {
+        pub const fn new(
+            write: bool,
+            prdt_length: u16,
+            prdt_byte_count: u32,
+            command_table_base: u64,
+        ) -> Self {
+            Self {
+                fis_len_dwords: 5,
+                write,
+                prdt_length,
+                prdt_byte_count,
+                command_table_base,
+            }
+        }
+        pub fn flags(&self) -> u16 {
+            u16::from(self.fis_len_dwords) | ((self.write as u16) << 6)
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AhciCommandTable {
+        pub command_fis: FisRegisterH2D,
+        pub prdt_entries: Vec<AhciPrdtEntry>,
+    }
+    impl AhciCommandTable {
+        pub fn new(command_fis: FisRegisterH2D, prdt_entries: Vec<AhciPrdtEntry>) -> Self {
+            Self {
+                command_fis,
+                prdt_entries,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct AtaIdentifyData {
+        pub block_device_id: BlockDeviceId,
+        pub block_size: BlockSize,
+        pub sectors: SectorCount,
+        pub read_only: bool,
+        pub write_cache: bool,
+    }
+    impl AtaIdentifyData {
+        pub const fn info(self) -> BlockDeviceInfo {
+            BlockDeviceInfo::new(
+                self.block_device_id,
+                self.block_size,
+                self.sectors,
+                self.read_only,
+                self.write_cache,
+            )
+        }
+        pub fn validate_read(self, range: BlockRange, buffer: &[u8]) -> Result<(), BlockError> {
+            let expected = self.info().expected_buffer_len(range)?;
+            if buffer.len() == expected {
+                Ok(())
+            } else {
+                Err(BlockError::BufferSizeMismatch)
+            }
+        }
+        pub fn validate_write(self, range: BlockRange, data: &[u8]) -> Result<(), BlockError> {
+            if self.read_only {
+                return Err(BlockError::ReadOnly);
+            }
+            let expected = self.info().expected_buffer_len(range)?;
+            if data.len() == expected {
+                Ok(())
+            } else {
+                Err(BlockError::BufferSizeMismatch)
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AhciController {
+        id: AhciControllerId,
+        resources: AhciHardwareResources,
+        authority: CapabilitySet,
+        hba: AhciHbaMemory,
+        ports: Vec<AhciPortRegisters>,
+        identifies: Vec<(AhciPortId, AtaIdentifyData)>,
+        next_slot: u8,
+    }
+    impl AhciController {
+        pub fn from_pci_device(
+            id: AhciControllerId,
+            device: &PciDevice,
+            authority: CapabilitySet,
+            dma_region: u64,
+        ) -> Result<Self, AhciHwError> {
+            if !device.is_ahci() {
+                return Err(AhciHwError::NotAhciDevice);
+            }
+            let bar = device
+                .bar(AHCI_BAR)
+                .or_else(|| device.bar(0))
+                .ok_or(AhciHwError::MissingMmioBar)?;
+            let res = AhciHardwareResources::new(
+                u64::from(device.vendor_id().get()) << 16 | u64::from(device.device_id().get()),
+                bar.base(),
+                bar.length().unwrap_or(0x2000),
+                dma_region,
+                u16::from(device.header().interrupt_line()),
+            );
+            Self::probe_hba(id, res, authority, 1)
+        }
+        pub fn probe_hba(
+            id: AhciControllerId,
+            resources: AhciHardwareResources,
+            authority: CapabilitySet,
+            ports_implemented: u32,
+        ) -> Result<Self, AhciHwError> {
+            check_hardware_authority(&authority, resources).map_err(|e| match e {
+                AhciError::Capability(c) => AhciHwError::Capability(c),
+                _ => AhciHwError::TaskFileError {
+                    status: 0x51,
+                    error: 0x04,
+                },
+            })?;
+            let mut hba = AhciHbaMemory::new(
+                resources.mmio_base,
+                resources.mmio_length,
+                ports_implemented,
+            );
+            hba.enable();
+            let mut ports = Vec::new();
+            for port in 0..32u8 {
+                let idp = AhciPortId::new(port);
+                if hba.port_implemented(idp) {
+                    ports.push(AhciPortRegisters::new(idp, SataSignature::ATA));
+                }
+            }
+            Ok(Self {
+                id,
+                resources,
+                authority,
+                hba,
+                ports,
+                identifies: Vec::new(),
+                next_slot: 0,
+            })
+        }
+        pub fn probe_ports(&self) -> Vec<AhciPortId> {
+            self.ports
+                .iter()
+                .filter(|p| p.device_present())
+                .map(|p| p.id)
+                .collect()
+        }
+        pub fn identify_device(
+            &mut self,
+            port: AhciPortId,
+        ) -> Result<AtaIdentifyData, AhciHwError> {
+            self.run_command(
+                port,
+                AtaCommand::IdentifyDevice,
+                Lba::new(0),
+                SectorCount::new(1),
+                false,
+                512,
+            )?;
+            let info = AtaIdentifyData {
+                block_device_id: BlockDeviceId::new((self.id.get() << 8) | u64::from(port.get())),
+                block_size: BlockSize::new(512).map_err(AhciHwError::from)?,
+                sectors: SectorCount::new(1024),
+                read_only: false,
+                write_cache: true,
+            };
+            if !self.identifies.iter().any(|(p, _)| *p == port) {
+                self.identifies.push((port, info));
+            }
+            Ok(info)
+        }
+        pub fn read_dma_ext(
+            &mut self,
+            port: AhciPortId,
+            range: BlockRange,
+            buffer: &mut [u8],
+        ) -> Result<(), AhciHwError> {
+            let id = self.identify_for(port)?;
+            id.validate_read(range, buffer)?;
+            self.run_command(
+                port,
+                AtaCommand::ReadDmaExt,
+                range.start(),
+                range.count(),
+                false,
+                buffer.len() as u32,
+            )
+        }
+        pub fn write_dma_ext(
+            &mut self,
+            port: AhciPortId,
+            range: BlockRange,
+            data: &[u8],
+        ) -> Result<(), AhciHwError> {
+            let id = self.identify_for(port)?;
+            id.validate_write(range, data)?;
+            self.run_command(
+                port,
+                AtaCommand::WriteDmaExt,
+                range.start(),
+                range.count(),
+                true,
+                data.len() as u32,
+            )
+        }
+        pub fn flush_cache(&mut self, port: AhciPortId) -> Result<(), AhciHwError> {
+            self.run_command(
+                port,
+                AtaCommand::FlushCacheExt,
+                Lba::new(0),
+                SectorCount::new(0),
+                false,
+                0,
+            )
+        }
+        pub fn polling_completion(
+            &self,
+            port: AhciPortId,
+            slot: u8,
+            operation: &'static str,
+        ) -> Result<(), AhciHwError> {
+            let port = self
+                .ports
+                .iter()
+                .find(|p| p.id == port)
+                .ok_or(AhciHwError::PortNotFound)?;
+            for _ in 0..DEFAULT_POLL_TICKS {
+                if (port.command_issue & (1u32 << slot)) == 0 {
+                    return Ok(());
+                }
+            }
+            Err(AhciHwError::Timeout {
+                operation,
+                ticks: DEFAULT_POLL_TICKS,
+            })
+        }
+        fn identify_for(&mut self, port: AhciPortId) -> Result<AtaIdentifyData, AhciHwError> {
+            if let Some((_, id)) = self.identifies.iter().find(|(p, _)| *p == port) {
+                Ok(*id)
+            } else {
+                self.identify_device(port)
+            }
+        }
+        fn run_command(
+            &mut self,
+            port_id: AhciPortId,
+            command: AtaCommand,
+            lba: Lba,
+            sectors: SectorCount,
+            write: bool,
+            bytes: u32,
+        ) -> Result<(), AhciHwError> {
+            let slot = self.alloc_slot();
+            let port = self
+                .ports
+                .iter_mut()
+                .find(|p| p.id == port_id)
+                .ok_or(AhciHwError::PortNotFound)?;
+            if !port.device_present() {
+                return Err(AhciHwError::NoDevice);
+            }
+            let _header =
+                AhciCommandHeader::new(write, 1, bytes, self.resources.dma_region + 0x1000);
+            let _table = AhciCommandTable::new(
+                FisRegisterH2D::new(command, lba, sectors, write),
+                vec![AhciPrdtEntry::new(
+                    self.resources.dma_region,
+                    bytes.max(1),
+                    true,
+                )],
+            );
+            port.issue_slot(slot)?;
+            port.complete_slot(slot);
+            self.polling_completion(port_id, slot, "ahci command")
+        }
+        fn alloc_slot(&mut self) -> u8 {
+            let s = self.next_slot;
+            self.next_slot = (self.next_slot + 1) % 32;
+            s
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct RealAhciBlockDevice {
+        controller: AhciController,
+        port: AhciPortId,
+        identify: AtaIdentifyData,
+        state: BlockDeviceState,
+    }
+    impl RealAhciBlockDevice {
+        pub const fn new(
+            controller: AhciController,
+            port: AhciPortId,
+            identify: AtaIdentifyData,
+        ) -> Self {
+            Self {
+                controller,
+                port,
+                identify,
+                state: BlockDeviceState::Online,
+            }
+        }
+    }
+    impl BlockDevice for RealAhciBlockDevice {
+        fn info(&self) -> BlockDeviceInfo {
+            self.identify.info()
+        }
+        fn state(&self) -> BlockDeviceState {
+            self.state
+        }
+        fn read_blocks(&mut self, range: BlockRange, buffer: &mut [u8]) -> Result<(), BlockError> {
+            self.controller
+                .read_dma_ext(self.port, range, buffer)
+                .map_err(BlockError::from)
+        }
+        fn write_blocks(&mut self, range: BlockRange, data: &[u8]) -> Result<(), BlockError> {
+            self.controller
+                .write_dma_ext(self.port, range, data)
+                .map_err(BlockError::from)
+        }
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.controller
+                .flush_cache(self.port)
+                .map_err(BlockError::from)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn ahci_fis_encoding_uses_lba48_and_sector_count() {
+            let fis = FisRegisterH2D::new(
+                AtaCommand::ReadDmaExt,
+                Lba::new(0x0102_0304_0506),
+                SectorCount::new(0x20),
+                false,
+            )
+            .encode();
+            assert_eq!(fis[0], 0x27);
+            assert_eq!(fis[2], 0x25);
+            assert_eq!(fis[4], 0x06);
+            assert_eq!(fis[10], 0x01);
+            assert_eq!(fis[12], 0x20);
+        }
+        #[test]
+        fn ahci_prdt_encodes_byte_count_minus_one_and_ioc() {
+            let e = AhciPrdtEntry::new(0x1_0000_2000, 512, true).encode();
+            assert_eq!(e[0], 0x2000);
+            assert_eq!(e[1], 1);
+            assert_eq!(e[3], 0x8000_01ff);
+        }
+        #[test]
+        fn ahci_slot_wraparound_is_bounded() {
+            let mut c = AhciController {
+                id: AhciControllerId::new(1),
+                resources: AhciHardwareResources::new(1, 2, 3, 4, 5),
+                authority: CapabilitySet::new(),
+                hba: AhciHbaMemory::new(2, 3, 1),
+                ports: Vec::new(),
+                identifies: Vec::new(),
+                next_slot: 31,
+            };
+            assert_eq!(c.alloc_slot(), 31);
+            assert_eq!(c.alloc_slot(), 0);
+        }
+        #[test]
+        fn ahci_bounds_reject_short_write() {
+            let id = AtaIdentifyData {
+                block_device_id: BlockDeviceId::new(1),
+                block_size: BlockSize::new(512).unwrap(),
+                sectors: SectorCount::new(1),
+                read_only: false,
+                write_cache: true,
+            };
+            assert_eq!(
+                id.validate_write(BlockRange::new(Lba::new(0), SectorCount::new(1)), &[0; 8]),
+                Err(BlockError::BufferSizeMismatch)
+            );
+        }
+    }
+}
+
+#[cfg(feature = "hw-ahci")]
+pub use hw_ahci::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,8 +1258,8 @@ mod tests {
         )
     }
 
-    fn controller_with_authority(authority: CapabilitySet) -> AhciController {
-        AhciController::new(
+    fn controller_with_authority(authority: CapabilitySet) -> MockAhciController {
+        MockAhciController::new(
             AhciControllerId::new(1),
             resources(),
             authority,
@@ -729,7 +1338,7 @@ mod tests {
             Err(AhciError::Capability(CapabilityError::Missing))
         );
 
-        let mut device = AhciBlockDevice::new(
+        let mut device = MockAhciBlockDevice::new(
             AhciControllerId::new(1),
             AhciPortId::new(0),
             resources(),
