@@ -46,6 +46,7 @@ hw-nvme = ["hw-pci"]
 hw-ahci = ["hw-pci"]
 hw-xhci = ["hw-pci"]
 hw-framebuffer = []
+full-boot = []
 hw-amdgpu = ["hw-pci", "hw-framebuffer"]
 # Enables host/testing QFS adapters backed by the Rust standard library.
 qfs-std = ["dep:mirage-block", "dep:mirage-storage"]

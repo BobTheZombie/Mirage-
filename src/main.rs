@@ -14,18 +14,27 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
     let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
     kernel.bootstrap_with_boot_info(&boot_info);
-    let _ = kernel.mount_root_from_boot_sources(boot_info.modules);
 
     if cpu::MAX_CORES > 1 {
         kernel.bring_up_secondary_cores(cpu::MAX_CORES - 1);
     }
 
-    // Start L2 first, then L1-supervised device-facing daemons.
     let supervisor = Supervisor::new();
-    let _ = supervisor.bootstrap_services(&mut kernel);
-    mirage::kprintln!("supervisor initialized");
 
-    let _ = kernel.bootstrap_userspace_init();
+    #[cfg(feature = "full-boot")]
+    {
+        let _ = kernel.mount_root_from_boot_sources(boot_info.modules);
+        // Start L2 first, then L1-supervised device-facing daemons.
+        let _ = supervisor.bootstrap_services(&mut kernel);
+        mirage::kprintln!("supervisor initialized with full service manifest");
+        let _ = kernel.bootstrap_userspace_init();
+    }
+
+    #[cfg(not(feature = "full-boot"))]
+    {
+        let _ = supervisor.bootstrap_minimal(&mut kernel);
+        mirage::kprintln!("minimal supervisor initialized");
+    }
 
     mirage::kprintln!("Mirage reached idle loop");
     let mut observed_timer_ticks = x86_64::timer_ticks();

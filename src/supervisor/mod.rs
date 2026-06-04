@@ -1262,6 +1262,119 @@ fn dependencies_ready<const CAP: usize>(
     DependencyStatus::Ready(parent)
 }
 
+/// Minimal boot services registered before any hardware driver or POSIX/QFS work.
+pub const MINIMAL_CORE_SERVICES: [RegistryServiceId; 4] = [
+    RegistryServiceId::Kernel,
+    RegistryServiceId::Supervisor,
+    RegistryServiceId::Console,
+    RegistryServiceId::Memory,
+];
+
+/// Stub recovery manager state for the minimal boot path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoveryManagerStub {
+    initialized: bool,
+}
+
+impl RecoveryManagerStub {
+    pub const fn new() -> Self {
+        Self { initialized: false }
+    }
+
+    pub const fn initialized() -> Self {
+        Self { initialized: true }
+    }
+
+    pub const fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+}
+
+/// Stub driver manager state for minimal boot; it deliberately starts no drivers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DriverManagerStub {
+    initialized: bool,
+    drivers_started: usize,
+}
+
+impl DriverManagerStub {
+    pub const fn new() -> Self {
+        Self {
+            initialized: false,
+            drivers_started: 0,
+        }
+    }
+
+    pub const fn initialized_without_drivers() -> Self {
+        Self {
+            initialized: true,
+            drivers_started: 0,
+        }
+    }
+
+    pub const fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    pub const fn drivers_started(&self) -> usize {
+        self.drivers_started
+    }
+}
+
+/// One core service registration completed by the minimal supervisor path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MinimalServiceRegistration {
+    pub service: RegistryServiceId,
+    pub owner: ProcessId,
+}
+
+/// Minimal boot report separate from the full signed driver startup manifest.
+#[derive(Clone, Copy, Debug)]
+pub struct MinimalSupervisorReport {
+    pub service_registry_initialized: bool,
+    pub capability_table_initialized: bool,
+    pub recovery_manager: RecoveryManagerStub,
+    pub driver_manager: DriverManagerStub,
+    pub supervisor_pid: Option<ProcessId>,
+    registrations: [Option<MinimalServiceRegistration>; MINIMAL_CORE_SERVICES.len()],
+    len: usize,
+    pub failure: Option<KernelError>,
+}
+
+impl MinimalSupervisorReport {
+    pub const fn new() -> Self {
+        Self {
+            service_registry_initialized: false,
+            capability_table_initialized: false,
+            recovery_manager: RecoveryManagerStub::new(),
+            driver_manager: DriverManagerStub::new(),
+            supervisor_pid: None,
+            registrations: [None; MINIMAL_CORE_SERVICES.len()],
+            len: 0,
+            failure: None,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn registration(&self, index: usize) -> Option<MinimalServiceRegistration> {
+        if index < self.len {
+            self.registrations[index]
+        } else {
+            None
+        }
+    }
+
+    fn push_registration(&mut self, service: RegistryServiceId, owner: ProcessId) {
+        if self.len < self.registrations.len() {
+            self.registrations[self.len] = Some(MinimalServiceRegistration { service, owner });
+            self.len += 1;
+        }
+    }
+}
+
 /// Supervisor entry point for early service lifecycle management.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Supervisor;
@@ -1269,6 +1382,51 @@ pub struct Supervisor;
 impl Supervisor {
     pub const fn new() -> Self {
         Self
+    }
+
+    /// Initialize the minimal supervisor path without launching the full driver manifest.
+    ///
+    /// This path sets up/stubs the service registry, capability table, recovery
+    /// manager, and driver manager, then registers only the core kernel-facing
+    /// services needed for a bootable skeleton. It deliberately does not start
+    /// NVMe, AHCI, USB, AMDGPU, QFS, POSIX, or libc work.
+    pub fn bootstrap_minimal<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+    ) -> MinimalSupervisorReport {
+        let mut report = MinimalSupervisorReport::new();
+        report.service_registry_initialized = true;
+        report.recovery_manager = RecoveryManagerStub::initialized();
+        report.driver_manager = DriverManagerStub::initialized_without_drivers();
+
+        let supervisor_pid = match kernel.spawn_initial_process(Credentials::system()) {
+            Ok(pid) => pid,
+            Err(error) => {
+                report.failure = Some(error);
+                return report;
+            }
+        };
+
+        report.supervisor_pid = Some(supervisor_pid);
+        report.capability_table_initialized = true;
+
+        let mut idx = 0usize;
+        while idx < MINIMAL_CORE_SERVICES.len() {
+            let service = MINIMAL_CORE_SERVICES[idx];
+            match kernel.register_endpoint(supervisor_pid, service, supervisor_pid) {
+                Ok(()) => {
+                    crate::kprintln!("supervisor: registered core service '{}'", service.name());
+                    report.push_registration(service, supervisor_pid);
+                }
+                Err(error) => {
+                    report.failure = Some(error);
+                    return report;
+                }
+            }
+            idx += 1;
+        }
+
+        report
     }
 
     /// Start the built-in services in dependency order.

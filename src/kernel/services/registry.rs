@@ -10,7 +10,7 @@ use crate::kernel::process::ProcessId;
 use crate::subkernel::SecurityClass;
 
 /// Maximum number of service endpoints tracked by the registry.
-pub const MAX_SERVICE_REGISTRATIONS: usize = 12;
+pub const MAX_SERVICE_REGISTRATIONS: usize = 16;
 
 /// Maximum number of L1 devices that can be claimed by service daemons.
 pub const MAX_DEVICE_CLAIMS: usize = 8;
@@ -29,6 +29,10 @@ pub enum ServiceId {
     Nvmed = 6,
     Ahcid = 7,
     AmdgpuDisplayd = 8,
+    Kernel = 0x80,
+    Supervisor = 0x81,
+    Console = 0x82,
+    Memory = 0x83,
     SerialDriver = 0x100,
     TimerDriver = 0x101,
     BlockDriver = 0x102,
@@ -57,6 +61,10 @@ impl ServiceId {
             6 => Some(Self::Nvmed),
             7 => Some(Self::Ahcid),
             8 => Some(Self::AmdgpuDisplayd),
+            0x80 => Some(Self::Kernel),
+            0x81 => Some(Self::Supervisor),
+            0x82 => Some(Self::Console),
+            0x83 => Some(Self::Memory),
             0x100 => Some(Self::SerialDriver),
             0x101 => Some(Self::TimerDriver),
             0x102 => Some(Self::BlockDriver),
@@ -71,6 +79,10 @@ impl ServiceId {
 
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Kernel => "kernel",
+            Self::Supervisor => "supervisor",
+            Self::Console => "console",
+            Self::Memory => "memory",
             Self::Displayd => "displayd",
             Self::Networkd => "networkd",
             Self::Inputd => "inputd",
@@ -92,7 +104,9 @@ impl ServiceId {
 
     pub const fn security_class(self) -> SecurityClass {
         match self {
-            Self::Displayd
+            Self::Kernel | Self::Supervisor | Self::Memory => SecurityClass::System,
+            Self::Console
+            | Self::Displayd
             | Self::Networkd
             | Self::Inputd
             | Self::Storaged
@@ -126,7 +140,9 @@ impl ServiceId {
     pub const fn can_claim_device_kind(self, kind: DeviceKind) -> bool {
         matches!(
             (self, kind),
-            (Self::Displayd, DeviceKind::Framebuffer)
+            (Self::Console, DeviceKind::SerialConsole)
+                | (Self::Memory, DeviceKind::SubkernelControl)
+                | (Self::Displayd, DeviceKind::Framebuffer)
                 | (Self::Displayd, DeviceKind::GpuCapability)
                 | (Self::Networkd, DeviceKind::NetworkInterface)
                 | (Self::Inputd, DeviceKind::InputController)
