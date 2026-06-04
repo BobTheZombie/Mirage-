@@ -4,6 +4,7 @@ members = [
     "crates/mirage-ahci",
     "crates/mirage-amdgpu",
     "crates/mirage-block",
+    "crates/mirage-boot",
     "crates/mirage-cap",
     "crates/mirage-fb",
     "crates/mirage-gpu",
