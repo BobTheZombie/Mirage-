@@ -84,5 +84,7 @@ impl BootModuleSignature {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BootModuleCapabilityRequest {
     pub object: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
     pub rights: Vec<String>,
 }

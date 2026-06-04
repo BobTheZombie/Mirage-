@@ -9,4 +9,5 @@ value = "mock-valid"
 
 [[modules.capabilities]]
 object = "IPC_ENDPOINT"
+endpoint = "echo.ipc"
 rights = ["SEND", "RECEIVE"]

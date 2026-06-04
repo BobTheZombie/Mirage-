@@ -13,6 +13,8 @@ use crate::kernel::process::{
 };
 use crate::kernel::services::registry::ServiceId as RegistryServiceId;
 use crate::kernel::{Kernel, KernelError, ProcessExitReport};
+pub mod mock_service;
+
 use crate::subkernel::{
     CapabilityId, CapabilityObject, CapabilityRights, CapabilitySet, Credentials, IsolationError,
     IsolationLevel, SecurityLabel,
@@ -1474,6 +1476,26 @@ impl Supervisor {
         }
 
         report
+    }
+
+    /// Launch a mock service admitted by external boot manifest validation.
+    pub fn launch_mock_manifest_service<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        service: mock_service::MockManifestService<'_>,
+    ) -> Result<mock_service::MockServiceLaunchReport, mock_service::MockServiceLaunchError> {
+        mock_service::launch_echo_service_from_validated_manifest(kernel, service)
+    }
+
+    /// Run one echo request/reply transaction through the registered `echo.ipc` endpoint.
+    pub fn dispatch_echo_request<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        report: &mock_service::MockServiceLaunchReport,
+        caller: ProcessId,
+        payload: crate::kernel::ipc::MessagePayload,
+    ) -> Result<crate::kernel::ipc::MessagePayload, mock_service::MockServiceLaunchError> {
+        mock_service::dispatch_echo_request(kernel, report, caller, payload)
     }
 
     /// Start the built-in services in dependency order.
