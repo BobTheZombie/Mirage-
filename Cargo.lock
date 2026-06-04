@@ -51,6 +51,9 @@ dependencies = [
 [[package]]
 name = "mirage-hw"
 version = "0.1.0"
+dependencies = [
+ "mirage-cap",
+]
 
 [[package]]
 name = "mirage-ipc"

@@ -6,4 +6,9 @@ authors = ["Mirage Kernel Authors"]
 description = "Hardware resource descriptors and backend selection primitives for Mirage services"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+mock = []
+
 [dependencies]
+mirage-cap = { path = "../mirage-cap" }
