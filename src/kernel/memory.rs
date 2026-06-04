@@ -9,6 +9,9 @@ use core::{
     ptr::{self, NonNull},
 };
 
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+use core::alloc::{GlobalAlloc, Layout};
+
 use crate::arch::x86_64::{
     boot::{BootInfo, MemoryRegionKind},
     paging,
@@ -975,6 +978,61 @@ type KernelMemory = MemoryManager<DEFAULT_HEAP_BYTES, MAX_ALLOCATION_RECORDS>;
 static MEMORY_MANAGER: SpinLock<KernelMemory> = SpinLock::new(MemoryManager::new());
 static PHYSICAL_ALLOCATOR: SpinLock<PhysicalFrameAllocator<MAX_PHYSICAL_REGIONS>> =
     SpinLock::new(PhysicalFrameAllocator::new());
+
+/// Kernel-global allocator for Rust `alloc` types used by the boot skeleton.
+///
+/// This intentionally delegates to the existing Mirage heap path. Before boot
+/// memory is ingested it uses the small static bootstrap heap; after
+/// `initialize_from_boot_info` promotes the manager, allocations come from the
+/// page-backed early virtual heap. This is a skeleton allocator, not a claim of
+/// production-grade memory management.
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+pub struct KernelGlobalAllocator;
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+unsafe impl GlobalAlloc for KernelGlobalAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if layout.size() == 0 {
+            return NonNull::<u8>::dangling().as_ptr();
+        }
+
+        malloc_aligned(layout.size(), layout.align())
+            .map(NonNull::as_ptr)
+            .unwrap_or(ptr::null_mut())
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        if let Some(ptr) = NonNull::new(ptr) {
+            let _ = free(ptr);
+        }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
+        let Some(ptr) = NonNull::new(ptr) else {
+            let layout = unsafe {
+                Layout::from_size_align_unchecked(new_size, core::mem::align_of::<usize>())
+            };
+            return unsafe { self.alloc(layout) };
+        };
+
+        realloc(Some(ptr), new_size)
+            .map(NonNull::as_ptr)
+            .unwrap_or(ptr::null_mut())
+    }
+}
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: KernelGlobalAllocator = KernelGlobalAllocator;
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+#[alloc_error_handler]
+fn alloc_error(_layout: Layout) -> ! {
+    loop {
+        crate::arch::x86_64::cpu_relax();
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AddressSpace {
     pub owner: ProcessId,
@@ -1349,12 +1407,75 @@ pub fn stats() -> AllocationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::boxed::Box;
+    use std::vec::Vec;
 
     fn offset_of<const HEAP_SIZE: usize, const MAX_AREAS: usize>(
         manager: &MemoryManager<HEAP_SIZE, MAX_AREAS>,
         ptr: NonNull<u8>,
     ) -> usize {
         ptr.as_ptr() as usize - manager.heap.as_ptr() as usize
+    }
+
+    #[test]
+    fn physical_frame_allocation_uses_only_mock_usable_regions() {
+        let mut allocator: PhysicalFrameAllocator<4> = PhysicalFrameAllocator::new();
+        assert!(allocator.add_region(PhysicalRegion::new(
+            0x1000,
+            PAGE_SIZE as u64,
+            PhysicalRegionKind::Reserved,
+        )));
+        assert!(allocator.add_region(PhysicalRegion::new(
+            0x4000,
+            (PAGE_SIZE * 2) as u64,
+            PhysicalRegionKind::Usable,
+        )));
+
+        assert_eq!(allocator.allocate_frame(), Some(0x4000));
+        assert_eq!(allocator.allocate_frame(), Some(0x5000));
+        assert_eq!(allocator.allocate_frame(), None);
+        assert_eq!(allocator.statistics().allocated_frames, 2);
+
+        allocator.deallocate_frame(0x4000);
+        assert_eq!(allocator.allocate_frame(), Some(0x4000));
+    }
+
+    #[test]
+    fn heap_allocation_via_malloc_path_is_host_isolated() {
+        let mut manager: MemoryManager<4096, 16> = MemoryManager::new();
+        let ptr = manager.malloc(64).expect("allocation succeeds");
+
+        unsafe {
+            ptr::write_bytes(ptr.as_ptr(), 0xab, 64);
+            for index in 0..64 {
+                assert_eq!(ptr.as_ptr().add(index).read(), 0xab);
+            }
+        }
+
+        assert!(manager.statistics().allocated_bytes >= 64);
+        assert!(manager.free(ptr));
+        assert_eq!(manager.statistics().allocated_bytes, 0);
+    }
+
+    #[test]
+    fn box_allocation_smoke_test_stays_on_host_allocator() {
+        // Host tests intentionally do not install the kernel global allocator;
+        // this verifies `alloc`-style usage without pretending QEMU boot memory
+        // was initialized by the unit-test process.
+        let boxed = Box::new(0x4d4952414745_u64);
+
+        assert_eq!(*boxed, 0x4d4952414745_u64);
+    }
+
+    #[test]
+    fn vec_allocation_smoke_test_stays_on_host_allocator() {
+        // This is an allocation smoke test for the skeleton API surface, not a
+        // production heap stress test.
+        let mut values = Vec::new();
+        values.extend_from_slice(&[1, 2, 3, 5, 8, 13]);
+
+        assert_eq!(values.len(), 6);
+        assert_eq!(values.iter().copied().sum::<u32>(), 32);
     }
 
     #[test]
