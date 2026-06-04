@@ -1,12 +1,12 @@
 #![no_std]
-#![cfg_attr(not(feature = "hw-instructions"), forbid(unsafe_code))]
+#![cfg_attr(not(feature = "hw-amd64"), forbid(unsafe_code))]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 //! AMD64 mechanism primitives for Mirage.
 //!
 //! This crate deliberately contains low-level architectural mechanism only:
-//! descriptor types, control-register bit definitions, and feature-gated raw
-//! instruction access. Platform policy, service launch choices, and recovery
+//! descriptor types, control-register bit definitions, capability-guarded MSR
+//! access, and feature-gated raw instruction access. Platform policy, service launch choices, and recovery
 //! decisions belong in the supervisor/platform layer.
 
 /// Architectural CPU privilege ring.
@@ -18,7 +18,10 @@ pub enum PrivilegeRing {
     Ring3,
 }
 
-/// A model-specific register number.
+/// A raw model-specific register number used by the instruction backend.
+///
+/// Supervisor/platform MSR access should prefer [`msr::MsrAddress`], which
+/// rejects unknown addresses and enforces Mirage capability checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Msr(u32);
 
@@ -103,10 +106,12 @@ pub enum Amd64Error {
     UnalignedPageTableRoot,
 }
 
-#[cfg(all(feature = "hw-instructions", target_arch = "x86_64"))]
+pub mod msr;
+
+#[cfg(all(feature = "hw-amd64", target_arch = "x86_64"))]
 pub mod instructions;
 
-#[cfg(any(not(feature = "hw-instructions"), not(target_arch = "x86_64")))]
+#[cfg(any(not(feature = "hw-amd64"), not(target_arch = "x86_64")))]
 pub mod instructions {
     //! Stub instruction backend used for mock builds and non-AMD64 hosts.
 
