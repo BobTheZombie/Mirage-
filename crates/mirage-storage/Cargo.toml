@@ -8,3 +8,16 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 mirage-block = { path = "../mirage-block" }
+mirage-ahci = { path = "../mirage-ahci", optional = true }
+mirage-cap = { path = "../mirage-cap", optional = true }
+mirage-nvme = { path = "../mirage-nvme", optional = true }
+mirage-pci = { path = "../mirage-pci", optional = true }
+mirage-usb = { path = "../mirage-usb", optional = true }
+
+[features]
+default = []
+discovery = ["dep:mirage-cap", "dep:mirage-pci"]
+discovery-nvme = ["discovery", "dep:mirage-nvme", "mirage-nvme/hw-nvme"]
+discovery-ahci = ["discovery", "dep:mirage-ahci", "mirage-ahci/hw-ahci"]
+discovery-xhci = ["discovery", "dep:mirage-usb", "mirage-usb/hw-xhci"]
+discovery-all = ["discovery-nvme", "discovery-ahci", "discovery-xhci"]
