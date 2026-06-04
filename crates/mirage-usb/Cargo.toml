@@ -10,3 +10,8 @@ license = "MIT OR Apache-2.0"
 mirage-block = { path = "../mirage-block" }
 mirage-cap = { path = "../mirage-cap" }
 mirage-ipc = { path = "../mirage-ipc" }
+mirage-pci = { path = "../mirage-pci", optional = true }
+
+[features]
+default = []
+hw-xhci = ["mirage-pci"]

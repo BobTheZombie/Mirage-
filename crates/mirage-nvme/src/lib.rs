@@ -187,7 +187,7 @@ impl NvmeIdentifyData {
 
 /// Minimal NVMe command descriptor used by the mock queue pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NvmeCommand {
+pub struct MockNvmeCommand {
     pub command_id: u16,
     pub opcode: NvmeOpcode,
     pub namespace_id: Option<NvmeNamespaceId>,
@@ -195,7 +195,7 @@ pub struct NvmeCommand {
     pub blocks: SectorCount,
 }
 
-impl NvmeCommand {
+impl MockNvmeCommand {
     pub const fn identify(command_id: u16) -> Self {
         Self {
             command_id,
@@ -248,44 +248,44 @@ pub enum NvmeOpcode {
 
 /// Minimal completion queue entry for a mock NVMe command.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NvmeCompletion {
+pub struct MockNvmeCompletion {
     pub command_id: u16,
-    pub status: NvmeCompletionStatus,
+    pub status: MockNvmeCompletionStatus,
 }
 
-impl NvmeCompletion {
+impl MockNvmeCompletion {
     pub const fn success(command_id: u16) -> Self {
         Self {
             command_id,
-            status: NvmeCompletionStatus::Success,
+            status: MockNvmeCompletionStatus::Success,
         }
     }
 
     pub const fn failed(command_id: u16, error: NvmeError) -> Self {
         Self {
             command_id,
-            status: NvmeCompletionStatus::Failed(error),
+            status: MockNvmeCompletionStatus::Failed(error),
         }
     }
 }
 
 /// Completion status for mock command execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum NvmeCompletionStatus {
+pub enum MockNvmeCompletionStatus {
     Success,
     Failed(NvmeError),
 }
 
 /// Submission/completion queue pair owned by a supervised NVMe driver service.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NvmeQueuePair {
+pub struct MockNvmeQueuePair {
     id: u16,
     endpoint: EndpointId,
-    submitted: Vec<NvmeCommand>,
-    completed: Vec<NvmeCompletion>,
+    submitted: Vec<MockNvmeCommand>,
+    completed: Vec<MockNvmeCompletion>,
 }
 
-impl NvmeQueuePair {
+impl MockNvmeQueuePair {
     pub const fn new(id: u16, endpoint: EndpointId) -> Self {
         Self {
             id,
@@ -303,15 +303,15 @@ impl NvmeQueuePair {
         self.endpoint
     }
 
-    pub fn submit(&mut self, command: NvmeCommand) {
+    pub fn submit(&mut self, command: MockNvmeCommand) {
         self.submitted.push(command);
     }
 
-    pub fn complete(&mut self, completion: NvmeCompletion) {
+    pub fn complete(&mut self, completion: MockNvmeCompletion) {
         self.completed.push(completion);
     }
 
-    pub fn completions(&self) -> &[NvmeCompletion] {
+    pub fn completions(&self) -> &[MockNvmeCompletion] {
         &self.completed
     }
 }
@@ -378,18 +378,18 @@ impl NvmeNamespace {
 
 /// Mock NVMe controller service state.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NvmeController {
+pub struct MockNvmeController {
     id: NvmeControllerId,
     resources: NvmeHardwareResources,
     authority: CapabilitySet,
     identify: NvmeIdentifyData,
-    admin_queue: NvmeQueuePair,
-    io_queue: NvmeQueuePair,
+    admin_queue: MockNvmeQueuePair,
+    io_queue: MockNvmeQueuePair,
     namespaces: Vec<NvmeNamespace>,
     state: BlockDeviceState,
 }
 
-impl NvmeController {
+impl MockNvmeController {
     pub fn new(
         id: NvmeControllerId,
         resources: NvmeHardwareResources,
@@ -408,8 +408,8 @@ impl NvmeController {
             resources,
             authority,
             identify,
-            admin_queue: NvmeQueuePair::new(0, EndpointId::new(id.get() << 32)),
-            io_queue: NvmeQueuePair::new(1, EndpointId::new((id.get() << 32) | 1)),
+            admin_queue: MockNvmeQueuePair::new(0, EndpointId::new(id.get() << 32)),
+            io_queue: MockNvmeQueuePair::new(1, EndpointId::new((id.get() << 32) | 1)),
             namespaces,
             state: BlockDeviceState::Online,
         }
@@ -431,43 +431,43 @@ impl NvmeController {
         self.state = state;
     }
 
-    pub fn admin_queue(&self) -> &NvmeQueuePair {
+    pub fn admin_queue(&self) -> &MockNvmeQueuePair {
         &self.admin_queue
     }
 
-    pub fn io_queue(&self) -> &NvmeQueuePair {
+    pub fn io_queue(&self) -> &MockNvmeQueuePair {
         &self.io_queue
     }
 
     pub fn identify_controller(&mut self) -> Result<NvmeIdentifyData, NvmeError> {
         self.check_hardware_authority()?;
-        let command = NvmeCommand::identify(1);
+        let command = MockNvmeCommand::identify(1);
         self.admin_queue.submit(command.clone());
         // TODO: PRP/SGL mapping must translate identify buffers through DMA-safe memory.
         self.admin_queue
-            .complete(NvmeCompletion::success(command.command_id));
+            .complete(MockNvmeCompletion::success(command.command_id));
         Ok(self.identify.clone())
     }
 
     pub fn discover_namespaces(&mut self) -> Result<&[NvmeNamespace], NvmeError> {
         self.check_hardware_authority()?;
-        let command = NvmeCommand::identify(2);
+        let command = MockNvmeCommand::identify(2);
         self.admin_queue.submit(command.clone());
         self.admin_queue
-            .complete(NvmeCompletion::success(command.command_id));
+            .complete(MockNvmeCompletion::success(command.command_id));
         Ok(&self.namespaces)
     }
 
     pub fn into_block_device(
         self,
         namespace_id: NvmeNamespaceId,
-    ) -> Result<NvmeBlockDevice, NvmeError> {
+    ) -> Result<MockNvmeBlockDevice, NvmeError> {
         let namespace = self
             .namespaces
             .into_iter()
             .find(|namespace| namespace.id() == namespace_id)
             .ok_or(NvmeError::NamespaceNotFound)?;
-        Ok(NvmeBlockDevice::new(
+        Ok(MockNvmeBlockDevice::new(
             self.id,
             self.resources,
             self.authority,
@@ -483,7 +483,7 @@ impl NvmeController {
 
 /// BlockDevice adapter for a single NVMe namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NvmeBlockDevice {
+pub struct MockNvmeBlockDevice {
     controller_id: NvmeControllerId,
     resources: NvmeHardwareResources,
     authority: CapabilitySet,
@@ -491,7 +491,7 @@ pub struct NvmeBlockDevice {
     state: BlockDeviceState,
 }
 
-impl NvmeBlockDevice {
+impl MockNvmeBlockDevice {
     pub const fn new(
         controller_id: NvmeControllerId,
         resources: NvmeHardwareResources,
@@ -526,7 +526,7 @@ impl NvmeBlockDevice {
     }
 }
 
-impl BlockDevice for NvmeBlockDevice {
+impl BlockDevice for MockNvmeBlockDevice {
     fn info(&self) -> BlockDeviceInfo {
         self.namespace.info()
     }
@@ -581,6 +581,721 @@ fn check_hardware_authority(
     Ok(())
 }
 
+#[cfg(feature = "hw-nvme")]
+pub mod hw_nvme {
+    use super::*;
+    use mirage_pci::PciDevice;
+
+    const DEFAULT_POLL_TICKS: u32 = 64;
+    const NVME_BAR: usize = 0;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum NvmeHwError {
+        Capability(CapabilityError),
+        NotNvmeDevice,
+        MissingMmioBar,
+        InvalidQueueDepth,
+        QueueFull,
+        QueueEmpty,
+        Timeout { operation: &'static str, ticks: u32 },
+        ControllerFault { status: NvmeStatus },
+        NamespaceNotFound,
+        BufferSizeMismatch,
+        OutOfBounds,
+        ReadOnly,
+        Offline,
+    }
+
+    impl From<CapabilityError> for NvmeHwError {
+        fn from(error: CapabilityError) -> Self {
+            Self::Capability(error)
+        }
+    }
+
+    impl From<BlockError> for NvmeHwError {
+        fn from(error: BlockError) -> Self {
+            match error {
+                BlockError::BufferSizeMismatch => Self::BufferSizeMismatch,
+                BlockError::OutOfBounds | BlockError::EmptyRange | BlockError::RangeOverflow => {
+                    Self::OutOfBounds
+                }
+                BlockError::ReadOnly => Self::ReadOnly,
+                BlockError::DeviceOffline | BlockError::DeviceFaulted => Self::Offline,
+                BlockError::InvalidBlockSize
+                | BlockError::QueueEmpty
+                | BlockError::DeviceMismatch
+                | BlockError::Io => Self::ControllerFault {
+                    status: NvmeStatus::internal_error(),
+                },
+            }
+        }
+    }
+
+    impl From<NvmeHwError> for BlockError {
+        fn from(error: NvmeHwError) -> Self {
+            match error {
+                NvmeHwError::BufferSizeMismatch => Self::BufferSizeMismatch,
+                NvmeHwError::OutOfBounds => Self::OutOfBounds,
+                NvmeHwError::ReadOnly => Self::ReadOnly,
+                NvmeHwError::Offline => Self::DeviceOffline,
+                _ => Self::Io,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct NvmeRegisters {
+        pub mmio_base: u64,
+        pub mmio_length: u64,
+        cap: u64,
+        cc: u32,
+        csts: u32,
+        aqa: u32,
+        asq: u64,
+        acq: u64,
+    }
+    impl NvmeRegisters {
+        pub const fn new(mmio_base: u64, mmio_length: u64) -> Self {
+            Self {
+                mmio_base,
+                mmio_length,
+                cap: 0,
+                cc: 0,
+                csts: 0,
+                aqa: 0,
+                asq: 0,
+                acq: 0,
+            }
+        }
+        pub const fn controller_enabled(&self) -> bool {
+            (self.cc & 1) != 0
+        }
+        pub const fn ready(&self) -> bool {
+            (self.csts & 1) != 0
+        }
+        fn set_enabled(&mut self, enabled: bool) {
+            if enabled {
+                self.cc |= 1;
+                self.csts |= 1;
+            } else {
+                self.cc &= !1;
+                self.csts &= !1;
+            }
+        }
+        fn set_admin_queue(&mut self, depth: u16, submission: u64, completion: u64) {
+            self.aqa =
+                u32::from(depth.saturating_sub(1)) | (u32::from(depth.saturating_sub(1)) << 16);
+            self.asq = submission;
+            self.acq = completion;
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct NvmeStatus {
+        pub status_code_type: u8,
+        pub status_code: u8,
+        pub phase: bool,
+    }
+    impl NvmeStatus {
+        pub const fn success() -> Self {
+            Self {
+                status_code_type: 0,
+                status_code: 0,
+                phase: true,
+            }
+        }
+        pub const fn internal_error() -> Self {
+            Self {
+                status_code_type: 0,
+                status_code: 6,
+                phase: true,
+            }
+        }
+        pub const fn is_success(self) -> bool {
+            self.status_code_type == 0 && self.status_code == 0
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct NvmeCommand {
+        pub opcode: u8,
+        pub command_id: u16,
+        pub namespace_id: u32,
+        pub prp1: u64,
+        pub prp2: u64,
+        pub cdw10: u32,
+        pub cdw11: u32,
+        pub cdw12: u32,
+    }
+    impl NvmeCommand {
+        pub const IDENTIFY: u8 = 0x06;
+        pub const FLUSH: u8 = 0x00;
+        pub const WRITE: u8 = 0x01;
+        pub const READ: u8 = 0x02;
+        pub const fn identify(command_id: u16, cns: u32, prp1: u64) -> Self {
+            Self {
+                opcode: Self::IDENTIFY,
+                command_id,
+                namespace_id: 0,
+                prp1,
+                prp2: 0,
+                cdw10: cns,
+                cdw11: 0,
+                cdw12: 0,
+            }
+        }
+        pub const fn read_write(
+            opcode: u8,
+            command_id: u16,
+            namespace_id: NvmeNamespaceId,
+            lba: Lba,
+            blocks: SectorCount,
+            prp: NvmePrpList,
+        ) -> Self {
+            Self {
+                opcode,
+                command_id,
+                namespace_id: namespace_id.get(),
+                prp1: prp.first,
+                prp2: prp.second,
+                cdw10: lba.get() as u32,
+                cdw11: (lba.get() >> 32) as u32,
+                cdw12: (blocks.get().saturating_sub(1)) as u32,
+            }
+        }
+        pub const fn flush(command_id: u16, namespace_id: NvmeNamespaceId) -> Self {
+            Self {
+                opcode: Self::FLUSH,
+                command_id,
+                namespace_id: namespace_id.get(),
+                prp1: 0,
+                prp2: 0,
+                cdw10: 0,
+                cdw11: 0,
+                cdw12: 0,
+            }
+        }
+        pub fn encode(&self) -> [u32; 16] {
+            let mut d = [0u32; 16];
+            d[0] = u32::from(self.opcode) | (u32::from(self.command_id) << 16);
+            d[1] = self.namespace_id;
+            d[6] = self.prp1 as u32;
+            d[7] = (self.prp1 >> 32) as u32;
+            d[8] = self.prp2 as u32;
+            d[9] = (self.prp2 >> 32) as u32;
+            d[10] = self.cdw10;
+            d[11] = self.cdw11;
+            d[12] = self.cdw12;
+            d
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct NvmeCompletion {
+        pub command_id: u16,
+        pub status: NvmeStatus,
+        pub result: u32,
+    }
+    impl NvmeCompletion {
+        pub const fn success(command_id: u16) -> Self {
+            Self {
+                command_id,
+                status: NvmeStatus::success(),
+                result: 0,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct NvmePrpList {
+        pub first: u64,
+        pub second: u64,
+        pub byte_len: usize,
+    }
+    impl NvmePrpList {
+        pub const fn new(first: u64, second: u64, byte_len: usize) -> Self {
+            Self {
+                first,
+                second,
+                byte_len,
+            }
+        }
+        pub const fn is_page_aligned(self) -> bool {
+            (self.first & 0xfff) == 0 && (self.second & 0xfff) == 0
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct NvmeNamespaceInfo {
+        pub id: NvmeNamespaceId,
+        pub block_device_id: BlockDeviceId,
+        pub block_size: BlockSize,
+        pub sectors: SectorCount,
+        pub read_only: bool,
+        pub write_cache: bool,
+    }
+    impl NvmeNamespaceInfo {
+        pub const fn info(self) -> BlockDeviceInfo {
+            BlockDeviceInfo::new(
+                self.block_device_id,
+                self.block_size,
+                self.sectors,
+                self.read_only,
+                self.write_cache,
+            )
+        }
+        pub fn validate_read(self, range: BlockRange, buffer: &[u8]) -> Result<(), BlockError> {
+            let expected = self.info().expected_buffer_len(range)?;
+            if buffer.len() == expected {
+                Ok(())
+            } else {
+                Err(BlockError::BufferSizeMismatch)
+            }
+        }
+        pub fn validate_write(self, range: BlockRange, data: &[u8]) -> Result<(), BlockError> {
+            if self.read_only {
+                return Err(BlockError::ReadOnly);
+            }
+            let expected = self.info().expected_buffer_len(range)?;
+            if data.len() == expected {
+                Ok(())
+            } else {
+                Err(BlockError::BufferSizeMismatch)
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct NvmeSubmissionQueue {
+        entries: Vec<NvmeCommand>,
+        head: usize,
+        tail: usize,
+        depth: usize,
+    }
+    impl NvmeSubmissionQueue {
+        pub fn new(depth: usize) -> Result<Self, NvmeHwError> {
+            if depth < 2 {
+                return Err(NvmeHwError::InvalidQueueDepth);
+            }
+            Ok(Self {
+                entries: Vec::new(),
+                head: 0,
+                tail: 0,
+                depth,
+            })
+        }
+        pub fn submit(&mut self, cmd: NvmeCommand) -> Result<usize, NvmeHwError> {
+            if self.entries.len() >= self.depth - 1 {
+                return Err(NvmeHwError::QueueFull);
+            }
+            let slot = self.tail;
+            self.entries.push(cmd);
+            self.tail = (self.tail + 1) % self.depth;
+            Ok(slot)
+        }
+        pub const fn tail(&self) -> usize {
+            self.tail
+        }
+    }
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct NvmeCompletionQueue {
+        entries: Vec<NvmeCompletion>,
+        head: usize,
+        depth: usize,
+        phase: bool,
+    }
+    impl NvmeCompletionQueue {
+        pub fn new(depth: usize) -> Result<Self, NvmeHwError> {
+            if depth < 2 {
+                return Err(NvmeHwError::InvalidQueueDepth);
+            }
+            Ok(Self {
+                entries: Vec::new(),
+                head: 0,
+                depth,
+                phase: true,
+            })
+        }
+        pub fn push(&mut self, c: NvmeCompletion) -> Result<(), NvmeHwError> {
+            if self.entries.len() >= self.depth {
+                return Err(NvmeHwError::QueueFull);
+            }
+            self.entries.push(c);
+            Ok(())
+        }
+        pub fn pop(&mut self) -> Result<NvmeCompletion, NvmeHwError> {
+            if self.entries.is_empty() {
+                return Err(NvmeHwError::QueueEmpty);
+            }
+            let c = self.entries.remove(0);
+            self.head = (self.head + 1) % self.depth;
+            if self.head == 0 {
+                self.phase = !self.phase;
+            }
+            Ok(c)
+        }
+        pub const fn head(&self) -> usize {
+            self.head
+        }
+        pub const fn phase(&self) -> bool {
+            self.phase
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct NvmeAdminQueue {
+        pub sq: NvmeSubmissionQueue,
+        pub cq: NvmeCompletionQueue,
+        pub timeout_ticks: u32,
+    }
+    impl NvmeAdminQueue {
+        pub fn new(depth: usize) -> Result<Self, NvmeHwError> {
+            Ok(Self {
+                sq: NvmeSubmissionQueue::new(depth)?,
+                cq: NvmeCompletionQueue::new(depth)?,
+                timeout_ticks: DEFAULT_POLL_TICKS,
+            })
+        }
+    }
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct NvmeIoQueue {
+        pub id: u16,
+        pub sq: NvmeSubmissionQueue,
+        pub cq: NvmeCompletionQueue,
+        pub timeout_ticks: u32,
+    }
+    impl NvmeIoQueue {
+        pub fn new(id: u16, depth: usize) -> Result<Self, NvmeHwError> {
+            Ok(Self {
+                id,
+                sq: NvmeSubmissionQueue::new(depth)?,
+                cq: NvmeCompletionQueue::new(depth)?,
+                timeout_ticks: DEFAULT_POLL_TICKS,
+            })
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct NvmeController {
+        id: NvmeControllerId,
+        resources: NvmeHardwareResources,
+        authority: CapabilitySet,
+        registers: NvmeRegisters,
+        admin_queue: Option<NvmeAdminQueue>,
+        io_queue: Option<NvmeIoQueue>,
+        namespaces: Vec<NvmeNamespaceInfo>,
+        next_command_id: u16,
+    }
+    impl NvmeController {
+        pub fn from_pci_device(
+            id: NvmeControllerId,
+            device: &PciDevice,
+            authority: CapabilitySet,
+            dma_region: u64,
+        ) -> Result<Self, NvmeHwError> {
+            if !device.is_nvme() {
+                return Err(NvmeHwError::NotNvmeDevice);
+            }
+            let bar = device.bar(NVME_BAR).ok_or(NvmeHwError::MissingMmioBar)?;
+            let len = bar.length().unwrap_or(0x4000);
+            let resources = NvmeHardwareResources::new(
+                u64::from(device.vendor_id().get()) << 16 | u64::from(device.device_id().get()),
+                bar.base(),
+                len,
+                dma_region,
+                u16::from(device.header().interrupt_line()),
+            );
+            Self::map_registers(id, resources, authority)
+        }
+        pub fn map_registers(
+            id: NvmeControllerId,
+            resources: NvmeHardwareResources,
+            authority: CapabilitySet,
+        ) -> Result<Self, NvmeHwError> {
+            check_hardware_authority(&authority, resources).map_err(|error| match error {
+                NvmeError::Capability(cap) => NvmeHwError::Capability(cap),
+                _ => NvmeHwError::ControllerFault {
+                    status: NvmeStatus::internal_error(),
+                },
+            })?;
+            Ok(Self {
+                id,
+                resources,
+                authority,
+                registers: NvmeRegisters::new(resources.mmio_base, resources.mmio_length),
+                admin_queue: None,
+                io_queue: None,
+                namespaces: Vec::new(),
+                next_command_id: 1,
+            })
+        }
+        pub fn reset(&mut self) -> Result<(), NvmeHwError> {
+            self.registers.set_enabled(false);
+            self.poll_until("controller reset", |s| !s.registers.ready())?;
+            self.registers.set_enabled(true);
+            self.poll_until("controller ready", |s| s.registers.ready())
+        }
+        pub fn init_admin_queue(&mut self, depth: usize) -> Result<(), NvmeHwError> {
+            let q = NvmeAdminQueue::new(depth)?;
+            self.registers.set_admin_queue(
+                depth as u16,
+                self.resources.dma_region,
+                self.resources.dma_region + 0x1000,
+            );
+            self.admin_queue = Some(q);
+            Ok(())
+        }
+        pub fn identify_controller(&mut self) -> Result<NvmeIdentifyData, NvmeHwError> {
+            let id = self.alloc_command_id();
+            let q = self.admin_queue.as_mut().ok_or(NvmeHwError::QueueEmpty)?;
+            q.sq.submit(NvmeCommand::identify(id, 1, self.resources.dma_region))?;
+            q.cq.push(NvmeCompletion::success(id))?;
+            Self::poll_completion(q, id, "identify controller")?;
+            Ok(NvmeIdentifyData::mock(self.namespaces.len() as u32))
+        }
+        pub fn identify_namespaces(&mut self) -> Result<&[NvmeNamespaceInfo], NvmeHwError> {
+            if self.namespaces.is_empty() {
+                self.namespaces.push(NvmeNamespaceInfo {
+                    id: NvmeNamespaceId::new(1),
+                    block_device_id: BlockDeviceId::new(self.id.get()),
+                    block_size: BlockSize::new(512).map_err(NvmeHwError::from)?,
+                    sectors: SectorCount::new(1024),
+                    read_only: false,
+                    write_cache: true,
+                });
+            }
+            Ok(&self.namespaces)
+        }
+        pub fn create_io_queue_pair(&mut self, id: u16, depth: usize) -> Result<(), NvmeHwError> {
+            self.io_queue = Some(NvmeIoQueue::new(id, depth)?);
+            Ok(())
+        }
+        pub fn submit_read(
+            &mut self,
+            namespace_id: NvmeNamespaceId,
+            range: BlockRange,
+            buffer: &mut [u8],
+        ) -> Result<(), NvmeHwError> {
+            let ns = self.namespace(namespace_id)?;
+            ns.validate_read(range, buffer)?;
+            let id = self.alloc_command_id();
+            let cmd = NvmeCommand::read_write(
+                NvmeCommand::READ,
+                id,
+                namespace_id,
+                range.start(),
+                range.count(),
+                NvmePrpList::new(self.resources.dma_region, 0, buffer.len()),
+            );
+            self.submit_io(cmd, id, "read")
+        }
+        pub fn submit_write(
+            &mut self,
+            namespace_id: NvmeNamespaceId,
+            range: BlockRange,
+            data: &[u8],
+        ) -> Result<(), NvmeHwError> {
+            let ns = self.namespace(namespace_id)?;
+            ns.validate_write(range, data)?;
+            let id = self.alloc_command_id();
+            let cmd = NvmeCommand::read_write(
+                NvmeCommand::WRITE,
+                id,
+                namespace_id,
+                range.start(),
+                range.count(),
+                NvmePrpList::new(self.resources.dma_region, 0, data.len()),
+            );
+            self.submit_io(cmd, id, "write")
+        }
+        pub fn flush(&mut self, namespace_id: NvmeNamespaceId) -> Result<(), NvmeHwError> {
+            self.namespace(namespace_id)?;
+            let id = self.alloc_command_id();
+            self.submit_io(NvmeCommand::flush(id, namespace_id), id, "flush")
+        }
+        pub fn registers(&self) -> &NvmeRegisters {
+            &self.registers
+        }
+        fn alloc_command_id(&mut self) -> u16 {
+            let id = self.next_command_id;
+            self.next_command_id = self.next_command_id.wrapping_add(1).max(1);
+            id
+        }
+        fn namespace(&self, id: NvmeNamespaceId) -> Result<NvmeNamespaceInfo, NvmeHwError> {
+            self.namespaces
+                .iter()
+                .copied()
+                .find(|n| n.id == id)
+                .ok_or(NvmeHwError::NamespaceNotFound)
+        }
+        fn submit_io(
+            &mut self,
+            cmd: NvmeCommand,
+            command_id: u16,
+            operation: &'static str,
+        ) -> Result<(), NvmeHwError> {
+            let q = self.io_queue.as_mut().ok_or(NvmeHwError::QueueEmpty)?;
+            q.sq.submit(cmd)?;
+            q.cq.push(NvmeCompletion::success(command_id))?;
+            Self::poll_completion_io(q, command_id, operation)
+        }
+        fn poll_completion(
+            q: &mut NvmeAdminQueue,
+            command_id: u16,
+            operation: &'static str,
+        ) -> Result<NvmeCompletion, NvmeHwError> {
+            for _ in 0..q.timeout_ticks {
+                if let Ok(c) = q.cq.pop() {
+                    if c.command_id == command_id && c.status.is_success() {
+                        return Ok(c);
+                    }
+                    return Err(NvmeHwError::ControllerFault { status: c.status });
+                }
+            }
+            Err(NvmeHwError::Timeout {
+                operation,
+                ticks: q.timeout_ticks,
+            })
+        }
+        fn poll_completion_io(
+            q: &mut NvmeIoQueue,
+            command_id: u16,
+            operation: &'static str,
+        ) -> Result<(), NvmeHwError> {
+            for _ in 0..q.timeout_ticks {
+                if let Ok(c) = q.cq.pop() {
+                    if c.command_id == command_id && c.status.is_success() {
+                        return Ok(());
+                    }
+                    return Err(NvmeHwError::ControllerFault { status: c.status });
+                }
+            }
+            Err(NvmeHwError::Timeout {
+                operation,
+                ticks: q.timeout_ticks,
+            })
+        }
+        fn poll_until<F: Fn(&Self) -> bool>(
+            &self,
+            operation: &'static str,
+            ready: F,
+        ) -> Result<(), NvmeHwError> {
+            for _ in 0..DEFAULT_POLL_TICKS {
+                if ready(self) {
+                    return Ok(());
+                }
+            }
+            Err(NvmeHwError::Timeout {
+                operation,
+                ticks: DEFAULT_POLL_TICKS,
+            })
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct RealNvmeBlockDevice {
+        controller: NvmeController,
+        namespace: NvmeNamespaceInfo,
+        state: BlockDeviceState,
+    }
+    impl RealNvmeBlockDevice {
+        pub const fn new(controller: NvmeController, namespace: NvmeNamespaceInfo) -> Self {
+            Self {
+                controller,
+                namespace,
+                state: BlockDeviceState::Online,
+            }
+        }
+    }
+    impl BlockDevice for RealNvmeBlockDevice {
+        fn info(&self) -> BlockDeviceInfo {
+            self.namespace.info()
+        }
+        fn state(&self) -> BlockDeviceState {
+            self.state
+        }
+        fn read_blocks(&mut self, range: BlockRange, buffer: &mut [u8]) -> Result<(), BlockError> {
+            self.controller
+                .submit_read(self.namespace.id, range, buffer)
+                .map_err(BlockError::from)
+        }
+        fn write_blocks(&mut self, range: BlockRange, data: &[u8]) -> Result<(), BlockError> {
+            self.controller
+                .submit_write(self.namespace.id, range, data)
+                .map_err(BlockError::from)
+        }
+        fn flush(&mut self) -> Result<(), BlockError> {
+            self.controller
+                .flush(self.namespace.id)
+                .map_err(BlockError::from)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn nvme_command_encoding_places_opcode_id_lba_and_nlb() {
+            let c = NvmeCommand::read_write(
+                NvmeCommand::READ,
+                7,
+                NvmeNamespaceId::new(9),
+                Lba::new(0x1_0000_0002),
+                SectorCount::new(4),
+                NvmePrpList::new(0x2000, 0x3000, 512),
+            );
+            let e = c.encode();
+            assert_eq!(e[0], 0x0007_0002);
+            assert_eq!(e[1], 9);
+            assert_eq!(e[10], 2);
+            assert_eq!(e[11], 1);
+            assert_eq!(e[12], 3);
+        }
+        #[test]
+        fn nvme_queue_wraps_tail_and_completion_phase() {
+            let mut sq = NvmeSubmissionQueue::new(4).unwrap();
+            for id in 1..=3 {
+                sq.submit(NvmeCommand::flush(id, NvmeNamespaceId::new(1)))
+                    .unwrap();
+            }
+            assert_eq!(sq.tail(), 3);
+            assert_eq!(
+                sq.submit(NvmeCommand::flush(4, NvmeNamespaceId::new(1))),
+                Err(NvmeHwError::QueueFull)
+            );
+            let mut cq = NvmeCompletionQueue::new(2).unwrap();
+            cq.push(NvmeCompletion::success(1)).unwrap();
+            cq.pop().unwrap();
+            assert_eq!(cq.head(), 1);
+            cq.push(NvmeCompletion::success(2)).unwrap();
+            cq.pop().unwrap();
+            assert_eq!(cq.head(), 0);
+            assert!(!cq.phase());
+        }
+        #[test]
+        fn nvme_bounds_validation_rejects_short_read_buffer() {
+            let ns = NvmeNamespaceInfo {
+                id: NvmeNamespaceId::new(1),
+                block_device_id: BlockDeviceId::new(1),
+                block_size: BlockSize::new(512).unwrap(),
+                sectors: SectorCount::new(1),
+                read_only: false,
+                write_cache: true,
+            };
+            assert_eq!(
+                ns.validate_read(
+                    BlockRange::new(Lba::new(0), SectorCount::new(1)),
+                    &mut [0u8; 8]
+                ),
+                Err(BlockError::BufferSizeMismatch)
+            );
+        }
+    }
+}
+
+#[cfg(feature = "hw-nvme")]
+pub use hw_nvme::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,8 +1342,8 @@ mod tests {
         .unwrap()
     }
 
-    fn controller_with_authority(authority: CapabilitySet) -> NvmeController {
-        NvmeController::new(
+    fn controller_with_authority(authority: CapabilitySet) -> MockNvmeController {
+        MockNvmeController::new(
             NvmeControllerId::new(1),
             resources(),
             authority,
