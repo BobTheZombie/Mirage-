@@ -38,13 +38,25 @@ pub enum ServiceId {
     Inputd,
 }
 
-/// Startup state for a service supervised by the policy broker.
+/// Boot-service lifecycle state for a manifest-launched service supervised by the policy broker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartupState {
-    Pending,
-    Starting,
+    /// Runtime record exists but no policy or launch work has started yet.
+    Created,
+    /// The supervisor is validating manifest policy and signatures.
+    Validating,
+    /// The supervisor is asking the kernel to launch the service task.
+    Launching,
+    /// The service task is live and owns its supervised authority.
     Running,
-    Failed,
+    /// The previously running service exited and recovery handling observed the crash.
+    Crashed,
+    /// The supervisor is attempting to relaunch the service after a crash.
+    Restarting,
+    /// The supervisor intentionally left the service offline.
+    Stopped,
+    /// Supervisor policy denied the service launch or relaunch.
+    Denied,
 }
 
 /// Fixed-size service dependency list.
@@ -262,7 +274,7 @@ impl ServiceRuntime {
     pub const fn pending(descriptor: ServiceDescriptor) -> Self {
         Self {
             descriptor,
-            state: StartupState::Pending,
+            state: StartupState::Created,
             pid: None,
             assigned_capabilities: [None; MAX_SERVICE_CAPABILITIES],
             claimed_devices: [None; MAX_SERVICE_DEVICE_CLAIMS],
@@ -418,7 +430,7 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
 
         if let Some(mut record) = self.records[index] {
             record.pid = None;
-            record.state = StartupState::Failed;
+            record.state = StartupState::Crashed;
             record.last_exit_status = Some(report.status);
             record.failure = None;
             self.records[index] = Some(record);
@@ -426,13 +438,16 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
 
         let record = self.records[index].unwrap();
         if record.restart_policy == RestartPolicy::Never {
+            self.set_stopped(index);
             return ServiceRecoveryState::Stopped;
         }
+
+        self.set_restarting(index);
 
         match self.respawn_record(kernel, index) {
             Ok(pid) => ServiceRecoveryState::Restarted(pid),
             Err(error) => {
-                self.set_failed(index, error);
+                self.set_denied(index, error);
                 ServiceRecoveryState::Failed(error)
             }
         }
@@ -451,9 +466,17 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
         true
     }
 
-    fn set_starting(&mut self, index: usize) {
+    fn set_validating(&mut self, index: usize) {
         if let Some(mut record) = self.records[index] {
-            record.state = StartupState::Starting;
+            record.state = StartupState::Validating;
+            record.failure = None;
+            self.records[index] = Some(record);
+        }
+    }
+
+    fn set_launching(&mut self, index: usize) {
+        if let Some(mut record) = self.records[index] {
+            record.state = StartupState::Launching;
             record.failure = None;
             self.records[index] = Some(record);
         }
@@ -468,11 +491,27 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
         }
     }
 
-    fn set_failed(&mut self, index: usize, error: KernelError) {
+    fn set_denied(&mut self, index: usize, error: KernelError) {
         if let Some(mut record) = self.records[index] {
-            record.state = StartupState::Failed;
+            record.state = StartupState::Denied;
             record.pid = None;
             record.failure = Some(error);
+            self.records[index] = Some(record);
+        }
+    }
+
+    fn set_restarting(&mut self, index: usize) {
+        if let Some(mut record) = self.records[index] {
+            record.state = StartupState::Restarting;
+            record.failure = None;
+            self.records[index] = Some(record);
+        }
+    }
+
+    fn set_stopped(&mut self, index: usize) {
+        if let Some(mut record) = self.records[index] {
+            record.state = StartupState::Stopped;
+            record.pid = None;
             self.records[index] = Some(record);
         }
     }
@@ -1251,8 +1290,16 @@ fn dependencies_ready<const CAP: usize>(
                         parent = report.dependency_pid(dependency);
                     }
                 }
-                Some(StartupState::Failed) | None => return DependencyStatus::Failed,
-                Some(StartupState::Pending) | Some(StartupState::Starting) => {
+                Some(StartupState::Denied)
+                | Some(StartupState::Crashed)
+                | Some(StartupState::Stopped)
+                | None => {
+                    return DependencyStatus::Failed;
+                }
+                Some(StartupState::Created)
+                | Some(StartupState::Validating)
+                | Some(StartupState::Launching)
+                | Some(StartupState::Restarting) => {
                     return DependencyStatus::Waiting;
                 }
             }
@@ -1452,11 +1499,12 @@ impl Supervisor {
 
             while idx < report.len() {
                 if let Some(record) = report.record(idx) {
-                    if record.state == StartupState::Pending {
+                    if record.state == StartupState::Created {
                         match dependencies_ready(record.descriptor, &report) {
                             DependencyStatus::Ready(parent) => {
+                                report.set_validating(idx);
                                 if !service_manifest_signature_valid(record.descriptor) {
-                                    report.set_failed(
+                                    report.set_denied(
                                         idx,
                                         KernelError::SecurityViolation(
                                             IsolationError::PolicyViolation,
@@ -1467,7 +1515,7 @@ impl Supervisor {
                                     continue;
                                 }
 
-                                report.set_starting(idx);
+                                report.set_launching(idx);
                                 let request = SpawnTaskRequest {
                                     parent,
                                     entry_point: record.descriptor.entry_point,
@@ -1480,7 +1528,7 @@ impl Supervisor {
                                         if let Err(error) =
                                             reset_spawned_service_capabilities(kernel, pid)
                                         {
-                                            report.set_failed(idx, error);
+                                            report.set_denied(idx, error);
                                             made_progress = true;
                                             idx += 1;
                                             continue;
@@ -1489,7 +1537,7 @@ impl Supervisor {
                                         if let Err(error) =
                                             report.regrant_record_capabilities(kernel, idx, pid)
                                         {
-                                            report.set_failed(idx, error);
+                                            report.set_denied(idx, error);
                                             made_progress = true;
                                             idx += 1;
                                             continue;
@@ -1510,7 +1558,7 @@ impl Supervisor {
                                             }
                                         }
                                     }
-                                    Err(error) => report.set_failed(idx, error),
+                                    Err(error) => report.set_denied(idx, error),
                                 }
                                 made_progress = true;
                             }
@@ -1518,7 +1566,7 @@ impl Supervisor {
                                 pending += 1;
                             }
                             DependencyStatus::Failed => {
-                                report.set_failed(idx, KernelError::InvalidArgument);
+                                report.set_denied(idx, KernelError::InvalidArgument);
                                 made_progress = true;
                             }
                         }
@@ -1535,8 +1583,8 @@ impl Supervisor {
                 let mut fail_idx = 0usize;
                 while fail_idx < report.len() {
                     if let Some(record) = report.record(fail_idx) {
-                        if record.state == StartupState::Pending {
-                            report.set_failed(fail_idx, KernelError::InvalidArgument);
+                        if record.state == StartupState::Created {
+                            report.set_denied(fail_idx, KernelError::InvalidArgument);
                         }
                     }
                     fail_idx += 1;
@@ -1636,6 +1684,46 @@ mod tests {
     }
 
     #[test]
+    fn manifest_signature_validation_failure_marks_service_denied() {
+        const BAD_DISPLAYD: ServiceDescriptor = ServiceDescriptor::new(
+            ServiceId::Displayd,
+            "displayd-bad-signature",
+            0,
+            ProcessPriority::High,
+            Credentials::new(
+                SecurityLabel::internal(),
+                CapabilitySet::ipc(),
+                IsolationLevel::Process,
+            ),
+            [None, None],
+            Some(ExecServiceDaemon::Display),
+            Some(ExecSignatureMetadata::new(
+                "mirage-service-root",
+                0xdead_beef,
+            )),
+        );
+        const BAD_MANIFEST: ServiceManifest<1> = ServiceManifest::new([Some(BAD_DISPLAYD)], 1);
+
+        let mut kernel = Kernel::<4, 4>::new();
+        kernel.bootstrap();
+        let supervisor = Supervisor::new();
+
+        let report = supervisor.spawn_services(&mut kernel, &BAD_MANIFEST);
+
+        assert_eq!(
+            report.state(ServiceId::Displayd),
+            Some(StartupState::Denied)
+        );
+        assert_eq!(report.pid(ServiceId::Displayd), None);
+        assert!(matches!(
+            report.record(0).and_then(|record| record.failure),
+            Some(KernelError::SecurityViolation(
+                IsolationError::PolicyViolation
+            ))
+        ));
+    }
+
+    #[test]
     fn restart_policy_never_stops_after_revoke_without_regranting_hardware() {
         let mut kernel = Kernel::<16, 4>::new();
         kernel.bootstrap();
@@ -1658,7 +1746,7 @@ mod tests {
 
         assert!(matches!(recovery, ServiceRecoveryState::Stopped));
         assert_eq!(report.pid(ServiceId::Nvmed), None);
-        assert_eq!(report.state(ServiceId::Nvmed), Some(StartupState::Failed));
+        assert_eq!(report.state(ServiceId::Nvmed), Some(StartupState::Stopped));
         assert!(matches!(
             kernel.revoke_task_capability(old_irq),
             Err(KernelError::SecurityViolation(
@@ -1716,6 +1804,7 @@ mod tests {
         };
         assert_ne!(new_nvmed, old_nvmed);
         assert_eq!(report.pid(ServiceId::Nvmed), Some(new_nvmed));
+        assert_eq!(report.state(ServiceId::Nvmed), Some(StartupState::Running));
         assert_eq!(report.generation(ServiceId::Nvmed), Some(1));
         assert_eq!(
             kernel.service_owner(RegistryServiceId::Nvmed),
@@ -1791,6 +1880,10 @@ mod tests {
         };
         assert_ne!(new_displayd, old_displayd);
         assert_eq!(report.pid(ServiceId::Displayd), Some(new_displayd));
+        assert_eq!(
+            report.state(ServiceId::Displayd),
+            Some(StartupState::Running)
+        );
         assert_eq!(report.generation(ServiceId::Displayd), Some(1));
         assert_eq!(
             kernel.service_owner(RegistryServiceId::Displayd),
