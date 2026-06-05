@@ -127,3 +127,14 @@ pub mod instructions {
         Err(InstructionError::Unavailable)
     }
 }
+
+pub mod cache;
+pub mod cpuid;
+pub mod topology;
+
+pub use cache::AmdCacheInfo;
+pub use cpuid::{
+    AmdCpuFamily, AmdCpuId, AmdCpuModel, AmdCpuStepping, AmdCpuidReader, AmdFeatureSet, AmdVendor,
+    CpuidLeaf, HardwareCpuid,
+};
+pub use topology::{AmdCoreId, AmdPackageId, AmdThreadId, AmdTopology};
