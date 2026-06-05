@@ -10,7 +10,6 @@ pub mod futex;
 pub mod ipc;
 pub mod memory;
 pub mod process;
-pub mod scheduler;
 pub mod services;
 pub mod sync;
 pub mod syscall;
@@ -46,7 +45,6 @@ use crate::kernel::process::{
     ProcessPriority, ProcessState, SessionId, SignalAction, SignalMask, MAX_EXEC_ARGS,
     MAX_EXEC_ENVS, MAX_SUPPLEMENTARY_GROUPS, SIGCHLD, SIGKILL, SIGTERM,
 };
-use crate::kernel::scheduler::{ScheduledThread, Scheduler};
 use crate::kernel::services::network::{
     NetworkIpcRequest, NetworkOpcode, NetworkRecvmsgRequest, NetworkRequestHeader,
     NetworkSendmsgRequest, NetworkSockaddrRequest, NetworkSocketRequest,
@@ -67,6 +65,9 @@ use crate::subkernel::{
 };
 use core::cmp::min;
 use core::ptr::NonNull;
+use mirage_mtss::{MtssThreadScheduleRecord, RunQueue};
+
+type KernelThreadScheduleRecord = MtssThreadScheduleRecord<ThreadId, ProcessId, ProcessPriority>;
 
 pub const MAX_PROCESSES: usize = 64;
 pub const MESSAGE_DEPTH: usize = 16;
@@ -679,7 +680,7 @@ const EMPTY_DEVICE_DESCRIPTOR: DeviceDescriptor = DeviceDescriptor::new(
 pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     process_table: [Option<ProcessControlBlock<MAX_OPEN_FILES>>; MAX_PROC],
     ipc_queues: [MessageQueue<MSG_DEPTH>; MAX_PROC],
-    scheduler: Scheduler<MAX_THREADS>,
+    scheduler: RunQueue<KernelThreadScheduleRecord, MAX_THREADS>,
     security: SecurityKernel<MAX_PROC>,
     devices: DeviceManager<MAX_DEVICES>,
     service_registry: ServiceRegistry<MAX_SERVICE_REGISTRATIONS, MAX_DEVICE_CLAIMS>,
@@ -700,11 +701,19 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
 impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> {
     const THREAD_CAPACITY: usize = MAX_THREADS;
 
+    const fn schedule_record(
+        thread: ThreadId,
+        process: ProcessId,
+        priority: ProcessPriority,
+    ) -> KernelThreadScheduleRecord {
+        MtssThreadScheduleRecord::new(thread, process, priority, priority.time_slice())
+    }
+
     pub const fn new() -> Self {
         Self {
             process_table: [None; MAX_PROC],
             ipc_queues: [MessageQueue::new(); MAX_PROC],
-            scheduler: Scheduler::new(),
+            scheduler: RunQueue::new(),
             security: SecurityKernel::new(),
             devices: DeviceManager::new(),
             service_registry: ServiceRegistry::new(),
@@ -3118,7 +3127,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .ok_or(KernelError::UnknownProcess)?
             .priority;
         self.scheduler
-            .enqueue(ScheduledThread::new(thread_id, pid, priority))
+            .enqueue(Self::schedule_record(thread_id, pid, priority))
             .map_err(|_| KernelError::SchedulerFull)
     }
 
@@ -3897,7 +3906,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if let Some(tcb) = self.thread_table[index].as_mut() {
             if tcb.state == ThreadState::Blocked {
                 tcb.mark_ready();
-                scheduled = Some(ScheduledThread::new(tcb.id, tcb.process, tcb.priority));
+                scheduled = Some(Self::schedule_record(tcb.id, tcb.process, tcb.priority));
             }
         }
         if let Some(scheduled_thread) = scheduled {
@@ -3979,7 +3988,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                         thread.mark_ready();
                         if self
                             .scheduler
-                            .enqueue(ScheduledThread::new(
+                            .enqueue(Self::schedule_record(
                                 thread.id,
                                 thread.process,
                                 thread.priority,

@@ -23,7 +23,7 @@ pub mod backend {
     use crate::{
         lifecycle::LifecycleEvent,
         stats::SchedulerStats,
-        types::{CpuId, SchedulerError, ThreadId, ThreadState, TimeSlice, Timestamp},
+        types::{CpuId, MtssError, ThreadId, ThreadState, TimeSlice, Timestamp},
     };
 
     /// Source of monotonic scheduler time.
@@ -33,12 +33,12 @@ pub mod backend {
 
     /// Mechanism used to request a low-level context switch.
     pub trait ContextSwitchBackend {
-        fn switch_to(&mut self, thread: ThreadId) -> Result<(), SchedulerError>;
+        fn switch_to(&mut self, thread: ThreadId) -> Result<(), MtssError>;
     }
 
     /// Mechanism used to arm preemption or accounting timer ticks.
     pub trait TimerBackend {
-        fn arm_timeslice(&mut self, cpu: CpuId, slice: TimeSlice) -> Result<(), SchedulerError>;
+        fn arm_timeslice(&mut self, cpu: CpuId, slice: TimeSlice) -> Result<(), MtssError>;
     }
 
     /// Observer hook for supervisor or test harness lifecycle reporting.
@@ -54,11 +54,7 @@ pub mod backend {
     /// Minimal storage contract for scheduler state backends.
     pub trait ThreadStateStore {
         fn load_state(&self, thread: ThreadId) -> Option<ThreadState>;
-        fn store_state(
-            &mut self,
-            thread: ThreadId,
-            state: ThreadState,
-        ) -> Result<(), SchedulerError>;
+        fn store_state(&mut self, thread: ThreadId, state: ThreadState) -> Result<(), MtssError>;
     }
 }
 
@@ -113,6 +109,8 @@ pub mod lifecycle {
     }
 }
 
+pub mod run_queue;
+
 pub mod scheduler {
     //! Small scheduler core building blocks.
     //!
@@ -123,7 +121,7 @@ pub mod scheduler {
     use crate::{
         lifecycle::{LifecycleEvent, LifecycleReason},
         stats::SchedulerStats,
-        types::{CpuId, SchedulerError, ThreadId, ThreadState, Timestamp},
+        types::{CpuId, MtssError, ThreadId, ThreadState, Timestamp},
     };
 
     /// Current scheduling decision for a CPU.
@@ -196,9 +194,9 @@ pub mod scheduler {
             &mut self,
             next: ThreadId,
             at: Timestamp,
-        ) -> Result<ScheduleDecision, SchedulerError> {
+        ) -> Result<ScheduleDecision, MtssError> {
             if Some(next) == self.current {
-                return Err(SchedulerError::AlreadyCurrent);
+                return Err(MtssError::AlreadyCurrent);
             }
 
             let previous = self.current;
@@ -398,7 +396,8 @@ pub mod types {
 
     /// MTSS operation failures.
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-    pub enum SchedulerError {
+    pub enum MtssError {
+        RunQueueFull,
         AlreadyCurrent,
         EmptyRunQueue,
         InvalidThread,
@@ -411,8 +410,9 @@ pub use backend::{
     ClockSource, ContextSwitchBackend, LifecycleSink, StatsSink, ThreadStateStore, TimerBackend,
 };
 pub use lifecycle::{LifecycleEvent, LifecycleReason};
+pub use run_queue::{MtssThreadScheduleRecord, RunQueue};
 pub use scheduler::{ScheduleDecision, SchedulerCore};
 pub use stats::SchedulerStats;
 pub use types::{
-    CpuId, Priority, SchedulerError, ThreadDescriptor, ThreadId, ThreadState, TimeSlice, Timestamp,
+    CpuId, MtssError, Priority, ThreadDescriptor, ThreadId, ThreadState, TimeSlice, Timestamp,
 };
