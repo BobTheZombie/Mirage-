@@ -21,6 +21,16 @@ pub mod backend {
         types::{CpuId, MtssError, ThreadId, ThreadState, Timeslice, Timestamp},
     };
 
+    /// Portable MTSS CPU backend contract.
+    ///
+    /// CPU-specific scheduler backend split comes after MTSS exists.
+    pub trait MtssBackend {
+        fn name(&self) -> &'static str;
+        fn init_cpu(&mut self, cpu: CpuId) -> Result<(), MtssError>;
+        fn current_cpu(&self) -> CpuId;
+        fn read_time_counter(&self) -> u64;
+    }
+
     /// Source of monotonic scheduler time.
     pub trait ClockSource {
         fn now(&self) -> Timestamp;
@@ -849,7 +859,8 @@ pub mod types {
 }
 
 pub use backend::{
-    ClockSource, ContextSwitchBackend, LifecycleSink, StatsSink, ThreadStateStore, TimerBackend,
+    ClockSource, ContextSwitchBackend, LifecycleSink, MtssBackend, StatsSink, ThreadStateStore,
+    TimerBackend,
 };
 pub use lifecycle::{LifecycleEvent, LifecycleReason, MtssEvent, MtssEventKind, MtssEventSink};
 pub use mtss::{
