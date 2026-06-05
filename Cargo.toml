@@ -70,6 +70,7 @@ qfs-std = ["dep:mirage-block", "dep:mirage-storage"]
 # skeleton heap allocator instead of implying a production memory subsystem.
 mirage-block = { path = "crates/mirage-block", optional = true }
 mirage-storage = { path = "crates/mirage-storage", optional = true }
+mirage-platform = { path = "crates/mirage-platform" }
 
 [package.metadata.mirage]
 target = "x86_64-mirage"
