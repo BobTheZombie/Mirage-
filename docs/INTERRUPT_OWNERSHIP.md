@@ -18,6 +18,40 @@ monolithic driver host.
 * Existing hardware status documentation treats real IRQ/MSI/MSI-X routing as a
   missing hardware milestone, not as silently complete functionality.
 
+## Timer interrupt ownership
+
+Timer hardware follows the same mechanism/policy split as other interrupt
+sources. The kernel owns timer interrupt delivery, vector acknowledgement, and
+capability enforcement. The platform timer selector may identify a monotonic
+source, but it does not decide scheduler policy, service restart policy, or
+watchdog escalation.
+
+Mirage timer source priority is:
+
+```text
+invariant TSC if valid
+    -> APIC timer
+    -> HPET if discovered
+    -> PIT fallback
+```
+
+Ownership boundaries for those sources are:
+
+* `TscTimer` supplies monotonic counter/frequency mechanism after CPUID and
+  Ryzen quirk validation. It does not deliver interrupts by itself.
+* `ApicTimer` may drive kernel timer interrupts, but APIC vector routing remains
+  kernel-owned and capability-checked.
+* `HpetTimer` requires discovered HPET facts and future capability-covered MMIO
+  ownership before production hardware access.
+* `PitFallbackTimer` is a legacy last resort for early bring-up, not a preferred
+  policy choice.
+
+Supervisor policy may consume monotonic time for service deadlines, but the
+supervisor does not receive raw APIC/HPET/PIT authority unless the kernel grants
+explicit capabilities. Driver services receive timer or IRQ notifications
+through supervisor-approved subscriptions rather than binding hardware vectors
+directly.
+
 ## Stubbed now
 
 * Supervisor interrupt subscription is not yet a complete runtime interface. The
