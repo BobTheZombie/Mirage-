@@ -13,6 +13,7 @@ use crate::kernel::process::{
 };
 use crate::kernel::services::registry::ServiceId as RegistryServiceId;
 use crate::kernel::{Kernel, KernelError, ProcessExitReport};
+use mirage_platform::{DeviceCandidateRole, DeviceDiscoveryEvent, PlatformInfo, PlatformService};
 pub mod mock_service;
 
 use crate::subkernel::{
@@ -1424,6 +1425,22 @@ impl MinimalSupervisorReport {
     }
 }
 
+/// Supervisor-owned platform initialization report.
+///
+/// `mirage-platform` supplies discovery facts and device candidates only; this
+/// report is intentionally held by the supervisor so capability grant, service
+/// launch, and recovery policy remain centralized here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SupervisorPlatformReport {
+    pub platform: PlatformInfo,
+}
+
+impl SupervisorPlatformReport {
+    pub fn device_discovery_events(&self) -> &[DeviceDiscoveryEvent] {
+        &self.platform.events
+    }
+}
+
 /// Supervisor entry point for early service lifecycle management.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Supervisor;
@@ -1431,6 +1448,83 @@ pub struct Supervisor;
 impl Supervisor {
     pub const fn new() -> Self {
         Self
+    }
+
+    /// Initialize platform discovery without granting driver authority.
+    ///
+    /// The platform service reports CPU, Ryzen generation, timer, interrupt,
+    /// chipset, and IOMMU candidates. The supervisor keeps ownership of policy,
+    /// recovery, and capability issuance.
+    pub fn init_platform(&self) -> SupervisorPlatformReport {
+        SupervisorPlatformReport {
+            platform: PlatformService::detect().into_info(),
+        }
+    }
+
+    /// Mint a bounded hardware-capability proposal for a discovered device.
+    ///
+    /// Driver services such as AHCI, NVMe, USB, and AMDGPU claim devices through
+    /// these supervisor-granted capabilities. They do not receive authority from
+    /// Ryzen generation classification and should not depend on `mirage-ryzen`
+    /// for device ownership.
+    pub fn grant_platform_caps(
+        &self,
+        event: DeviceDiscoveryEvent,
+    ) -> [Option<ServiceCapabilityAssignment>; MAX_SERVICE_CAPABILITIES] {
+        let mut capabilities = [None; MAX_SERVICE_CAPABILITIES];
+        let mut idx = 0usize;
+        let pci = event.pci();
+        let pci_device = pci.capability_object_id();
+        let mmio_base = pci.bar0_base.unwrap_or(0);
+        let mmio_length = pci.bar0_length.unwrap_or(0x1000);
+        let mut policy = HardwareCapabilityPolicy::new(pci_device, mmio_base, mmio_length);
+        if let Some(irq_line) = pci.irq_line {
+            policy = policy.with_irq(irq_line);
+        }
+
+        match event {
+            DeviceDiscoveryEvent::DriverCandidate { role, .. } => match role {
+                DeviceCandidateRole::AhciStorage => {
+                    assign_ahci_capability_bundle(&mut capabilities, &mut idx, policy);
+                }
+                DeviceCandidateRole::NvmeStorage => {
+                    assign_nvme_capability_bundle(&mut capabilities, &mut idx, policy);
+                }
+                DeviceCandidateRole::XhciUsb => {
+                    assign_xhci_usb_capability_bundle(&mut capabilities, &mut idx, policy);
+                }
+                DeviceCandidateRole::AmdGpuDisplay => {
+                    assign_amdgpu_capability_bundle(&mut capabilities, &mut idx, policy);
+                }
+                DeviceCandidateRole::AmdIommu => {
+                    assign_pci_mmio_dma_irq_register_bundle(
+                        &mut capabilities,
+                        &mut idx,
+                        policy,
+                        false,
+                    );
+                    assign_capability(
+                        &mut capabilities,
+                        &mut idx,
+                        CapabilityObject::ServiceControl,
+                        CapabilityRights::service_control(),
+                    );
+                }
+            },
+            DeviceDiscoveryEvent::IommuCapability { .. } => {
+                assign_pci_mmio_dma_irq_register_bundle(&mut capabilities, &mut idx, policy, false);
+            }
+        }
+
+        capabilities
+    }
+
+    /// Return supervisor-visible device discovery events from a platform report.
+    pub fn device_discovery_events<'a>(
+        &self,
+        report: &'a SupervisorPlatformReport,
+    ) -> &'a [DeviceDiscoveryEvent] {
+        report.device_discovery_events()
     }
 
     /// Initialize the minimal supervisor path without launching the full driver manifest.
