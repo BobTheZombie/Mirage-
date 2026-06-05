@@ -7,6 +7,14 @@
 //! launch and handoff records from supervisor-issued capabilities, but it does
 //! not perform raw hardware access.
 
+pub mod timer;
+
+pub use timer::{
+    calibrate_timer, monotonic_now, timer_frequency, ApicTimer, HpetTimer, PitFallbackTimer,
+    PlatformTimer, ReferenceTimer, SelectedPlatformTimer, TimerDiscovery, TimerError, TimerKind,
+    TscCalibration, TscCounter, TscTimer,
+};
+
 use mirage_cap::{CapabilityObject, CapabilityRights, CapabilitySet};
 use mirage_ipc::EndpointId;
 
