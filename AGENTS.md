@@ -37,7 +37,8 @@ the Mirage kernel and supervisor architecture
 Mirage separates **mechanism** from **policy**.
 
 ```text
-Mirage Kernel      = mechanism
+Mirage Kernel      = CPU entry/exit, privilege boundaries, low-level primitives
+MTSS               = portable multitasking mechanics
 Mirage Supervisor  = policy, authority, recovery
 Driver Services    = isolated execution units
 Applications       = POSIX/GNU-compatible programs
@@ -62,6 +63,8 @@ IPC + Capability Layer
     │
 Mirage Supervisor
     │
+MTSS — portable multitasking mechanics
+    │
 Mirage Kernel
     │
 Hardware
@@ -75,23 +78,49 @@ The kernel is responsible only for core machine control.
 
 The kernel owns:
 
-* CPU scheduling
-* task/thread switching
+* CPU entry/exit
+* trap and syscall entry/exit
 * interrupt handling
+* low-level timer delivery
+* architecture-specific context frame restore/save mechanics
+* low-level scheduling primitives required to enter, leave, or preempt CPU execution
 * virtual memory
 * address spaces
 * page tables
-* syscall entry/exit
 * IPC transport
 * capability enforcement
 * low-level module loading
 * hardware privilege boundaries
 
+The kernel does not own portable scheduler, task, or thread policy. Portable runnable-state management, task/thread lifecycle mechanics, run queues, timeslice accounting, and scheduler-visible state transitions belong in MTSS.
+
 The kernel must not own high-level system policy.
 
 The kernel must not become a Linux-style monolith.
 
-The kernel should expose minimal, stable primitives that the supervisor and services build upon.
+The kernel should expose minimal, stable primitives that MTSS, the supervisor, and services build upon.
+
+---
+
+## MTSS Responsibilities
+
+MTSS is the Mirage Micro-Thread Scheduling Service layer for portable multitasking mechanics.
+
+Portable task/thread/scheduler logic belongs in MTSS, not directly in the kernel or supervisor.
+
+MTSS owns:
+
+* portable task and micro-thread lifecycle state
+* runnable, blocked, sleeping, contained, terminated, and reaped state transitions
+* scheduler-visible identities and accounting records
+* run queues and queue transitions
+* portable priority and timeslice mechanics
+* scheduler lifecycle events for supervisor observation
+* backend-neutral contracts for future CPU-specific scheduling backends
+
+MTSS does not own CPU privilege transitions, page-table switching, interrupt/trap entry, or raw hardware timer programming. Those remain kernel and architecture-backend mechanisms.
+
+MTSS does not own service policy, recovery policy, capability granting, or launch authorization. Those remain supervisor responsibilities.
 
 ---
 
