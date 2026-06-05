@@ -139,6 +139,7 @@ pub mod lifecycle {
     pub type MtssEvent = LifecycleEvent;
 }
 
+pub mod mtss;
 pub mod run_queue;
 
 pub mod scheduler {
@@ -776,6 +777,8 @@ pub mod types {
         EmptyRunQueue,
         InvalidTask,
         InvalidThread,
+        TaskTableFull,
+        ThreadTableFull,
         InvalidTaskTransition { from: TaskState, to: TaskState },
         InvalidThreadTransition { from: ThreadState, to: ThreadState },
         BackendUnavailable,
@@ -787,6 +790,9 @@ pub use backend::{
     ClockSource, ContextSwitchBackend, LifecycleSink, StatsSink, ThreadStateStore, TimerBackend,
 };
 pub use lifecycle::{LifecycleEvent, LifecycleReason, MtssEvent};
+pub use mtss::{
+    Mtss, MtssConfig, MtssHandle, DEFAULT_MAX_TASKS, DEFAULT_MAX_THREADS, DEFAULT_RUN_QUEUE_DEPTH,
+};
 pub use run_queue::{MtssThreadScheduleRecord, RunQueue};
 pub use scheduler::{ScheduleDecision, SchedulerCore};
 pub use stats::{MtssStats, SchedulerStats};
@@ -830,5 +836,65 @@ mod tests {
         assert_eq!(thread.wake(), Ok(ThreadState::Sleeping));
         assert_eq!(thread.block(), Ok(ThreadState::Ready));
         assert_eq!(thread.terminate(), Ok(ThreadState::Blocked));
+    }
+
+    #[test]
+    fn mtss_schedules_yields_and_preempts_threads() {
+        let mut mtss: Mtss<2, 4, 4> = Mtss::new(
+            MtssConfig::new(CpuId::new(0)).with_default_timeslice(Timeslice::from_ticks(1)),
+        );
+        mtss.create_task(
+            TaskId::new(1),
+            None,
+            AddressSpaceId::new(1),
+            Priority::NORMAL,
+        )
+        .unwrap();
+        mtss.create_thread(TaskId::new(1), ThreadId::new(10), Priority::NORMAL)
+            .unwrap();
+        mtss.create_thread(TaskId::new(1), ThreadId::new(11), Priority::NORMAL)
+            .unwrap();
+
+        mtss.enqueue_thread(ThreadId::new(10)).unwrap();
+        mtss.enqueue_thread(ThreadId::new(11)).unwrap();
+
+        let first = mtss.pick_next().unwrap().unwrap();
+        assert_eq!(first.next, ThreadId::new(10));
+        let second = mtss.on_timer_tick().unwrap().unwrap();
+        assert_eq!(second.previous, Some(ThreadId::new(10)));
+        assert_eq!(second.next, ThreadId::new(11));
+        assert_eq!(mtss.stats().preemptions, 1);
+    }
+
+    #[test]
+    fn mtss_rejects_invalid_state_transitions_without_panicking() {
+        let mut mtss: Mtss<1, 1, 1> = Mtss::new(MtssConfig::default());
+        mtss.create_task(
+            TaskId::new(1),
+            None,
+            AddressSpaceId::new(1),
+            Priority::NORMAL,
+        )
+        .unwrap();
+        mtss.create_thread(TaskId::new(1), ThreadId::new(10), Priority::NORMAL)
+            .unwrap();
+
+        let err = mtss.block_thread(ThreadId::new(10)).unwrap_err();
+        assert_eq!(
+            err,
+            MtssError::InvalidThreadTransition {
+                from: ThreadState::Created,
+                to: ThreadState::Blocked,
+            }
+        );
+
+        let err = mtss.reap_task(TaskId::new(1)).unwrap_err();
+        assert_eq!(
+            err,
+            MtssError::InvalidTaskTransition {
+                from: TaskState::Runnable,
+                to: TaskState::Reaped,
+            }
+        );
     }
 }
