@@ -7,7 +7,7 @@
 //! emits minimal scheduling decisions.
 
 use crate::{
-    lifecycle::LifecycleReason,
+    lifecycle::{LifecycleReason, MtssEvent, MtssEventKind, MtssEventSink},
     run_queue::{MtssThreadScheduleRecord, RunQueue},
     scheduler::ScheduleDecision,
     stats::MtssStats,
@@ -23,6 +23,8 @@ pub const DEFAULT_MAX_TASKS: usize = 64;
 pub const DEFAULT_MAX_THREADS: usize = 256;
 /// Default number of runnable thread records retained by [`Mtss`].
 pub const DEFAULT_RUN_QUEUE_DEPTH: usize = 256;
+/// Default number of scheduler events retained by [`Mtss`].
+pub const DEFAULT_EVENT_QUEUE_DEPTH: usize = 256;
 
 /// Configuration for an MTSS scheduler instance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +92,7 @@ pub struct Mtss<
     const MAX_TASKS: usize = DEFAULT_MAX_TASKS,
     const MAX_THREADS: usize = DEFAULT_MAX_THREADS,
     const RUN_QUEUE_DEPTH: usize = DEFAULT_RUN_QUEUE_DEPTH,
+    const EVENT_QUEUE_DEPTH: usize = DEFAULT_EVENT_QUEUE_DEPTH,
 > {
     config: MtssConfig,
     now: Timestamp,
@@ -98,10 +101,18 @@ pub struct Mtss<
     threads: [Option<Thread>; MAX_THREADS],
     run_queue: RunQueue<MtssThreadScheduleRecord<ThreadId, TaskId, Priority>, RUN_QUEUE_DEPTH>,
     stats: MtssStats,
+    events: [Option<MtssEvent>; EVENT_QUEUE_DEPTH],
+    event_head: usize,
+    event_len: usize,
+    dropped_events: u64,
 }
 
-impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: usize>
-    Mtss<MAX_TASKS, MAX_THREADS, RUN_QUEUE_DEPTH>
+impl<
+        const MAX_TASKS: usize,
+        const MAX_THREADS: usize,
+        const RUN_QUEUE_DEPTH: usize,
+        const EVENT_QUEUE_DEPTH: usize,
+    > Mtss<MAX_TASKS, MAX_THREADS, RUN_QUEUE_DEPTH, EVENT_QUEUE_DEPTH>
 {
     /// Create a fixed-capacity MTSS scheduler instance.
     pub const fn new(config: MtssConfig) -> Self {
@@ -113,6 +124,10 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
             threads: [None; MAX_THREADS],
             run_queue: RunQueue::new(),
             stats: MtssStats::new(),
+            events: [None; EVENT_QUEUE_DEPTH],
+            event_head: 0,
+            event_len: 0,
+            dropped_events: 0,
         }
     }
 
@@ -124,6 +139,37 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
     /// Return the currently running thread, if any.
     pub const fn current(&self) -> Option<ThreadId> {
         self.current
+    }
+
+    /// Return the number of queued MTSS events waiting to be drained.
+    pub const fn pending_events(&self) -> usize {
+        self.event_len
+    }
+
+    /// Return the number of events dropped because the fixed event ring was full.
+    pub const fn dropped_events(&self) -> u64 {
+        self.dropped_events
+    }
+
+    /// Drain the oldest MTSS event from the internal fixed-capacity ring.
+    pub fn drain_event(&mut self) -> Option<MtssEvent> {
+        if self.event_len == 0 {
+            return None;
+        }
+        let event = self.events[self.event_head].take();
+        self.event_head = (self.event_head + 1) % EVENT_QUEUE_DEPTH;
+        self.event_len -= 1;
+        event
+    }
+
+    /// Drain all queued events into a caller-provided sink.
+    pub fn drain_events_to<S: MtssEventSink + ?Sized>(&mut self, sink: &mut S) -> usize {
+        let mut drained = 0usize;
+        while let Some(event) = self.drain_event() {
+            sink.record_mtss_event(event);
+            drained += 1;
+        }
+        drained
     }
 
     /// Create and admit a task into the runnable task set.
@@ -142,6 +188,7 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
         task.admit()?;
         self.tasks[slot] = Some(task);
         self.stats = self.stats.with_task_admission();
+        self.emit(MtssEvent::task(MtssEventKind::TaskCreated, id, self.now));
         Ok(MtssHandle::task(id))
     }
 
@@ -171,22 +218,36 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
             self.config.default_timeslice,
         ));
         self.with_task_mut(task, |task| task.increment_thread_count())?;
+        self.emit(MtssEvent::thread(
+            MtssEventKind::ThreadCreated,
+            task,
+            thread,
+            None,
+            self.now,
+        ));
         Ok(MtssHandle::thread(task, thread))
     }
 
     /// Validate a thread transition into `Ready` and append it to the run queue.
     pub fn enqueue_thread(&mut self, thread: ThreadId) -> Result<(), MtssError> {
         self.ensure_run_queue_capacity()?;
-        let record = {
+        let (record, task) = {
             let thread = self.thread_mut(thread)?;
             let previous = thread.state;
             if previous != ThreadState::Ready {
                 thread.transition(ThreadState::Ready)?;
             }
-            Self::schedule_record(*thread)
+            (Self::schedule_record(*thread), thread.task)
         };
         self.run_queue.enqueue(record)?;
         self.stats = self.stats.with_admission();
+        self.emit(MtssEvent::thread(
+            MtssEventKind::ThreadRunnable,
+            task,
+            thread,
+            Some(self.config.cpu),
+            self.now,
+        ));
         Ok(())
     }
 
@@ -225,6 +286,14 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
         }
 
         self.stats = self.stats.with_preemption();
+        let task = self.thread(current)?.task;
+        self.emit(MtssEvent::thread(
+            MtssEventKind::TimesliceExpired,
+            task,
+            current,
+            Some(self.config.cpu),
+            self.now,
+        ));
         self.yield_current()
     }
 
@@ -251,6 +320,13 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
         };
         self.refresh_task_wait_state(task, TaskState::Blocked)?;
         self.stats = self.stats.with_block();
+        self.emit(MtssEvent::thread(
+            MtssEventKind::ThreadBlocked,
+            task,
+            thread,
+            Some(self.config.cpu),
+            self.now,
+        ));
         Ok(())
     }
 
@@ -281,6 +357,13 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
         };
         self.refresh_task_wait_state(task, TaskState::Sleeping)?;
         self.stats = self.stats.with_sleep();
+        self.emit(MtssEvent::thread(
+            MtssEventKind::ThreadSleeping,
+            task,
+            thread,
+            Some(self.config.cpu),
+            self.now,
+        ));
         Ok(())
     }
 
@@ -294,6 +377,14 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
                     self.unschedule_thread(thread.id);
                     thread.terminate()?;
                     self.threads[idx] = Some(thread);
+                    self.stats = self.stats.with_completion();
+                    self.emit(MtssEvent::thread(
+                        MtssEventKind::ThreadExited,
+                        task,
+                        thread.id,
+                        Some(self.config.cpu),
+                        self.now,
+                    ));
                 }
             }
             idx += 1;
@@ -301,6 +392,31 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
         if previous != TaskState::Terminated {
             self.stats = self.stats.with_task_completion();
         }
+        self.emit(MtssEvent::task(
+            MtssEventKind::TaskTerminated,
+            task,
+            self.now,
+        ));
+        Ok(())
+    }
+
+    /// Mark one thread as exited and remove it from scheduling.
+    pub fn exit_thread(&mut self, thread: ThreadId) -> Result<(), MtssError> {
+        self.unschedule_thread(thread);
+        let task = {
+            let thread = self.thread_mut(thread)?;
+            thread.terminate()?;
+            thread.task
+        };
+        self.with_task_mut(task, |task| task.decrement_thread_count())?;
+        self.stats = self.stats.with_completion();
+        self.emit(MtssEvent::thread(
+            MtssEventKind::ThreadExited,
+            task,
+            thread,
+            Some(self.config.cpu),
+            self.now,
+        ));
         Ok(())
     }
 
@@ -311,8 +427,9 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
             if task.state != TaskState::Suspect {
                 task.suspect()?;
             }
-            task.contain()?;
         }
+        self.emit(MtssEvent::task(MtssEventKind::TaskSuspect, task, self.now));
+        self.task_mut(task)?.contain()?;
         let mut idx = 0;
         while idx < MAX_THREADS {
             if let Some(thread) = self.threads[idx] {
@@ -323,6 +440,11 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
             idx += 1;
         }
         self.stats = self.stats.with_containment();
+        self.emit(MtssEvent::task(
+            MtssEventKind::TaskContained,
+            task,
+            self.now,
+        ));
         Ok(())
     }
 
@@ -366,6 +488,7 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
         }
         self.tasks[task_index] = None;
         self.stats = self.stats.with_reap();
+        self.emit(MtssEvent::task(MtssEventKind::TaskReaped, task, self.now));
         Ok(())
     }
 
@@ -389,6 +512,13 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
         })?;
         self.current = Some(thread);
         self.stats = self.stats.with_context_switch();
+        self.emit(MtssEvent::thread(
+            MtssEventKind::ThreadRunning,
+            task,
+            thread,
+            Some(self.config.cpu),
+            self.now,
+        ));
         Ok(ScheduleDecision::new(
             self.config.cpu,
             previous,
@@ -404,13 +534,21 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
     ) -> Result<(), MtssError> {
         self.ensure_run_queue_capacity()?;
         let default_timeslice = self.config.default_timeslice;
-        let record = {
+        let (record, task) = {
             let thread = self.thread_mut(thread)?;
             thread.mark_ready()?;
             thread.reset_timeslice(default_timeslice);
-            Self::schedule_record(*thread)
+            (Self::schedule_record(*thread), thread.task)
         };
-        self.run_queue.requeue(record)
+        self.run_queue.requeue(record)?;
+        self.emit(MtssEvent::thread(
+            MtssEventKind::ThreadRunnable,
+            task,
+            thread,
+            Some(self.config.cpu),
+            self.now,
+        ));
+        Ok(())
     }
 
     fn schedule_record(thread: Thread) -> MtssThreadScheduleRecord<ThreadId, TaskId, Priority> {
@@ -469,6 +607,24 @@ impl<const MAX_TASKS: usize, const MAX_THREADS: usize, const RUN_QUEUE_DEPTH: us
         } else {
             Ok(())
         }
+    }
+
+    fn emit(&mut self, event: MtssEvent) {
+        if EVENT_QUEUE_DEPTH == 0 {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+            return;
+        }
+
+        if self.event_len == EVENT_QUEUE_DEPTH {
+            self.events[self.event_head] = Some(event);
+            self.event_head = (self.event_head + 1) % EVENT_QUEUE_DEPTH;
+            self.dropped_events = self.dropped_events.saturating_add(1);
+            return;
+        }
+
+        let tail = (self.event_head + self.event_len) % EVENT_QUEUE_DEPTH;
+        self.events[tail] = Some(event);
+        self.event_len += 1;
     }
 
     fn unschedule_thread(&mut self, thread: ThreadId) {

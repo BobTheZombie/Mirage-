@@ -58,6 +58,71 @@ pub mod lifecycle {
 
     use crate::types::{CpuId, TaskId, TaskState, ThreadId, ThreadState, Timestamp};
 
+    /// Stable MTSS event kind consumed by supervisors, test harnesses, or logs.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    pub enum MtssEventKind {
+        TaskCreated,
+        ThreadCreated,
+        ThreadRunnable,
+        ThreadRunning,
+        ThreadBlocked,
+        ThreadSleeping,
+        TaskSuspect,
+        TaskContained,
+        TaskTerminated,
+        TaskReaped,
+        ThreadExited,
+        TimesliceExpired,
+    }
+
+    /// Decoupled MTSS event record.
+    ///
+    /// The record intentionally carries only portable MTSS identities and
+    /// scheduler time, so this crate does not depend on the supervisor, RAMFS,
+    /// filesystem services, or kernel internals.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    pub struct MtssEvent {
+        pub kind: MtssEventKind,
+        pub task: Option<TaskId>,
+        pub thread: Option<ThreadId>,
+        pub cpu: Option<CpuId>,
+        pub at: Timestamp,
+    }
+
+    impl MtssEvent {
+        pub const fn task(kind: MtssEventKind, task: TaskId, at: Timestamp) -> Self {
+            Self {
+                kind,
+                task: Some(task),
+                thread: None,
+                cpu: None,
+                at,
+            }
+        }
+
+        pub const fn thread(
+            kind: MtssEventKind,
+            task: TaskId,
+            thread: ThreadId,
+            cpu: Option<CpuId>,
+            at: Timestamp,
+        ) -> Self {
+            Self {
+                kind,
+                task: Some(task),
+                thread: Some(thread),
+                cpu,
+                at,
+            }
+        }
+    }
+
+    /// Consumer-side sink for draining MTSS events without coupling MTSS to any
+    /// concrete supervisor, filesystem, RAMFS, or kernel logging implementation.
+    pub trait MtssEventSink {
+        fn record_mtss_event(&mut self, event: MtssEvent);
+    }
+
     /// Reason a task or micro-thread changed lifecycle state.
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
     pub enum LifecycleReason {
@@ -134,9 +199,6 @@ pub mod lifecycle {
             }
         }
     }
-
-    /// Public MTSS lifecycle event name requested by the architecture spec.
-    pub type MtssEvent = LifecycleEvent;
 }
 
 pub mod mtss;
@@ -789,9 +851,10 @@ pub mod types {
 pub use backend::{
     ClockSource, ContextSwitchBackend, LifecycleSink, StatsSink, ThreadStateStore, TimerBackend,
 };
-pub use lifecycle::{LifecycleEvent, LifecycleReason, MtssEvent};
+pub use lifecycle::{LifecycleEvent, LifecycleReason, MtssEvent, MtssEventKind, MtssEventSink};
 pub use mtss::{
-    Mtss, MtssConfig, MtssHandle, DEFAULT_MAX_TASKS, DEFAULT_MAX_THREADS, DEFAULT_RUN_QUEUE_DEPTH,
+    Mtss, MtssConfig, MtssHandle, DEFAULT_EVENT_QUEUE_DEPTH, DEFAULT_MAX_TASKS,
+    DEFAULT_MAX_THREADS, DEFAULT_RUN_QUEUE_DEPTH,
 };
 pub use run_queue::{MtssThreadScheduleRecord, RunQueue};
 pub use scheduler::{ScheduleDecision, SchedulerCore};
@@ -864,6 +927,72 @@ mod tests {
         assert_eq!(second.previous, Some(ThreadId::new(10)));
         assert_eq!(second.next, ThreadId::new(11));
         assert_eq!(mtss.stats().preemptions, 1);
+    }
+
+    #[test]
+    fn mtss_drains_decoupled_events_to_sink() {
+        struct EventRecorder {
+            events: [Option<MtssEvent>; 12],
+            len: usize,
+        }
+
+        impl MtssEventSink for EventRecorder {
+            fn record_mtss_event(&mut self, event: MtssEvent) {
+                self.events[self.len] = Some(event);
+                self.len += 1;
+            }
+        }
+
+        let mut mtss: Mtss<2, 4, 4, 12> = Mtss::new(
+            MtssConfig::new(CpuId::new(1)).with_default_timeslice(Timeslice::from_ticks(1)),
+        );
+        mtss.create_task(
+            TaskId::new(1),
+            None,
+            AddressSpaceId::new(1),
+            Priority::NORMAL,
+        )
+        .unwrap();
+        mtss.create_thread(TaskId::new(1), ThreadId::new(10), Priority::NORMAL)
+            .unwrap();
+        mtss.create_thread(TaskId::new(1), ThreadId::new(11), Priority::NORMAL)
+            .unwrap();
+        mtss.enqueue_thread(ThreadId::new(10)).unwrap();
+        mtss.enqueue_thread(ThreadId::new(11)).unwrap();
+        mtss.pick_next().unwrap().unwrap();
+        mtss.on_timer_tick().unwrap().unwrap();
+
+        let mut recorder = EventRecorder {
+            events: [None; 12],
+            len: 0,
+        };
+        assert_eq!(mtss.drain_events_to(&mut recorder), 9);
+        assert_eq!(mtss.pending_events(), 0);
+        assert_eq!(recorder.events[0].unwrap().kind, MtssEventKind::TaskCreated);
+        assert_eq!(
+            recorder.events[1].unwrap().kind,
+            MtssEventKind::ThreadCreated
+        );
+        assert_eq!(
+            recorder.events[3].unwrap().kind,
+            MtssEventKind::ThreadRunnable
+        );
+        assert_eq!(
+            recorder.events[5].unwrap().kind,
+            MtssEventKind::ThreadRunning
+        );
+        assert_eq!(
+            recorder.events[6].unwrap().kind,
+            MtssEventKind::TimesliceExpired
+        );
+        assert_eq!(
+            recorder.events[7].unwrap().kind,
+            MtssEventKind::ThreadRunnable
+        );
+        assert_eq!(
+            recorder.events[8].unwrap().kind,
+            MtssEventKind::ThreadRunning
+        );
     }
 
     #[test]
