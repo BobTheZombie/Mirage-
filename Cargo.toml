@@ -72,6 +72,7 @@ qfs-std = ["dep:mirage-block", "dep:mirage-storage"]
 mirage-block = { path = "crates/mirage-block", optional = true }
 mirage-storage = { path = "crates/mirage-storage", optional = true }
 mirage-platform = { path = "crates/mirage-platform" }
+mirage-mtss = { path = "crates/mirage-mtss", default-features = false }
 
 [package.metadata.mirage]
 target = "x86_64-mirage"

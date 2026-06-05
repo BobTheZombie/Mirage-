@@ -2,13 +2,12 @@
 //!
 //! Syscall handlers translate ABI arguments into these kernel-internal task
 //! requests.  L2 authorization happens here before creating a task domain or
-//! replacing an image, while L1 keeps ownership of scheduler queues, thread
-//! contexts, descriptor tables, and address-space bookkeeping.
+//! replacing an image, while L1 integrates MTSS run queues with thread contexts,
+//! descriptor tables, and address-space bookkeeping.
 
 use crate::kernel::process::{
     ExecRequest, ExitStatus, ProcessControlBlock, ProcessId, ProcessPriority, ProcessState,
 };
-use crate::kernel::scheduler::ScheduledThread;
 use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId};
 use crate::kernel::{memory, Kernel, KernelError, KernelResult};
 use crate::subkernel::Credentials;
@@ -217,7 +216,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
                 }
             };
         self.scheduler
-            .enqueue(ScheduledThread::new(thread, pid, request.priority))
+            .enqueue(Self::schedule_record(thread, pid, request.priority))
             .map_err(|_| {
                 self.rollback_thread_creation(thread);
                 if created_process {
@@ -349,7 +348,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
 
         if self
             .scheduler
-            .enqueue(ScheduledThread::new(thread_id, pid, priority))
+            .enqueue(Self::schedule_record(thread_id, pid, priority))
             .is_err()
         {
             self.rollback_thread_creation(thread_id);
