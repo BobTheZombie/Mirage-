@@ -324,6 +324,223 @@ pub const DEFAULT_RYZEN_QUIRKS: &[RyzenQuirkEntry] = &[
     },
 ];
 
+/// AMD telemetry scaffold types and mock readers.
+///
+/// This module is intentionally read-only: it models telemetry facts for a
+/// future supervised service, but it does not expose tuning, overclocking,
+/// firmware mutation, SMU writes, or permanent firmware changes. Any future
+/// real hardware collector must remain behind the `hw-amd-telemetry` feature
+/// and receive narrowly scoped supervisor capabilities.
+pub mod telemetry {
+    use super::{
+        RyzenDetectionStatus, RyzenGeneration, RyzenPlatform, RyzenSupportStatus,
+        RyzenTelemetryChannel,
+    };
+
+    /// Errors returned by AMD telemetry discovery and read scaffolds.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    pub enum AmdTelemetryError {
+        /// The current CPU vendor is not AMD.
+        UnsupportedVendor,
+        /// Mirage cannot prove that the requested telemetry channel exists.
+        SensorUnavailable,
+        /// AMD P-state reporting is not known to be available for this CPU.
+        PstateUnsupported,
+        /// Real hardware telemetry was requested without enabling the gated path.
+        HardwarePathDisabled,
+        /// A caller attempted to request a non-telemetry control operation.
+        UnsafeOperationRejected,
+    }
+
+    /// Read-only AMD thermal sensor sample.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct AmdThermalSensor {
+        pub channel: RyzenTelemetryChannel,
+        pub temperature_millicelsius: i32,
+        pub fresh: bool,
+    }
+
+    impl AmdThermalSensor {
+        pub const fn new(
+            channel: RyzenTelemetryChannel,
+            temperature_millicelsius: i32,
+            fresh: bool,
+        ) -> Self {
+            Self {
+                channel,
+                temperature_millicelsius,
+                fresh,
+            }
+        }
+
+        pub const fn temperature_celsius(self) -> i32 {
+            self.temperature_millicelsius / 1_000
+        }
+    }
+
+    /// Read-only AMD power-state sample.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct AmdPowerState {
+        pub pstate_id: u8,
+        pub effective_frequency_mhz: u32,
+        pub package_power_milliwatts: u32,
+        pub boost_active: bool,
+    }
+
+    impl AmdPowerState {
+        pub const fn new(
+            pstate_id: u8,
+            effective_frequency_mhz: u32,
+            package_power_milliwatts: u32,
+            boost_active: bool,
+        ) -> Self {
+            Self {
+                pstate_id,
+                effective_frequency_mhz,
+                package_power_milliwatts,
+                boost_active,
+            }
+        }
+    }
+
+    /// Structured AMD P-state support information.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct AmdPstateInfo {
+        pub support: RyzenSupportStatus,
+        pub generation: RyzenGeneration,
+        pub requires_supervisor_service: bool,
+        pub reason: &'static str,
+    }
+
+    impl AmdPstateInfo {
+        pub const fn new(
+            support: RyzenSupportStatus,
+            generation: RyzenGeneration,
+            requires_supervisor_service: bool,
+            reason: &'static str,
+        ) -> Self {
+            Self {
+                support,
+                generation,
+                requires_supervisor_service,
+                reason,
+            }
+        }
+
+        pub const fn is_supported(self) -> bool {
+            matches!(self.support, RyzenSupportStatus::Supported)
+        }
+    }
+
+    /// Combined AMD telemetry snapshot for mock service integration tests.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct AmdTelemetry {
+        pub temperature: AmdThermalSensor,
+        pub power_state: AmdPowerState,
+        pub pstate: AmdPstateInfo,
+    }
+
+    impl AmdTelemetry {
+        pub fn read_mock(platform: RyzenPlatform) -> Result<Self, AmdTelemetryError> {
+            if platform.detection_status() == RyzenDetectionStatus::UnsupportedVendor {
+                return Err(AmdTelemetryError::UnsupportedVendor);
+            }
+
+            Ok(Self {
+                temperature: read_temperature_mock()?,
+                power_state: read_power_state_mock()?,
+                pstate: detect_pstate_support(platform),
+            })
+        }
+    }
+
+    /// Return a deterministic mock thermal sensor reading.
+    pub const fn read_temperature_mock() -> Result<AmdThermalSensor, AmdTelemetryError> {
+        Ok(AmdThermalSensor::new(
+            RyzenTelemetryChannel::TemperatureCelsius,
+            42_000,
+            true,
+        ))
+    }
+
+    /// Return a deterministic mock power-state reading.
+    pub const fn read_power_state_mock() -> Result<AmdPowerState, AmdTelemetryError> {
+        Ok(AmdPowerState::new(1, 3_600, 45_000, false))
+    }
+
+    /// Detect AMD P-state support from already-discovered mechanism facts.
+    ///
+    /// This is a conservative scaffold, not a hardware driver. It does not read
+    /// or write SMU/MSR state, and it does not tune voltage, frequency, power
+    /// limits, firmware settings, or boost behavior.
+    pub const fn detect_pstate_support(platform: RyzenPlatform) -> AmdPstateInfo {
+        match platform.detection_status() {
+            RyzenDetectionStatus::UnsupportedVendor => AmdPstateInfo::new(
+                RyzenSupportStatus::Unsupported,
+                platform.generation(),
+                false,
+                "non-AMD vendor",
+            ),
+            RyzenDetectionStatus::HardwareProbeUnavailable => AmdPstateInfo::new(
+                RyzenSupportStatus::Unknown,
+                platform.generation(),
+                true,
+                "hardware probe unavailable in this build",
+            ),
+            RyzenDetectionStatus::UnknownAmd64 => AmdPstateInfo::new(
+                RyzenSupportStatus::Unknown,
+                platform.generation(),
+                true,
+                "unmodeled AMD64 family/model",
+            ),
+            RyzenDetectionStatus::Detected => match platform.generation() {
+                RyzenGeneration::Zen | RyzenGeneration::ZenPlus => AmdPstateInfo::new(
+                    RyzenSupportStatus::Unknown,
+                    platform.generation(),
+                    true,
+                    "early Zen generation requires PPR-specific confirmation",
+                ),
+                RyzenGeneration::Zen2
+                | RyzenGeneration::Zen3
+                | RyzenGeneration::Zen4
+                | RyzenGeneration::Zen5 => AmdPstateInfo::new(
+                    RyzenSupportStatus::Supported,
+                    platform.generation(),
+                    true,
+                    "supported by Mirage telemetry scaffold",
+                ),
+                RyzenGeneration::UnknownAmd64 => AmdPstateInfo::new(
+                    RyzenSupportStatus::Unknown,
+                    platform.generation(),
+                    true,
+                    "unmodeled AMD64 generation",
+                ),
+            },
+        }
+    }
+
+    /// Placeholder for future read-only hardware telemetry.
+    #[cfg(feature = "hw-amd-telemetry")]
+    pub fn read_hardware_snapshot(
+        _platform: RyzenPlatform,
+    ) -> Result<AmdTelemetry, AmdTelemetryError> {
+        Err(AmdTelemetryError::HardwarePathDisabled)
+    }
+
+    /// Hardware telemetry is intentionally unavailable unless explicitly built.
+    #[cfg(not(feature = "hw-amd-telemetry"))]
+    pub fn read_hardware_snapshot(
+        _platform: RyzenPlatform,
+    ) -> Result<AmdTelemetry, AmdTelemetryError> {
+        Err(AmdTelemetryError::HardwarePathDisabled)
+    }
+}
+
+pub use telemetry::{
+    detect_pstate_support, read_power_state_mock, read_temperature_mock, AmdPowerState,
+    AmdPstateInfo, AmdTelemetry, AmdTelemetryError, AmdThermalSensor,
+};
+
 /// Bucketed Ryzen platform descriptor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RyzenPlatform {
@@ -594,5 +811,48 @@ mod tests {
         assert_eq!(cpu_id.family(), 0x17);
         assert_eq!(cpu_id.model(), 0x30);
         assert_eq!(cpu_id.stepping(), 1);
+    }
+
+    #[test]
+    fn mock_telemetry_readings_are_deterministic_and_read_only() {
+        let temperature = read_temperature_mock().expect("mock temperature");
+        assert_eq!(
+            temperature.channel,
+            RyzenTelemetryChannel::TemperatureCelsius
+        );
+        assert_eq!(temperature.temperature_millicelsius, 42_000);
+        assert!(temperature.fresh);
+
+        let power = read_power_state_mock().expect("mock power state");
+        assert_eq!(power.pstate_id, 1);
+        assert_eq!(power.effective_frequency_mhz, 3_600);
+        assert_eq!(power.package_power_milliwatts, 45_000);
+        assert!(!power.boost_active);
+    }
+
+    #[test]
+    fn pstate_support_is_structured_by_detected_generation() {
+        let zen = detect_pstate_support(platform(0x17, 0x01));
+        assert_eq!(zen.support, RyzenSupportStatus::Unknown);
+        assert!(zen.requires_supervisor_service);
+
+        let zen4 = detect_pstate_support(platform(0x19, 0x61));
+        assert_eq!(zen4.support, RyzenSupportStatus::Supported);
+        assert_eq!(zen4.generation, RyzenGeneration::Zen4);
+        assert!(zen4.is_supported());
+    }
+
+    #[test]
+    fn telemetry_snapshot_rejects_unsupported_vendor() {
+        let platform = RyzenPlatform::from_detection_input(RyzenDetectionInput::new(
+            *b"GenuineIntel",
+            RyzenCpuId::new(0x17, 0x01, 0),
+            None,
+        ));
+
+        assert_eq!(
+            AmdTelemetry::read_mock(platform),
+            Err(AmdTelemetryError::UnsupportedVendor)
+        );
     }
 }
