@@ -13,6 +13,7 @@ members = [
     "crates/mirage-gpu",
     "crates/mirage-hw",
     "crates/mirage-ipc",
+    "crates/mirage-mtss",
     "crates/mirage-nvme",
     "crates/mirage-pci",
     "crates/mirage-platform",

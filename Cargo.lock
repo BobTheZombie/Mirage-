@@ -125,6 +125,10 @@ name = "mirage-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "mirage-mtss"
+version = "0.1.0"
+
+[[package]]
 name = "mirage-nvme"
 version = "0.1.0"
 dependencies = [

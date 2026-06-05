@@ -1,0 +1,14 @@
+[package]
+name = "mirage-mtss"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Mirage micro-thread scheduling service core types and backend contracts"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["alloc"]
+alloc = []
+mock = []
+
+[dependencies]
