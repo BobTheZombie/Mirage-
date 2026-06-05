@@ -18,6 +18,11 @@ pub use timer::{
 use mirage_cap::{CapabilityObject, CapabilityRights, CapabilitySet};
 use mirage_ipc::EndpointId;
 
+pub use mirage_ryzen::{
+    detect_pstate_support, read_power_state_mock, read_temperature_mock, AmdPowerState,
+    AmdPstateInfo, AmdTelemetry, AmdTelemetryError, AmdThermalSensor,
+};
+
 /// Platform services that may be launched under supervisor control.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum PlatformServiceKind {
