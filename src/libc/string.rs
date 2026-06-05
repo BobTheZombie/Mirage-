@@ -6,7 +6,7 @@ use core::ptr;
 
 use super::stdlib::malloc;
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     let dest_bytes = dest as *mut u8;
     let src_bytes = src as *const u8;
@@ -20,7 +20,7 @@ pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize)
     dest
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     let dest_bytes = dest as *mut u8;
     let src_bytes = src as *const u8;
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize
     dest
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn memset(dest: *mut c_void, value: c_int, n: usize) -> *mut c_void {
     let dest_bytes = dest as *mut u8;
     let byte = (value & 0xFF) as u8;
@@ -64,7 +64,7 @@ pub unsafe extern "C" fn memset(dest: *mut c_void, value: c_int, n: usize) -> *m
     dest
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn memcmp(lhs: *const c_void, rhs: *const c_void, n: usize) -> c_int {
     let left = lhs as *const u8;
     let right = rhs as *const u8;
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn memcmp(lhs: *const c_void, rhs: *const c_void, n: usize
     0
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn memchr(ptr: *const c_void, value: c_int, n: usize) -> *mut c_void {
     let bytes = ptr as *const u8;
     let target = (value & 0xFF) as u8;
@@ -98,17 +98,17 @@ pub unsafe extern "C" fn memchr(ptr: *const c_void, value: c_int, n: usize) -> *
     ptr::null_mut()
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn bzero(ptr: *mut c_void, len: usize) {
     memset(ptr, 0, len);
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn bcopy(src: *const c_void, dest: *mut c_void, len: usize) {
     memmove(dest, src, len);
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn bcmp(lhs: *const c_void, rhs: *const c_void, len: usize) -> c_int {
     if memcmp(lhs, rhs, len) == 0 {
         0
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn bcmp(lhs: *const c_void, rhs: *const c_void, len: usize
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strlen(s: *const c_char) -> usize {
     let mut len = 0usize;
     while *s.add(len) != 0 {
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn strlen(s: *const c_char) -> usize {
     len
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strnlen(s: *const c_char, max_len: usize) -> usize {
     let mut len = 0usize;
     while len < max_len {
@@ -142,7 +142,7 @@ fn to_unsigned(byte: c_char) -> u8 {
     byte as u8
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strcmp(lhs: *const c_char, rhs: *const c_char) -> c_int {
     let mut idx = 0usize;
     loop {
@@ -163,7 +163,7 @@ pub unsafe extern "C" fn strcmp(lhs: *const c_char, rhs: *const c_char) -> c_int
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strncmp(lhs: *const c_char, rhs: *const c_char, n: usize) -> c_int {
     if n == 0 {
         return 0;
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn strncmp(lhs: *const c_char, rhs: *const c_char, n: usiz
     0
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strcpy(dest: *mut c_char, src: *const c_char) -> *mut c_char {
     let mut idx = 0usize;
     loop {
@@ -204,7 +204,7 @@ pub unsafe extern "C" fn strcpy(dest: *mut c_char, src: *const c_char) -> *mut c
     dest
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strncpy(dest: *mut c_char, src: *const c_char, n: usize) -> *mut c_char {
     let mut idx = 0usize;
     while idx < n {
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn strncpy(dest: *mut c_char, src: *const c_char, n: usize
     dest
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strcat(dest: *mut c_char, src: *const c_char) -> *mut c_char {
     let mut dest_len = 0usize;
     while *dest.add(dest_len) != 0 {
@@ -242,7 +242,7 @@ pub unsafe extern "C" fn strcat(dest: *mut c_char, src: *const c_char) -> *mut c
     dest
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strncat(dest: *mut c_char, src: *const c_char, n: usize) -> *mut c_char {
     let mut dest_len = 0usize;
     while *dest.add(dest_len) != 0 {
@@ -264,7 +264,7 @@ pub unsafe extern "C" fn strncat(dest: *mut c_char, src: *const c_char, n: usize
     dest
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strchr(s: *const c_char, c: c_int) -> *mut c_char {
     let target = (c & 0xFF) as u8;
     let mut idx = 0usize;
@@ -284,7 +284,7 @@ pub unsafe extern "C" fn strchr(s: *const c_char, c: c_int) -> *mut c_char {
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strrchr(s: *const c_char, c: c_int) -> *mut c_char {
     let target = (c & 0xFF) as u8;
     let mut last: *mut c_char = ptr::null_mut();
@@ -305,7 +305,7 @@ pub unsafe extern "C" fn strrchr(s: *const c_char, c: c_int) -> *mut c_char {
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char {
     if *needle == 0 {
         return haystack as *mut c_char;
@@ -340,7 +340,7 @@ pub unsafe extern "C" fn strstr(haystack: *const c_char, needle: *const c_char) 
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strdup(s: *const c_char) -> *mut c_char {
     if s.is_null() {
         return ptr::null_mut();
@@ -359,7 +359,7 @@ pub unsafe extern "C" fn strdup(s: *const c_char) -> *mut c_char {
     dest
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn strndup(s: *const c_char, n: usize) -> *mut c_char {
     if s.is_null() {
         return ptr::null_mut();

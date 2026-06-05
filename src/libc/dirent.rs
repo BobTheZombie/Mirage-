@@ -24,7 +24,7 @@ pub(crate) unsafe fn mirage_getdents64_with_kernel(
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn getdents64(fd: i32, entries: *mut CDirEntry, count: usize) -> isize {
     if count > 0 && entries.is_null() {
         return errno::return_or_errno(-(MIRAGE_EFAULT as isize));

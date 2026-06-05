@@ -104,7 +104,7 @@ The kernel should expose minimal, stable primitives that MTSS, the supervisor, a
 
 ## MTSS Responsibilities
 
-MTSS is the Mirage Micro-Thread Scheduling Service layer for portable multitasking mechanics.
+MTSS is the Mirage Multitasking Subsystem layer for portable multitasking mechanics.
 
 Portable task/thread/scheduler logic belongs in MTSS, not directly in the kernel or supervisor.
 

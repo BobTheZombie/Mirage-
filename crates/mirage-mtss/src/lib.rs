@@ -1,7 +1,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-//! Mirage Micro-Thread Scheduling Service (MTSS) primitives.
+//! Mirage Multitasking Subsystem (MTSS) primitives.
 //!
 //! MTSS defines the portable task/thread lifecycle model used by Mirage
 //! scheduler-facing code.  Architecture-specific CPU context, selectors,
@@ -36,12 +36,10 @@ pub mod backend {
         fn now(&self) -> Timestamp;
     }
 
-    /// Mechanism used to request a low-level context switch.
-    pub trait ContextSwitchBackend {
-        fn switch_to(&mut self, thread: ThreadId) -> Result<(), MtssError>;
-    }
-
     /// Mechanism used to arm preemption or accounting timer ticks.
+    ///
+    /// Real context-switch backend contracts are intentionally left for the
+    /// next milestone after the MTSS ownership boundary exists.
     pub trait TimerBackend {
         fn arm_timeslice(&mut self, cpu: CpuId, slice: Timeslice) -> Result<(), MtssError>;
     }
@@ -859,8 +857,7 @@ pub mod types {
 }
 
 pub use backend::{
-    ClockSource, ContextSwitchBackend, LifecycleSink, MtssBackend, StatsSink, ThreadStateStore,
-    TimerBackend,
+    ClockSource, LifecycleSink, MtssBackend, StatsSink, ThreadStateStore, TimerBackend,
 };
 pub use lifecycle::{LifecycleEvent, LifecycleReason, MtssEvent, MtssEventKind, MtssEventSink};
 pub use mtss::{

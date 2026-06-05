@@ -34,7 +34,7 @@ pub(crate) unsafe fn mirage_open_with_kernel(
     mirage_openat_with_kernel(kernel, caller, MIRAGE_AT_FDCWD, path, flags, mode)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn openat(dirfd: i32, path: *const u8, flags: u32, mode: u32) -> isize {
     if path.is_null() {
         return errno::return_or_errno(-(MIRAGE_EFAULT as isize));
@@ -45,7 +45,7 @@ pub unsafe extern "C" fn openat(dirfd: i32, path: *const u8, flags: u32, mode: u
     ))
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn open(path: *const u8, flags: u32, mode: u32) -> isize {
     openat(MIRAGE_AT_FDCWD, path, flags, mode)
 }

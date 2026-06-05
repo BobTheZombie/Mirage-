@@ -57,7 +57,7 @@ fn syscall_munmap(addr: *mut c_void, length: usize) -> c_int {
         -1
     }
 }
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
     let total = match nmemb.checked_mul(size) {
         Some(total) => total,
@@ -75,12 +75,12 @@ pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
     block
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     syscall_realloc(ptr, size)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn reallocarray(ptr: *mut c_void, nmemb: usize, size: usize) -> *mut c_void {
     match nmemb.checked_mul(size) {
         Some(total) => realloc(ptr, total),
@@ -88,7 +88,7 @@ pub unsafe extern "C" fn reallocarray(ptr: *mut c_void, nmemb: usize, size: usiz
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut c_void {
     if alignment == 0 || !alignment.is_power_of_two() {
         return ptr::null_mut();
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut c_
     syscall_malloc_aligned(size, alignment)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn posix_memalign(
     memptr: *mut *mut c_void,
     alignment: usize,
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn posix_memalign(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn memalign(alignment: usize, size: usize) -> *mut c_void {
     if alignment == 0 || !alignment.is_power_of_two() {
         return ptr::null_mut();
@@ -144,19 +144,19 @@ pub unsafe extern "C" fn memalign(alignment: usize, size: usize) -> *mut c_void 
     syscall_malloc_aligned(size, adjusted)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
     syscall_malloc(size)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn free(ptr: *mut c_void) {
     if !ptr.is_null() {
         syscall_free(ptr);
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn mmap(
     _addr: *mut c_void,
     length: usize,
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn mmap(
     syscall_mmap(length, protection)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn munmap(addr: *mut c_void, length: usize) -> c_int {
     if addr.is_null() {
         -1
