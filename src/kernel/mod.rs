@@ -67,7 +67,8 @@ use core::cmp::min;
 use core::ptr::NonNull;
 use mirage_mtss::{MtssThreadScheduleRecord, RunQueue};
 
-type KernelThreadScheduleRecord = MtssThreadScheduleRecord<ThreadId, ProcessId, ProcessPriority>;
+pub type KernelThreadScheduleRecord =
+    MtssThreadScheduleRecord<ThreadId, ProcessId, ProcessPriority>;
 
 pub const MAX_PROCESSES: usize = 64;
 pub const MESSAGE_DEPTH: usize = 16;
@@ -681,6 +682,8 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     process_table: [Option<ProcessControlBlock<MAX_OPEN_FILES>>; MAX_PROC],
     ipc_queues: [MessageQueue<MSG_DEPTH>; MAX_PROC],
     scheduler: RunQueue<KernelThreadScheduleRecord, MAX_THREADS>,
+    mtss_initialized: bool,
+    mtss_ticks: u64,
     security: SecurityKernel<MAX_PROC>,
     devices: DeviceManager<MAX_DEVICES>,
     service_registry: ServiceRegistry<MAX_SERVICE_REGISTRATIONS, MAX_DEVICE_CLAIMS>,
@@ -714,6 +717,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             process_table: [None; MAX_PROC],
             ipc_queues: [MessageQueue::new(); MAX_PROC],
             scheduler: RunQueue::new(),
+            mtss_initialized: false,
+            mtss_ticks: 0,
             security: SecurityKernel::new(),
             devices: DeviceManager::new(),
             service_registry: ServiceRegistry::new(),
@@ -750,6 +755,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         framebuffer: Option<FramebufferInfo>,
     ) {
         self.scheduler.reset();
+        self.mtss_initialized = false;
+        self.mtss_ticks = 0;
         self.security.reset();
         self.devices.reset();
         self.service_registry.reset();
@@ -910,6 +917,43 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             idx += 1;
         }
         count
+    }
+
+    /// Initialize the kernel-facing MTSS integration without installing a
+    /// CPU-specific context-switching backend for this milestone.
+    pub fn kernel_mtss_init(&mut self) {
+        self.mtss_initialized = true;
+        self.mtss_ticks = 0;
+    }
+
+    /// Let MTSS observe the timer tick before kernel-owned timer, wakeup, and
+    /// interrupt-delivery mechanics run.
+    pub fn kernel_on_timer_tick(&mut self) {
+        if self.mtss_initialized {
+            self.mtss_ticks = self.mtss_ticks.saturating_add(1);
+        }
+    }
+
+    /// Ask MTSS for the next runnable micro-thread. CPU entry, address-space
+    /// switching, syscall entry, and capability checks remain kernel-owned.
+    pub fn kernel_schedule_next(&mut self) -> Option<KernelThreadScheduleRecord> {
+        self.scheduler.next()
+    }
+
+    /// Return the current micro-thread to MTSS after a cooperative yield or the
+    /// end of this mock slice. Real userspace context switching is intentionally
+    /// out of scope for this milestone.
+    pub fn kernel_yield_current(
+        &mut self,
+        mut scheduled: KernelThreadScheduleRecord,
+    ) -> Result<(), KernelError> {
+        if scheduled.consume_time_slice() {
+            scheduled.reset_time_slice();
+        }
+
+        self.scheduler
+            .requeue(scheduled)
+            .map_err(|_| KernelError::SchedulerFull)
     }
 
     pub fn spawn_initial_process(&mut self, creds: Credentials) -> KernelResult<ProcessId> {
@@ -3659,6 +3703,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     pub fn tick(&mut self) {
+        self.kernel_on_timer_tick();
         device::system_timer().tick();
         let timestamp = KERNEL_TIME.tick();
         let now_ns = timestamp.as_nanos();
@@ -3709,7 +3754,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn run_core(&mut self, core_index: usize) {
-        if let Some(mut scheduled) = self.scheduler.next() {
+        if let Some(scheduled) = self.kernel_schedule_next() {
             let thread_index = match self.locate_thread(scheduled.thread) {
                 Ok(idx) => idx,
                 Err(_) => {
@@ -3813,11 +3858,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.core_states[core_index].finish_cycle();
 
             if requeue_thread {
-                if scheduled.consume_time_slice() {
-                    scheduled.reset_time_slice();
-                }
-
-                let _ = self.scheduler.requeue(scheduled);
+                let _ = self.kernel_yield_current(scheduled);
             }
         } else {
             self.core_states[core_index].idle_cycle();

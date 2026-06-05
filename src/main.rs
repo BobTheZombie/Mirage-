@@ -160,6 +160,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         }
     }
 
+    kernel.kernel_mtss_init();
+    mirage::kprintln!("MTSS initialized");
     mirage::kprintln!("Mirage reached idle loop");
     let mut observed_timer_ticks = x86_64::timer_ticks();
     loop {
