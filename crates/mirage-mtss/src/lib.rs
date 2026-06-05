@@ -879,147 +879,431 @@ pub use types::{
 mod tests {
     use super::*;
 
-    #[test]
-    fn task_lifecycle_allows_portable_block_and_wake() {
-        let mut task = Task::new(
-            TaskId::new(1),
-            None,
-            AddressSpaceId::new(1),
-            Priority::NORMAL,
-        );
-        assert_eq!(task.admit(), Ok(TaskState::Created));
-        assert_eq!(task.mark_running(), Ok(TaskState::Runnable));
-        assert_eq!(task.block(), Ok(TaskState::Running));
-        assert_eq!(task.wake(), Ok(TaskState::Blocked));
-        assert_eq!(task.terminate(), Ok(TaskState::Runnable));
-        assert_eq!(task.reap(), Ok(TaskState::Terminated));
-    }
+    type TestMtss<const EVENTS: usize = 32> = Mtss<4, 8, 8, EVENTS>;
 
-    #[test]
-    fn thread_lifecycle_uses_required_states() {
-        let mut thread = Thread::new(
-            ThreadId::new(7),
-            TaskId::new(1),
-            Priority::NORMAL,
-            Timeslice::from_ticks(2),
-        );
-        assert_eq!(thread.admit(), Ok(ThreadState::Created));
-        assert_eq!(thread.mark_running(), Ok(ThreadState::Ready));
-        assert_eq!(thread.mark_ready(), Ok(ThreadState::Running));
-        assert_eq!(thread.sleep(), Ok(ThreadState::Ready));
-        assert_eq!(thread.wake(), Ok(ThreadState::Sleeping));
-        assert_eq!(thread.block(), Ok(ThreadState::Ready));
-        assert_eq!(thread.terminate(), Ok(ThreadState::Blocked));
-    }
+    const CPU: CpuId = CpuId::new(2);
+    const TASK: TaskId = TaskId::new(100);
+    const OTHER_TASK: TaskId = TaskId::new(200);
+    const THREAD_A: ThreadId = ThreadId::new(10);
+    const THREAD_B: ThreadId = ThreadId::new(11);
 
-    #[test]
-    fn mtss_schedules_yields_and_preempts_threads() {
-        let mut mtss: Mtss<2, 4, 4> = Mtss::new(
-            MtssConfig::new(CpuId::new(0)).with_default_timeslice(Timeslice::from_ticks(1)),
-        );
-        mtss.create_task(
-            TaskId::new(1),
-            None,
-            AddressSpaceId::new(1),
-            Priority::NORMAL,
+    fn mtss<const EVENTS: usize>() -> TestMtss<EVENTS> {
+        Mtss::new(
+            MtssConfig::new(CPU)
+                .with_initial_time(Timestamp::from_ticks(7))
+                .with_default_timeslice(Timeslice::from_ticks(2)),
         )
-        .unwrap();
-        mtss.create_thread(TaskId::new(1), ThreadId::new(10), Priority::NORMAL)
-            .unwrap();
-        mtss.create_thread(TaskId::new(1), ThreadId::new(11), Priority::NORMAL)
-            .unwrap();
+    }
 
-        mtss.enqueue_thread(ThreadId::new(10)).unwrap();
-        mtss.enqueue_thread(ThreadId::new(11)).unwrap();
+    fn create_task<const EVENTS: usize>(mtss: &mut TestMtss<EVENTS>) {
+        mtss.create_task(TASK, None, AddressSpaceId::new(1), Priority::NORMAL)
+            .unwrap();
+    }
 
-        let first = mtss.pick_next().unwrap().unwrap();
-        assert_eq!(first.next, ThreadId::new(10));
-        let second = mtss.on_timer_tick().unwrap().unwrap();
-        assert_eq!(second.previous, Some(ThreadId::new(10)));
-        assert_eq!(second.next, ThreadId::new(11));
-        assert_eq!(mtss.stats().preemptions, 1);
+    fn create_thread<const EVENTS: usize>(mtss: &mut TestMtss<EVENTS>, thread: ThreadId) {
+        mtss.create_thread(TASK, thread, Priority::NORMAL).unwrap();
+    }
+
+    fn drain<const EVENTS: usize>(mtss: &mut TestMtss<EVENTS>) {
+        while mtss.drain_event().is_some() {}
+    }
+
+    fn assert_event(
+        event: MtssEvent,
+        kind: MtssEventKind,
+        task: Option<TaskId>,
+        thread: Option<ThreadId>,
+        cpu: Option<CpuId>,
+        at: u64,
+    ) {
+        assert_eq!(event.kind, kind);
+        assert_eq!(event.task, task);
+        assert_eq!(event.thread, thread);
+        assert_eq!(event.cpu, cpu);
+        assert_eq!(event.at, Timestamp::from_ticks(at));
     }
 
     #[test]
-    fn mtss_drains_decoupled_events_to_sink() {
-        struct EventRecorder {
-            events: [Option<MtssEvent>; 12],
-            len: usize,
-        }
+    fn create_task_records_handle_event_and_stats() {
+        let mut mtss = mtss::<8>();
 
-        impl MtssEventSink for EventRecorder {
-            fn record_mtss_event(&mut self, event: MtssEvent) {
-                self.events[self.len] = Some(event);
-                self.len += 1;
-            }
-        }
+        let handle = mtss
+            .create_task(
+                TASK,
+                Some(OTHER_TASK),
+                AddressSpaceId::new(55),
+                Priority::HIGH,
+            )
+            .unwrap();
 
-        let mut mtss: Mtss<2, 4, 4, 12> = Mtss::new(
-            MtssConfig::new(CpuId::new(1)).with_default_timeslice(Timeslice::from_ticks(1)),
-        );
-        mtss.create_task(
-            TaskId::new(1),
+        assert_eq!(handle, MtssHandle::task(TASK));
+        assert_eq!(mtss.stats().admitted_tasks, 1);
+        assert_eq!(mtss.pending_events(), 1);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::TaskCreated,
+            Some(TASK),
             None,
-            AddressSpaceId::new(1),
-            Priority::NORMAL,
-        )
-        .unwrap();
-        mtss.create_thread(TaskId::new(1), ThreadId::new(10), Priority::NORMAL)
-            .unwrap();
-        mtss.create_thread(TaskId::new(1), ThreadId::new(11), Priority::NORMAL)
-            .unwrap();
-        mtss.enqueue_thread(ThreadId::new(10)).unwrap();
-        mtss.enqueue_thread(ThreadId::new(11)).unwrap();
+            None,
+            7,
+        );
+        assert_eq!(mtss.drain_event(), None);
+    }
+
+    #[test]
+    fn create_thread_records_handle_and_event_without_enqueueing() {
+        let mut mtss = mtss::<8>();
+        create_task(&mut mtss);
+        drain(&mut mtss);
+
+        let handle = mtss.create_thread(TASK, THREAD_A, Priority::LOW).unwrap();
+
+        assert_eq!(handle, MtssHandle::thread(TASK, THREAD_A));
+        assert_eq!(mtss.stats().admitted_threads, 0);
+        assert_eq!(mtss.pick_next(), Ok(None));
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadCreated,
+            Some(TASK),
+            Some(THREAD_A),
+            None,
+            7,
+        );
+    }
+
+    #[test]
+    fn enqueue_thread_marks_thread_runnable_and_updates_stats() {
+        let mut mtss = mtss::<8>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        drain(&mut mtss);
+
+        mtss.enqueue_thread(THREAD_A).unwrap();
+
+        assert_eq!(mtss.stats().admitted_threads, 1);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadRunnable,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            7,
+        );
+    }
+
+    #[test]
+    fn pick_next_runnable_thread_dispatches_fifo_record() {
+        let mut mtss = mtss::<8>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        create_thread(&mut mtss, THREAD_B);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        mtss.enqueue_thread(THREAD_B).unwrap();
+        drain(&mut mtss);
+
+        let decision = mtss.pick_next().unwrap().unwrap();
+
+        assert_eq!(decision.cpu, CPU);
+        assert_eq!(decision.previous, None);
+        assert_eq!(decision.next, THREAD_A);
+        assert_eq!(decision.at, Timestamp::from_ticks(7));
+        assert_eq!(mtss.current(), Some(THREAD_A));
+        assert_eq!(mtss.stats().context_switches, 1);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadRunning,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            7,
+        );
+    }
+
+    #[test]
+    fn timer_tick_without_expiry_only_accounts_cpu_time() {
+        let mut mtss = mtss::<8>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        mtss.enqueue_thread(THREAD_A).unwrap();
         mtss.pick_next().unwrap().unwrap();
-        mtss.on_timer_tick().unwrap().unwrap();
+        drain(&mut mtss);
 
-        let mut recorder = EventRecorder {
-            events: [None; 12],
-            len: 0,
-        };
-        assert_eq!(mtss.drain_events_to(&mut recorder), 9);
+        assert_eq!(mtss.on_timer_tick(), Ok(None));
+
+        assert_eq!(mtss.current(), Some(THREAD_A));
+        assert_eq!(mtss.stats().preemptions, 0);
+        assert_eq!(mtss.stats().context_switches, 1);
         assert_eq!(mtss.pending_events(), 0);
-        assert_eq!(recorder.events[0].unwrap().kind, MtssEventKind::TaskCreated);
-        assert_eq!(
-            recorder.events[1].unwrap().kind,
-            MtssEventKind::ThreadCreated
+    }
+
+    #[test]
+    fn timer_tick_expires_timeslice_requeues_current_and_dispatches_next() {
+        let mut mtss: TestMtss<16> = Mtss::new(
+            MtssConfig::new(CPU)
+                .with_initial_time(Timestamp::from_ticks(7))
+                .with_default_timeslice(Timeslice::from_ticks(1)),
         );
-        assert_eq!(
-            recorder.events[3].unwrap().kind,
-            MtssEventKind::ThreadRunnable
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        create_thread(&mut mtss, THREAD_B);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        mtss.enqueue_thread(THREAD_B).unwrap();
+        assert_eq!(mtss.pick_next().unwrap().unwrap().next, THREAD_A);
+        drain(&mut mtss);
+
+        let decision = mtss.on_timer_tick().unwrap().unwrap();
+
+        assert_eq!(decision.previous, Some(THREAD_A));
+        assert_eq!(decision.next, THREAD_B);
+        assert_eq!(decision.at, Timestamp::from_ticks(8));
+        assert_eq!(mtss.current(), Some(THREAD_B));
+        assert_eq!(mtss.stats().preemptions, 1);
+        assert_eq!(mtss.stats().context_switches, 2);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::TimesliceExpired,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            8,
         );
-        assert_eq!(
-            recorder.events[5].unwrap().kind,
-            MtssEventKind::ThreadRunning
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadRunnable,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            8,
         );
-        assert_eq!(
-            recorder.events[6].unwrap().kind,
-            MtssEventKind::TimesliceExpired
-        );
-        assert_eq!(
-            recorder.events[7].unwrap().kind,
-            MtssEventKind::ThreadRunnable
-        );
-        assert_eq!(
-            recorder.events[8].unwrap().kind,
-            MtssEventKind::ThreadRunning
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadRunning,
+            Some(TASK),
+            Some(THREAD_B),
+            Some(CPU),
+            8,
         );
     }
 
     #[test]
-    fn mtss_rejects_invalid_state_transitions_without_panicking() {
-        let mut mtss: Mtss<1, 1, 1> = Mtss::new(MtssConfig::default());
-        mtss.create_task(
-            TaskId::new(1),
-            None,
-            AddressSpaceId::new(1),
-            Priority::NORMAL,
-        )
-        .unwrap();
-        mtss.create_thread(TaskId::new(1), ThreadId::new(10), Priority::NORMAL)
-            .unwrap();
+    fn yield_requeues_current_thread_behind_waiting_runnable_thread() {
+        let mut mtss = mtss::<16>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        create_thread(&mut mtss, THREAD_B);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        mtss.enqueue_thread(THREAD_B).unwrap();
+        assert_eq!(mtss.pick_next().unwrap().unwrap().next, THREAD_A);
+        drain(&mut mtss);
 
-        let err = mtss.block_thread(ThreadId::new(10)).unwrap_err();
+        let decision = mtss.yield_current().unwrap().unwrap();
+
+        assert_eq!(decision.previous, Some(THREAD_A));
+        assert_eq!(decision.next, THREAD_B);
+        assert_eq!(mtss.current(), Some(THREAD_B));
+        assert_eq!(mtss.stats().context_switches, 2);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadRunnable,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            7,
+        );
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadRunning,
+            Some(TASK),
+            Some(THREAD_B),
+            Some(CPU),
+            7,
+        );
+
+        assert_eq!(mtss.yield_current().unwrap().unwrap().next, THREAD_A);
+    }
+
+    #[test]
+    fn block_removes_thread_from_run_queue_and_updates_stats() {
+        let mut mtss = mtss::<8>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        drain(&mut mtss);
+
+        mtss.block_thread(THREAD_A).unwrap();
+
+        assert_eq!(mtss.pick_next(), Ok(None));
+        assert_eq!(mtss.current(), None);
+        assert_eq!(mtss.stats().blocked_threads, 1);
+        assert_eq!(mtss.stats().blocked_tasks, 1);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadBlocked,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            7,
+        );
+    }
+
+    #[test]
+    fn wake_requeues_blocked_thread_and_updates_stats() {
+        let mut mtss = mtss::<16>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        mtss.block_thread(THREAD_A).unwrap();
+        drain(&mut mtss);
+
+        mtss.wake_thread(THREAD_A).unwrap();
+
+        assert_eq!(mtss.stats().wakeups, 1);
+        assert_eq!(mtss.stats().admitted_threads, 2);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadRunnable,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            7,
+        );
+        assert_eq!(mtss.pick_next().unwrap().unwrap().next, THREAD_A);
+    }
+
+    #[test]
+    fn sleep_transition_removes_thread_until_wake_requeues_it() {
+        let mut mtss = mtss::<16>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        drain(&mut mtss);
+
+        mtss.sleep_thread(THREAD_A).unwrap();
+
+        assert_eq!(mtss.pick_next(), Ok(None));
+        assert_eq!(mtss.stats().sleeps, 1);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadSleeping,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            7,
+        );
+
+        mtss.wake_thread(THREAD_A).unwrap();
+        assert_eq!(mtss.stats().wakeups, 1);
+        assert_eq!(mtss.pick_next().unwrap().unwrap().next, THREAD_A);
+    }
+
+    #[test]
+    fn contain_task_transition_removes_all_task_threads_from_run_queue() {
+        let mut mtss = mtss::<16>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        create_thread(&mut mtss, THREAD_B);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        mtss.enqueue_thread(THREAD_B).unwrap();
+        drain(&mut mtss);
+
+        mtss.contain_task(TASK).unwrap();
+
+        assert_eq!(mtss.pick_next(), Ok(None));
+        assert_eq!(mtss.stats().containments, 1);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::TaskSuspect,
+            Some(TASK),
+            None,
+            None,
+            7,
+        );
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::TaskContained,
+            Some(TASK),
+            None,
+            None,
+            7,
+        );
+    }
+
+    #[test]
+    fn terminate_task_transition_exits_threads_and_clears_scheduling() {
+        let mut mtss = mtss::<16>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        create_thread(&mut mtss, THREAD_B);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        mtss.enqueue_thread(THREAD_B).unwrap();
+        drain(&mut mtss);
+
+        mtss.terminate_task(TASK).unwrap();
+
+        assert_eq!(mtss.pick_next(), Ok(None));
+        assert_eq!(mtss.stats().completed_tasks, 1);
+        assert_eq!(mtss.stats().completed_threads, 2);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadExited,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            7,
+        );
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::ThreadExited,
+            Some(TASK),
+            Some(THREAD_B),
+            Some(CPU),
+            7,
+        );
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::TaskTerminated,
+            Some(TASK),
+            None,
+            None,
+            7,
+        );
+    }
+
+    #[test]
+    fn reap_task_transition_releases_task_and_thread_slots() {
+        let mut mtss = mtss::<16>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        mtss.terminate_task(TASK).unwrap();
+        drain(&mut mtss);
+
+        mtss.reap_task(TASK).unwrap();
+
+        assert_eq!(mtss.stats().reaped_tasks, 1);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::TaskReaped,
+            Some(TASK),
+            None,
+            None,
+            7,
+        );
+        assert_eq!(
+            mtss.create_task(TASK, None, AddressSpaceId::new(1), Priority::NORMAL),
+            Ok(MtssHandle::task(TASK)),
+        );
+    }
+
+    #[test]
+    fn invalid_transition_is_denied_without_mutating_stats_or_emitting_events() {
+        let mut mtss = mtss::<16>();
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        drain(&mut mtss);
+        let before = mtss.stats();
+
+        let err = mtss.block_thread(THREAD_A).unwrap_err();
+
         assert_eq!(
             err,
             MtssError::InvalidThreadTransition {
@@ -1027,8 +1311,10 @@ mod tests {
                 to: ThreadState::Blocked,
             }
         );
+        assert_eq!(mtss.stats(), before);
+        assert_eq!(mtss.pending_events(), 0);
 
-        let err = mtss.reap_task(TaskId::new(1)).unwrap_err();
+        let err = mtss.reap_task(TASK).unwrap_err();
         assert_eq!(
             err,
             MtssError::InvalidTaskTransition {
@@ -1036,5 +1322,111 @@ mod tests {
                 to: TaskState::Reaped,
             }
         );
+    }
+
+    #[test]
+    fn events_emitted_correctly_for_full_task_lifecycle() {
+        let mut mtss = mtss::<16>();
+
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        mtss.pick_next().unwrap().unwrap();
+        mtss.block_thread(THREAD_A).unwrap();
+        mtss.wake_thread(THREAD_A).unwrap();
+        mtss.pick_next().unwrap().unwrap();
+        mtss.terminate_task(TASK).unwrap();
+        mtss.reap_task(TASK).unwrap();
+
+        let expected = [
+            (MtssEventKind::TaskCreated, Some(TASK), None, None),
+            (
+                MtssEventKind::ThreadCreated,
+                Some(TASK),
+                Some(THREAD_A),
+                None,
+            ),
+            (
+                MtssEventKind::ThreadRunnable,
+                Some(TASK),
+                Some(THREAD_A),
+                Some(CPU),
+            ),
+            (
+                MtssEventKind::ThreadRunning,
+                Some(TASK),
+                Some(THREAD_A),
+                Some(CPU),
+            ),
+            (
+                MtssEventKind::ThreadBlocked,
+                Some(TASK),
+                Some(THREAD_A),
+                Some(CPU),
+            ),
+            (
+                MtssEventKind::ThreadRunnable,
+                Some(TASK),
+                Some(THREAD_A),
+                Some(CPU),
+            ),
+            (
+                MtssEventKind::ThreadRunning,
+                Some(TASK),
+                Some(THREAD_A),
+                Some(CPU),
+            ),
+            (
+                MtssEventKind::ThreadExited,
+                Some(TASK),
+                Some(THREAD_A),
+                Some(CPU),
+            ),
+            (MtssEventKind::TaskTerminated, Some(TASK), None, None),
+            (MtssEventKind::TaskReaped, Some(TASK), None, None),
+        ];
+
+        for (kind, task, thread, cpu) in expected {
+            assert_event(mtss.drain_event().unwrap(), kind, task, thread, cpu, 7);
+        }
+        assert_eq!(mtss.drain_event(), None);
+    }
+
+    #[test]
+    fn stats_updated_correctly_across_representative_operations() {
+        let mut mtss: TestMtss<32> = Mtss::new(
+            MtssConfig::new(CPU)
+                .with_initial_time(Timestamp::from_ticks(0))
+                .with_default_timeslice(Timeslice::from_ticks(1)),
+        );
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        create_thread(&mut mtss, THREAD_B);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        mtss.enqueue_thread(THREAD_B).unwrap();
+        mtss.pick_next().unwrap().unwrap();
+        mtss.on_timer_tick().unwrap().unwrap();
+        mtss.block_thread(THREAD_A).unwrap();
+        mtss.wake_thread(THREAD_A).unwrap();
+        mtss.sleep_thread(THREAD_A).unwrap();
+        mtss.wake_thread(THREAD_A).unwrap();
+        mtss.contain_task(TASK).unwrap();
+        mtss.terminate_task(TASK).unwrap();
+        mtss.reap_task(TASK).unwrap();
+
+        let stats = mtss.stats();
+        assert_eq!(stats.admitted_tasks, 1);
+        assert_eq!(stats.completed_tasks, 1);
+        assert_eq!(stats.reaped_tasks, 1);
+        assert_eq!(stats.admitted_threads, 4);
+        assert_eq!(stats.completed_threads, 2);
+        assert_eq!(stats.context_switches, 2);
+        assert_eq!(stats.preemptions, 1);
+        assert_eq!(stats.blocked_tasks, 0);
+        assert_eq!(stats.blocked_threads, 1);
+        assert_eq!(stats.sleeps, 1);
+        assert_eq!(stats.wakeups, 2);
+        assert_eq!(stats.suspensions, 0);
+        assert_eq!(stats.containments, 1);
     }
 }
