@@ -249,6 +249,87 @@ pub struct ServiceEndpointClaim {
     pub service: RegistryServiceId,
 }
 
+/// Supervisor-approved MTSS priority-change request.
+///
+/// This is intentionally only a policy envelope today: MTSS owns the eventual
+/// priority transition and the kernel/backend owns any hardware-visible
+/// scheduling effect. The supervisor may validate that a service is allowed to
+/// ask for a new priority, but it must not rewrite MTSS queues itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SupervisorMtssPriorityRequest {
+    pub task: ProcessId,
+    pub requested_priority: ProcessPriority,
+}
+
+impl SupervisorMtssPriorityRequest {
+    pub const fn new(task: ProcessId, requested_priority: ProcessPriority) -> Self {
+        Self {
+            task,
+            requested_priority,
+        }
+    }
+}
+
+/// Clean supervisor-to-MTSS policy boundary.
+///
+/// Supervisor lifecycle code may approve policy requests, but it must enter
+/// multitasking through this boundary only. The intended flow is:
+///
+/// ```text
+/// supervisor policy request
+///   -> MTSS state transition
+///   -> kernel/backend execution later
+/// ```
+///
+/// Keep recovery policy here in the supervisor; keep runnable-state, queue, and
+/// scheduling mechanics behind MTSS/kernel integration. In particular,
+/// supervisor code must not inspect or mutate MTSS run queues directly.
+pub trait SupervisorMtssBoundary {
+    fn mtss_spawn_task(&mut self, request: SpawnTaskRequest) -> Result<ProcessId, KernelError>;
+    fn mtss_contain_task(&mut self, task: ProcessId) -> Result<(), KernelError>;
+    fn mtss_terminate_task(&mut self, task: ProcessId) -> Result<(), KernelError>;
+    fn mtss_reap_task(&mut self, task: ProcessId) -> Result<(), KernelError>;
+    fn mtss_request_priority(
+        &mut self,
+        request: SupervisorMtssPriorityRequest,
+    ) -> Result<(), KernelError>;
+}
+
+impl<const NPROC: usize, const MSG_DEPTH: usize> SupervisorMtssBoundary
+    for Kernel<NPROC, MSG_DEPTH>
+{
+    fn mtss_spawn_task(&mut self, request: SpawnTaskRequest) -> Result<ProcessId, KernelError> {
+        self.spawn_task(request)
+    }
+
+    fn mtss_contain_task(&mut self, _task: ProcessId) -> Result<(), KernelError> {
+        // TODO(mtss): route to the real MTSS containment transition once the
+        // kernel exposes it. The supervisor still calls this boundary so
+        // recovery policy never reaches into MTSS run queues.
+        Ok(())
+    }
+
+    fn mtss_terminate_task(&mut self, task: ProcessId) -> Result<(), KernelError> {
+        self.terminate_process(task);
+        Ok(())
+    }
+
+    fn mtss_reap_task(&mut self, _task: ProcessId) -> Result<(), KernelError> {
+        // TODO(mtss): route to MTSS reaping when the kernel/backend exposes a
+        // supervisor-facing reap primitive distinct from POSIX wait handling.
+        Ok(())
+    }
+
+    fn mtss_request_priority(
+        &mut self,
+        _request: SupervisorMtssPriorityRequest,
+    ) -> Result<(), KernelError> {
+        // TODO(mtss): validate and forward priority changes once MTSS priority
+        // transitions are part of the kernel integration surface.
+        Err(KernelError::InvalidArgument)
+    }
+}
+
 /// Result of supervisor crash/exit handling for one kernel exit report.
 #[derive(Clone, Copy, Debug)]
 pub enum ServiceRecoveryState {
@@ -426,10 +507,12 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
             return ServiceRecoveryState::NotSupervised;
         };
 
+        let _ = kernel.mtss_contain_task(report.pid);
         self.release_record_claims(kernel, index, report.pid);
         self.revoke_record_hardware_resources(kernel, index);
         kernel.revoke_task(report.pid);
         kernel.revoke_service_owner(report.pid);
+        let _ = kernel.mtss_reap_task(report.pid);
 
         if let Some(mut record) = self.records[index] {
             record.pid = None;
@@ -441,6 +524,7 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
 
         let record = self.records[index].unwrap();
         if record.restart_policy == RestartPolicy::Never {
+            let _ = kernel.mtss_terminate_task(report.pid);
             self.set_stopped(index);
             return ServiceRecoveryState::Stopped;
         }
@@ -686,7 +770,7 @@ impl<const CAP: usize> ServiceStartupReport<CAP> {
             }
         }
         let parent = self.parent_for(record.descriptor);
-        let pid = kernel.spawn_task(SpawnTaskRequest {
+        let pid = kernel.mtss_spawn_task(SpawnTaskRequest {
             parent,
             entry_point: record.descriptor.entry_point,
             priority: record.descriptor.priority,
@@ -1450,6 +1534,31 @@ impl Supervisor {
         Self
     }
 
+    /// Forward a supervisor-approved termination request through MTSS.
+    ///
+    /// This keeps service shutdown policy in the supervisor while leaving task
+    /// lifecycle mechanics behind the MTSS/kernel boundary.
+    pub fn terminate_policy_approved_task<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        task: ProcessId,
+    ) -> Result<(), KernelError> {
+        kernel.mtss_terminate_task(task)
+    }
+
+    /// Forward a supervisor-approved future priority request through MTSS.
+    ///
+    /// Priority policy may be evaluated here, but the transition itself belongs
+    /// to MTSS and later kernel/backend execution. Current backends return a
+    /// placeholder error until priority mutation is exposed.
+    pub fn request_task_priority<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        request: SupervisorMtssPriorityRequest,
+    ) -> Result<(), KernelError> {
+        kernel.mtss_request_priority(request)
+    }
+
     /// Initialize platform discovery without granting driver authority.
     ///
     /// The platform service reports CPU, Ryzen generation, timer, interrupt,
@@ -1650,7 +1759,7 @@ impl Supervisor {
                                     credentials: record.descriptor.credentials,
                                 };
 
-                                match kernel.spawn_task(request) {
+                                match kernel.mtss_spawn_task(request) {
                                     Ok(pid) => {
                                         if let Err(error) =
                                             reset_spawned_service_capabilities(kernel, pid)
