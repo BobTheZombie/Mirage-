@@ -7,7 +7,7 @@ description = "Mirage micro-thread scheduling service core types and backend con
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["alloc"]
+default = []
 alloc = []
 mock = []
 
