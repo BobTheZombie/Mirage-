@@ -8,10 +8,10 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = []
-hw-amd-iommu = ["mirage-ryzen/hw-ryzen", "mirage-pci"]
+hw-amd-iommu = ["mirage-ryzen/hw-ryzen"]
 
 [dependencies]
 mirage-cap = { path = "../mirage-cap" }
 mirage-ipc = { path = "../mirage-ipc" }
-mirage-pci = { path = "../mirage-pci", optional = true }
+mirage-pci = { path = "../mirage-pci" }
 mirage-ryzen = { path = "../mirage-ryzen" }
