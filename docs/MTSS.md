@@ -1,6 +1,6 @@
 # Mirage MTSS Ownership
 
-MTSS is the Mirage Micro-Thread Scheduling Service layer. It exists to keep
+MTSS is the Mirage Multitasking Subsystem layer. It exists to keep
 portable task, thread, and scheduler mechanics out of both the CPU-facing kernel
 and the policy-facing supervisor.
 
@@ -106,10 +106,11 @@ Planned backend responsibilities include:
 * identify the current CPU;
 * read a monotonic scheduler time source;
 * arm timer or preemption events for a selected timeslice;
-* save and restore CPU context using the architecture ABI;
-* enter a selected thread's CPU context;
-* return trap, syscall, preemption, yield, or fault outcomes back to the kernel
-  and MTSS integration layer.
+* expose time/cpu discovery needed by MTSS during this groundwork milestone;
+* later, after this milestone, save and restore CPU context using the architecture ABI;
+* later, after this milestone, enter a selected thread's CPU context and return
+  trap, syscall, preemption, yield, or fault outcomes back through the kernel and
+  MTSS integration layer.
 
 The expected shape is:
 
@@ -133,6 +134,8 @@ This milestone does not attempt to provide:
 
 * a production SMP scheduler;
 * complete preemptive multitasking across real CPUs;
+* CPU-specific scheduler backend modules;
+* real context-switching backend traits;
 * a final priority-inheritance or real-time scheduling policy;
 * CPU-load balancing or NUMA placement;
 * complete POSIX signal or pthread semantics;

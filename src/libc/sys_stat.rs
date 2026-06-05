@@ -203,17 +203,17 @@ fn posix_syscall(number: u64, args: [u64; crate::kernel::syscall::SYSCALL_MAX_AR
     errno::return_or_errno(raw_syscall_runtime(number, args))
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn stat(path: *const u8, out: *mut CStat) -> isize {
     newfstatat(MIRAGE_AT_FDCWD, path, out, 0)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn fstat(fd: i32, out: *mut CStat) -> isize {
     newfstatat(fd, core::ptr::null(), out, 0)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn statx(
     dirfd: i32,
     path: *const u8,
@@ -230,7 +230,7 @@ pub unsafe extern "C" fn statx(
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn newfstatat(
     dirfd: i32,
     path: *const u8,
@@ -247,12 +247,12 @@ pub unsafe extern "C" fn newfstatat(
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn mkdir(path: *const u8, mode: u32) -> isize {
     mkdirat(MIRAGE_AT_FDCWD, path, mode)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> isize {
     if path.is_null() {
         return errno::return_or_errno(-(MIRAGE_EFAULT as isize));
@@ -263,12 +263,12 @@ pub unsafe extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> isiz
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn unlink(path: *const u8) -> isize {
     unlinkat(MIRAGE_AT_FDCWD, path, 0)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: u32) -> isize {
     if path.is_null() {
         return errno::return_or_errno(-(MIRAGE_EFAULT as isize));
@@ -279,12 +279,12 @@ pub unsafe extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: u32) -> is
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn rename(old_path: *const u8, new_path: *const u8) -> isize {
     renameat2(MIRAGE_AT_FDCWD, old_path, MIRAGE_AT_FDCWD, new_path, 0)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn renameat(
     old_dirfd: i32,
     old_path: *const u8,
@@ -294,7 +294,7 @@ pub unsafe extern "C" fn renameat(
     renameat2(old_dirfd, old_path, new_dirfd, new_path, 0)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn renameat2(
     old_dirfd: i32,
     old_path: *const u8,
@@ -318,12 +318,12 @@ pub unsafe extern "C" fn renameat2(
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn fsync(fd: i32) -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_FSYNC, [fd as u64, 0, 0, 0, 0, 0])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn ftruncate(fd: i32, size: u64) -> isize {
     posix_syscall(
         syscall::MIRAGE_SYSCALL_FTRUNCATE,

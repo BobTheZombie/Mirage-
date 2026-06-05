@@ -23,7 +23,7 @@ pub(crate) unsafe fn mirage_clock_gettime_with_kernel(
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn clock_gettime(clock_id: i32, out: *mut MirageTimespec) -> isize {
     if out.is_null() {
         return errno::return_or_errno(-(MIRAGE_EFAULT as isize));

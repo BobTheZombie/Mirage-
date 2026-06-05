@@ -13,15 +13,15 @@ use crate::subkernel::IsolationError;
 /// Mirage currently runs these libc shims in a single kernel/runtime context, so
 /// errno is process-wide until TLS-backed per-thread errno is wired into the
 /// userspace runtime.
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub static mut errno: i32 = 0;
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn __errno_location() -> *mut i32 {
     core::ptr::addr_of_mut!(errno)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn mirage_errno_location() -> *mut i32 {
     __errno_location()
 }

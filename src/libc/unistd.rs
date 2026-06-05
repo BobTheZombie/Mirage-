@@ -217,12 +217,12 @@ fn posix_syscall(number: u64, args: [u64; SYSCALL_MAX_ARGS]) -> isize {
     errno::return_or_errno(raw_syscall_runtime(number, args))
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn close(fd: i32) -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_CLOSE, [fd as u64, 0, 0, 0, 0, 0])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn read(fd: i32, buffer: *mut u8, len: usize) -> isize {
     if len > 0 && buffer.is_null() {
         return errno::return_or_errno(-(MIRAGE_EFAULT as isize));
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn read(fd: i32, buffer: *mut u8, len: usize) -> isize {
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn write(fd: i32, data: *const u8, len: usize) -> isize {
     if len > 0 && data.is_null() {
         return errno::return_or_errno(-(MIRAGE_EFAULT as isize));
@@ -244,7 +244,7 @@ pub unsafe extern "C" fn write(fd: i32, data: *const u8, len: usize) -> isize {
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn lseek(fd: i32, offset: i64, whence: u32) -> isize {
     posix_syscall(
         syscall::MIRAGE_SYSCALL_LSEEK,
@@ -252,47 +252,47 @@ pub unsafe extern "C" fn lseek(fd: i32, offset: i64, whence: u32) -> isize {
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn getpid() -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_GETPID, [0; SYSCALL_MAX_ARGS])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn getppid() -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_GETPPID, [0; SYSCALL_MAX_ARGS])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn getuid() -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_GETUID, [0; SYSCALL_MAX_ARGS])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn geteuid() -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_GETEUID, [0; SYSCALL_MAX_ARGS])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn getgid() -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_GETGID, [0; SYSCALL_MAX_ARGS])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn getegid() -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_GETGID, [0; SYSCALL_MAX_ARGS])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn setuid(uid: u32) -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_SETUID, [uid as u64, 0, 0, 0, 0, 0])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn setgid(gid: u32) -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_SETGID, [gid as u64, 0, 0, 0, 0, 0])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn getgroups(size: usize, groups: *mut u32) -> isize {
     if size > 0 && groups.is_null() {
         return errno::return_or_errno(-(MIRAGE_EFAULT as isize));
@@ -303,12 +303,12 @@ pub unsafe extern "C" fn getgroups(size: usize, groups: *mut u32) -> isize {
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn _exit(status: i32) -> isize {
     posix_syscall(syscall::MIRAGE_SYSCALL_EXIT, [status as u64, 0, 0, 0, 0, 0])
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn kill(pid: u64, signal: i32) -> isize {
     posix_syscall(
         syscall::MIRAGE_SYSCALL_KILL,
@@ -316,7 +316,7 @@ pub unsafe extern "C" fn kill(pid: u64, signal: i32) -> isize {
     )
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn clone(entry_point: u64, priority: u64) -> isize {
     posix_syscall(
         syscall::MIRAGE_SYSCALL_CLONE,
@@ -344,7 +344,7 @@ pub unsafe extern "C" fn mirage_device_enumerate(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn mirage_device_info(
     kernel: *mut Kernel<{ crate::kernel::MAX_PROCESSES }, { crate::kernel::MESSAGE_DEPTH }>,
     caller: u64,
@@ -366,7 +366,7 @@ pub unsafe extern "C" fn mirage_device_info(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn mirage_device_read(
     kernel: *mut Kernel<{ crate::kernel::MAX_PROCESSES }, { crate::kernel::MESSAGE_DEPTH }>,
     caller: u64,
@@ -394,7 +394,7 @@ pub unsafe extern "C" fn mirage_device_read(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn mirage_device_write(
     kernel: *mut Kernel<{ crate::kernel::MAX_PROCESSES }, { crate::kernel::MESSAGE_DEPTH }>,
     caller: u64,

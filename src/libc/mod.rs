@@ -57,7 +57,7 @@ static mut RUNTIME_SYSCALL_CONTEXT: MirageRuntimeSyscallContext = MirageRuntimeS
 };
 
 /// Installs the kernel/process/thread context used by POSIX C ABI shims.
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub unsafe extern "C" fn mirage_set_runtime_syscall_context(
     kernel: *mut DefaultKernel,
     caller: u64,

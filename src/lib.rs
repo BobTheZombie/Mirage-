@@ -7,9 +7,10 @@
 //! Mirage is a conceptual 64-bit, Rust-based GNU/Mirage kernel organized around a
 //! mechanism/policy split.
 //!
-//! * The **mechanism-only kernel layer** provides CPU scheduling primitives, process
-//!   lifecycle mechanics, message-based IPC, filesystem mechanisms and syscall entry
-//!   points without making POSIX or Linux conventions part of the internal architecture.
+//! * The **mechanism-only kernel layer** provides CPU entry/exit, interrupt/timer
+//!   delivery, low-level memory primitives, IPC transport, capability enforcement
+//!   hooks, filesystem mechanisms and syscall entry points while MTSS owns portable
+//!   task/thread/scheduler mechanics.
 //! * The **supervisor and security broker layers** own service policy, recovery,
 //!   signed-manifest validation and security adjudication through isolation domains,
 //!   credentials, capabilities and message authorization. Supervised driver services are
