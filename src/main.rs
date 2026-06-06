@@ -19,16 +19,20 @@ use mirage::supervisor::Supervisor;
 #[no_mangle]
 pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
     mirage::kprintln!("Mirage kernel booting...");
+    mirage::kprintln!("architecture init starting");
     x86_64::init_architecture(&boot_info);
 
     let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
+    mirage::kprintln!("kernel constructed");
     kernel.bootstrap_with_boot_info(&boot_info);
+    mirage::kprintln!("boot info applied");
 
     if cpu::MAX_CORES > 1 {
         kernel.bring_up_secondary_cores(cpu::MAX_CORES - 1);
     }
 
     let supervisor = Supervisor::new();
+    mirage::kprintln!("supervisor created");
 
     #[cfg(feature = "full-boot")]
     {
@@ -82,7 +86,9 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             "root mount attempt skipped: minimal boot milestone does not require QFS root yet"
         );
 
+        mirage::kprintln!("minimal supervisor bootstrap starting");
         let minimal_report = supervisor.bootstrap_minimal(&mut kernel);
+        mirage::kprintln!("minimal supervisor bootstrap complete");
         match minimal_report.failure {
             Some(error) => {
                 mirage::kprintln!("supervisor initialization failed: {:?}", error);

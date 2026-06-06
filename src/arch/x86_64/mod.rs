@@ -275,6 +275,7 @@ fn setup_memory_layout(boot_info: &BootInfo) {
     paging::initialize(boot_info);
     memory::initialize_from_boot_info(boot_info);
     crate::kprintln!("memory map parsed");
+    crate::kprintln!("memory initialized");
     crate::kprintln!("heap initialized");
 }
 
@@ -282,5 +283,7 @@ fn configure_interrupts() {
     idt::initialize();
     crate::kprintln!("IDT initialized");
     pic::initialize();
+    crate::kprintln!("PIC initialized");
     interrupts::enable();
+    crate::kprintln!("interrupts enabled");
 }
