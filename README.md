@@ -208,8 +208,11 @@ Equivalent explicit command after `make iso`:
 qemu-system-x86_64 -M q35 -m 256M -cdrom build/mirage.iso -serial stdio -display none -no-reboot -no-shutdown
 ```
 
-The current kernel has no console or driver output yet, so a successful smoke test reaches the
-Limine entry and then remains in the kernel tick loop without resetting or triple-faulting.
+The QEMU smoke path now uses COM1 serial diagnostics, so a successful boot should visibly print
+markers such as `Mirage kernel booting...` and `Mirage reached idle loop` before remaining in the
+idle loop without resetting or triple-faulting. For CI and local automation, use
+`scripts/qemu-smoke.sh`; it builds the ISO, captures the serial log, and checks for the expected
+boot markers.
 
 ## Real hardware path
 
