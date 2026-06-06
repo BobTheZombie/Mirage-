@@ -48,11 +48,11 @@ timeout --foreground "$TIMEOUT_SECONDS" "$QEMU" \
     -M q35 \
     -m 256M \
     -cdrom "$ISO_IMAGE" \
-    -serial file:"$SMOKE_LOG" \
+    -serial stdio \
     -monitor none \
     -display none \
     -no-reboot \
-    -no-shutdown
+    -no-shutdown >"$SMOKE_LOG" 2>&1
 qemu_status=$?
 set -e
 
