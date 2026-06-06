@@ -70,7 +70,7 @@ use core::panic::PanicInfo;
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     crate::arch::x86_64::uart16550::early_print(::core::format_args!(
-        "\n=== Mirage kernel panic ===\n"
+        "\nPANIC\n=== Mirage kernel panic ===\n"
     ));
 
     if let Some(location) = info.location() {
