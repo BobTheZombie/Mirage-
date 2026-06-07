@@ -19,6 +19,10 @@ use mirage::supervisor::Supervisor;
 #[no_mangle]
 pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
     mirage::kprintln!("Mirage kernel booting...");
+    if !boot_info.limine_base_revision_supported() {
+        mirage::kprintln!("unsupported Limine base revision");
+        mirage::arch::x86_64::panic_halt();
+    }
     mirage::kprintln!("architecture init starting");
     x86_64::init_architecture(&boot_info);
 

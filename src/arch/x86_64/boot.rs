@@ -91,6 +91,18 @@ pub struct BootInfo {
 }
 
 impl BootInfo {
+    /// Return whether the active boot protocol satisfied Mirage's required base revision.
+    ///
+    /// This must be checked before normal architecture initialization so the
+    /// kernel does not continue after an incompatible Limine handoff.
+    pub const fn limine_base_revision_supported(self) -> bool {
+        match self.boot_protocol {
+            BootProtocol::Limine {
+                base_revision_supported,
+            } => base_revision_supported,
+        }
+    }
+
     #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
     fn from_limine(raw: limine::LimineBootSnapshot, sections: KernelSections) -> Self {
         let executable = raw.executable_address.map(|address| KernelLoadRange {
@@ -471,3 +483,54 @@ pub struct PhysicalAddress(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VirtualAddress(pub u64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boot_info_with_limine_base_revision(base_revision_supported: bool) -> BootInfo {
+        BootInfo {
+            boot_protocol: BootProtocol::Limine {
+                base_revision_supported,
+            },
+            bootloader: BootloaderInfo::unknown(),
+            memory_map: None,
+            framebuffer: None,
+            serial: None,
+            rsdp: None,
+            hhdm_offset: None,
+            kernel: KernelImageInfo {
+                sections: KernelSections {
+                    kernel: VirtualRange {
+                        start: VirtualAddress(0),
+                        end: VirtualAddress(0),
+                    },
+                    text: VirtualRange {
+                        start: VirtualAddress(0),
+                        end: VirtualAddress(0),
+                    },
+                    rodata: VirtualRange {
+                        start: VirtualAddress(0),
+                        end: VirtualAddress(0),
+                    },
+                    data: VirtualRange {
+                        start: VirtualAddress(0),
+                        end: VirtualAddress(0),
+                    },
+                    bss: VirtualRange {
+                        start: VirtualAddress(0),
+                        end: VirtualAddress(0),
+                    },
+                },
+                load_range: None,
+            },
+            modules: BootModules::empty(),
+        }
+    }
+
+    #[test]
+    fn limine_base_revision_helper_reflects_boot_protocol_field() {
+        assert!(boot_info_with_limine_base_revision(true).limine_base_revision_supported());
+        assert!(!boot_info_with_limine_base_revision(false).limine_base_revision_supported());
+    }
+}
