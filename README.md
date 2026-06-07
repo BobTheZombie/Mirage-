@@ -91,6 +91,7 @@ Install the host tools used by the reproducible image flow:
 * `git`, `make`, and a C toolchain for building the pinned Limine checkout.
 * `xorriso` for ISO creation.
 * `qemu-system-x86_64` for the emulator smoke test.
+* `readelf` or `llvm-readelf` for the x86_64 boot artifact smoke test.
 
 On Debian/Ubuntu-like systems, the non-Rust tools are typically installed with:
 
@@ -113,6 +114,7 @@ rustup component add rust-src
 | `make limine` | Downloads and builds the pinned Limine release into `build/limine`. |
 | `make iso` | Builds the kernel and packages `build/mirage.iso`. |
 | `make run-qemu` | Boots the ISO in QEMU. |
+| `make smoke-x86_64-boot` | Builds and validates the x86_64 kernel ELF boot artifact without launching an emulator. |
 | `make clean` | Removes Cargo and build artifacts. |
 
 The Makefile exposes a few variables for local environments and reproducible builds:
@@ -213,6 +215,20 @@ markers such as `Mirage kernel booting...` and `Mirage reached idle loop` before
 idle loop without resetting or triple-faulting. For CI and local automation, use
 `scripts/qemu-smoke.sh`; it builds the ISO, captures the serial log, and checks for the expected
 boot markers.
+
+For a non-emulator x86_64 boot artifact baseline, use:
+
+```sh
+make smoke-x86_64-boot
+```
+
+This runs `scripts/x86_64-boot-smoke.sh`, which builds `make kernel` by default and then checks
+that the linked ELF is an ELF64 x86_64 image whose entry address resolves to `_start`. It also
+verifies the required bootstrap/linker symbols (`_start`, `__mirage_x86_64_bootstrap`,
+`__limine_requests_start`, `__limine_requests_end`, `__stack_top`, `__bss_start`, and
+`__bss_end`) and confirms that `.requests`, `.requests_start_marker`, and
+`.requests_end_marker` survived section garbage collection. To inspect an already-built or
+external artifact, pass `KERNEL_ELF=/path/to/mirage-kernel` to the script.
 
 ## Real hardware path
 

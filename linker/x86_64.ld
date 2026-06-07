@@ -35,11 +35,19 @@ SECTIONS
     } :rodata
 
     . = ALIGN(4K);
-    .requests : AT(ADDR(.requests) - KERNEL_VIRT_BASE)
+    .requests_start_marker : AT(ADDR(.requests_start_marker) - KERNEL_VIRT_BASE)
     {
         __limine_requests_start = .;
         KEEP(*(.requests_start_marker))
+    } :requests
+
+    .requests : AT(ADDR(.requests) - KERNEL_VIRT_BASE)
+    {
         KEEP(*(.requests))
+    } :requests
+
+    .requests_end_marker : AT(ADDR(.requests_end_marker) - KERNEL_VIRT_BASE)
+    {
         KEEP(*(.requests_end_marker))
         __limine_requests_end = .;
     } :requests

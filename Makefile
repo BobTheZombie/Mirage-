@@ -14,7 +14,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all kernel iso run-qemu clean limine rust-src
+.PHONY: all kernel iso run-qemu smoke-x86_64-boot clean limine rust-src
 
 all: iso
 
@@ -56,6 +56,9 @@ iso: kernel limine
 
 run-qemu: iso
 	qemu-system-x86_64 -M q35 -m 256M -cdrom $(ISO_IMAGE) -serial stdio -display none -no-reboot -no-shutdown
+
+smoke-x86_64-boot: scripts/x86_64-boot-smoke.sh
+	BUILD_KERNEL=1 KERNEL_ELF=$(KERNEL_ELF) ./scripts/x86_64-boot-smoke.sh
 
 clean:
 	$(CARGO) clean
