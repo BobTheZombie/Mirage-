@@ -47,6 +47,19 @@ These markers prove that Limine entered the kernel, the kernel did not panic
 before the idle loop, and QEMU can keep the skeleton image alive until the smoke
 script timeout stops the virtual machine.
 
+## Failure diagnostics
+
+Early boot guards emit stable COM1 diagnostics before normal architecture
+initialization when the boot handoff is incompatible. Known failure markers are:
+
+```text
+unsupported Limine base revision
+```
+
+This marker means Limine reported that Mirage's requested base revision is not
+supported, so the kernel halts instead of continuing with unsafe assumptions
+about the boot protocol contract.
+
 ## Supervised skeleton boot markers
 
 The supervised boot skeleton adds serial diagnostics between the baseline boot
