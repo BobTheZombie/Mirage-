@@ -47,6 +47,25 @@ These markers prove that Limine entered the kernel, the kernel did not panic
 before the idle loop, and QEMU can keep the skeleton image alive until the smoke
 script timeout stops the virtual machine.
 
+
+## Non-emulator x86_64 boot artifact baseline
+
+`scripts/x86_64-boot-smoke.sh` is the local bootpath baseline that does not
+launch an emulator. By default, `make smoke-x86_64-boot` runs `make kernel` and
+then inspects `target/x86_64-mirage/release/mirage-kernel` with a
+readelf-compatible tool. The script may also inspect a prebuilt artifact via
+`KERNEL_ELF=/path/to/mirage-kernel scripts/x86_64-boot-smoke.sh`.
+
+The baseline checks that the artifact is an ELF64 x86_64 image, that the ELF
+entry address matches `_start`, and that the required low-level bootstrap and
+linker symbols remain present: `_start`, `__mirage_x86_64_bootstrap`,
+`__limine_requests_start`, `__limine_requests_end`, `__stack_top`,
+`__bss_start`, and `__bss_end`. It also verifies that `.requests`,
+`.requests_start_marker`, and `.requests_end_marker` are retained in the linked
+artifact despite linker section garbage collection. This complements the QEMU
+smoke test by proving the static Limine handoff shape before boot media or an
+emulator is involved.
+
 ## Failure diagnostics
 
 Early boot guards emit stable COM1 diagnostics before normal architecture
@@ -101,6 +120,8 @@ The current milestone has real, runnable pieces in the QEMU smoke path:
   capability-facing supervisor code paths.
 - A QEMU smoke script that builds the ISO, captures serial output, applies a
   timeout, and validates the baseline boot markers.
+- A non-emulator x86_64 boot artifact smoke script that validates the linked
+  kernel ELF before ISO packaging or QEMU execution.
 
 ## What is compiled-in or static fixture data
 
