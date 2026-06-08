@@ -1,6 +1,6 @@
-CARGO ?= $(shell which cargo)
-RUSTC ?= $(shell which rustc)
 RUSTUP ?= rustup
+CARGO ?= $(shell $(RUSTUP) which cargo 2>/dev/null || which cargo)
+RUSTC ?= $(shell $(RUSTUP) which rustc 2>/dev/null || which rustc)
 RUSTC_BOOTSTRAP ?= 1
 LIMINE_VERSION ?= v12.3.2
 LIMINE_VERSION_NUMBER := $(patsubst v%,%,$(LIMINE_VERSION))
@@ -14,14 +14,36 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all kernel iso run-qemu smoke-x86_64-boot clean limine rust-src
+.PHONY: all kernel iso run-qemu smoke-x86_64-boot clean limine rust-src check-rust-src
 
 all: iso
 
 rust-src:
-	$(RUSTUP) component add rust-src
+	@set -eu; \
+	sysroot="$$($(RUSTC) --print sysroot)"; \
+	src_lock="$$sysroot/lib/rustlib/src/rust/library/Cargo.lock"; \
+	if [ -f "$$src_lock" ]; then \
+		echo "rust-src already available for $(RUSTC) at $$src_lock"; \
+	elif printf '%s\n' "$$sysroot" | grep -q '/toolchains/'; then \
+		toolchain="$${sysroot##*/toolchains/}"; \
+		$(RUSTUP) component add rust-src --toolchain "$$toolchain"; \
+	else \
+		echo "error: $(RUSTC) sysroot $$sysroot is not managed by rustup and lacks $$src_lock" >&2; \
+		echo "error: install matching Rust source for that compiler, or use rustup-managed CARGO/RUSTC from the same toolchain" >&2; \
+		exit 1; \
+	fi
 
-kernel: rust-src
+check-rust-src:
+	@set -eu; \
+	sysroot="$$($(RUSTC) --print sysroot)"; \
+	src_lock="$$sysroot/lib/rustlib/src/rust/library/Cargo.lock"; \
+	if [ ! -f "$$src_lock" ]; then \
+		echo "error: rust-src is missing for $(RUSTC) (expected $$src_lock)" >&2; \
+		echo "error: run 'make rust-src' or use matching rustup-managed CARGO/RUSTC tools before building with -Z build-std" >&2; \
+		exit 1; \
+	fi
+
+kernel: rust-src check-rust-src
 	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --bin mirage-kernel \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
