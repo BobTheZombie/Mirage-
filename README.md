@@ -151,8 +151,9 @@ The Makefile exposes a few variables for local environments and reproducible bui
 
 ## Build the kernel ELF
 
-The Makefile invokes Cargo with `-Z build-std` because a custom freestanding target needs `core` and
-`compiler_builtins` built for `targets/x86_64-mirage.json`.
+The Makefile invokes Cargo with `-Z build-std` because a custom freestanding target needs `core`, `alloc`, and
+`compiler_builtins` built for `targets/x86_64-mirage.json`. This matches the `kernel` target in
+the Makefile and the `[unstable] build-std` list in `.cargo/config.toml`.
 
 ```sh
 make kernel
@@ -169,7 +170,18 @@ You can also call Cargo directly:
 ```sh
 RUSTC_BOOTSTRAP=1 cargo build --release --bin mirage-kernel \
   --target targets/x86_64-mirage.json \
-  -Z build-std=core,compiler_builtins \
+  -Z build-std=core,alloc,compiler_builtins \
+  -Z build-std-features=compiler-builtins-mem
+```
+
+If your host also has a system Rust toolchain installed, prefer rustup-managed Cargo and Rustc so
+Cargo rebuilds `core`, `alloc`, and `compiler_builtins` from the matching `rust-src` sysroot:
+
+```sh
+RUSTC_BOOTSTRAP=1 CARGO="$(rustup which cargo)" RUSTC="$(rustup which rustc)" \
+  "$(rustup which cargo)" build --release --bin mirage-kernel \
+  --target targets/x86_64-mirage.json \
+  -Z build-std=core,alloc,compiler_builtins \
   -Z build-std-features=compiler-builtins-mem
 ```
 
