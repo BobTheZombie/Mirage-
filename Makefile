@@ -8,6 +8,7 @@ LIMINE_URL := https://github.com/limine-bootloader/limine/releases/download/$(LI
 TARGET_JSON_SOURCE := targets/x86_64-mirage.json
 TARGET_JSON = $(BUILD_DIR)/targets/x86_64-mirage.json
 CARGO_JSON_TARGET_SPEC_FLAG := $(shell RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) -Z help 2>/dev/null | sed -n "s/.*-Z json-target-spec.*/-Z json-target-spec/p")
+UNSTABLE_OPTIONS_FLAG := -Z unstable-options
 KERNEL_ELF := target/x86_64-mirage/release/mirage-kernel
 BUILD_DIR := build
 ISO_ROOT := $(BUILD_DIR)/iso_root
@@ -52,11 +53,11 @@ $(TARGET_JSON): $(TARGET_JSON_SOURCE) FORCE
 	@set -eu; \
 	mkdir -p "$(@D)"; \
 	cp "$<" "$@.tmp.json"; \
-	if RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(RUSTC) - --target "$@.tmp.json" --print cfg >/dev/null 2>&1 < /dev/null; then \
+	if RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(RUSTC) $(UNSTABLE_OPTIONS_FLAG) - --target "$@.tmp.json" --print cfg >/dev/null 2>&1 < /dev/null; then \
 		mv "$@.tmp.json" "$@"; \
 	else \
 		sed 's/"target-pointer-width": "64"/"target-pointer-width": 64/' "$<" > "$@.tmp.json"; \
-		RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(RUSTC) - --target "$@.tmp.json" --print cfg >/dev/null < /dev/null; \
+		RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(RUSTC) $(UNSTABLE_OPTIONS_FLAG) - --target "$@.tmp.json" --print cfg >/dev/null < /dev/null; \
 		mv "$@.tmp.json" "$@"; \
 	fi
 
@@ -64,6 +65,7 @@ kernel: rust-src check-rust-src $(TARGET_JSON)
 	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --bin mirage-kernel \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
+		$(UNSTABLE_OPTIONS_FLAG) \
 		-Z build-std=core,alloc,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
 
