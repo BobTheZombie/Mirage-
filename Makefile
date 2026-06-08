@@ -1,5 +1,5 @@
-CARGO ?= cargo
-RUSTC ?= rustc
+CARGO ?= $(shell which cargo)
+RUSTC ?= $(shell which rustc)
 RUSTUP ?= rustup
 RUSTC_BOOTSTRAP ?= 1
 LIMINE_VERSION ?= v12.3.2
