@@ -120,6 +120,7 @@ rustup component add rust-src
 | --- | --- |
 | `make rust-src` | Installs the Rust `rust-src` component for the rustup toolchain that `RUSTC` resolves to, or verifies that non-rustup `RUSTC` already has matching sources. |
 | `make check-rust-src` | Verifies that `$(RUSTC) --print sysroot` contains `lib/rustlib/src/rust/library/Cargo.lock` before a `-Z build-std` build. |
+| `make target-json` | Renders a compiler-compatible custom target spec into `build/targets/x86_64-mirage.json`. |
 | `make kernel` | Builds `target/x86_64-mirage/release/mirage-kernel` after checking for matching Rust sources. |
 | `make limine` | Downloads and builds the pinned Limine release into `build/limine`. |
 | `make iso` | Builds the kernel and packages `build/mirage.iso`. |
@@ -152,8 +153,10 @@ The Makefile exposes a few variables for local environments and reproducible bui
 ## Build the kernel ELF
 
 The Makefile invokes Cargo with `-Z build-std` because a custom freestanding target needs `core`, `alloc`, and
-`compiler_builtins` built for `targets/x86_64-mirage.json`. This matches the `kernel` target in
-the Makefile and the `[unstable] build-std` list in `.cargo/config.toml`.
+`compiler_builtins`. The `kernel` target first renders `targets/x86_64-mirage.json` into
+`build/targets/x86_64-mirage.json`, normalizing target-spec fields whose accepted JSON types differ
+between Rust compiler releases, then passes that generated target to Cargo. The build-std crate list
+matches the `[unstable] build-std` list in `.cargo/config.toml`.
 
 ```sh
 make kernel
@@ -165,11 +168,12 @@ The ELF is written to:
 target/x86_64-mirage/release/mirage-kernel
 ```
 
-You can also call Cargo directly:
+You can also call Cargo directly after rendering the compiler-compatible target spec:
 
 ```sh
+make target-json
 RUSTC_BOOTSTRAP=1 cargo build --release --bin mirage-kernel \
-  --target targets/x86_64-mirage.json \
+  --target build/targets/x86_64-mirage.json \
   -Z build-std=core,alloc,compiler_builtins \
   -Z build-std-features=compiler-builtins-mem
 ```
@@ -180,7 +184,7 @@ Cargo rebuilds `core`, `alloc`, and `compiler_builtins` from the matching `rust-
 ```sh
 RUSTC_BOOTSTRAP=1 CARGO="$(rustup which cargo)" RUSTC="$(rustup which rustc)" \
   "$(rustup which cargo)" build --release --bin mirage-kernel \
-  --target targets/x86_64-mirage.json \
+  --target build/targets/x86_64-mirage.json \
   -Z build-std=core,alloc,compiler_builtins \
   -Z build-std-features=compiler-builtins-mem
 ```

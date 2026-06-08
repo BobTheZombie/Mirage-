@@ -5,7 +5,8 @@ RUSTC_BOOTSTRAP ?= 1
 LIMINE_VERSION ?= v12.3.2
 LIMINE_VERSION_NUMBER := $(patsubst v%,%,$(LIMINE_VERSION))
 LIMINE_URL := https://github.com/limine-bootloader/limine/releases/download/$(LIMINE_VERSION)/limine-binary.tar.xz
-TARGET_JSON := targets/x86_64-mirage.json
+TARGET_JSON_SOURCE := targets/x86_64-mirage.json
+TARGET_JSON = $(BUILD_DIR)/targets/x86_64-mirage.json
 CARGO_JSON_TARGET_SPEC_FLAG := $(shell RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) -Z help 2>/dev/null | sed -n "s/.*-Z json-target-spec.*/-Z json-target-spec/p")
 KERNEL_ELF := target/x86_64-mirage/release/mirage-kernel
 BUILD_DIR := build
@@ -14,7 +15,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all kernel iso run-qemu smoke-x86_64-boot clean limine rust-src check-rust-src
+.PHONY: all kernel iso run-qemu smoke-x86_64-boot clean limine rust-src check-rust-src target-json FORCE
 
 all: iso
 
@@ -43,7 +44,23 @@ check-rust-src:
 		exit 1; \
 	fi
 
-kernel: rust-src check-rust-src
+target-json: $(TARGET_JSON)
+
+FORCE:
+
+$(TARGET_JSON): $(TARGET_JSON_SOURCE) FORCE
+	@set -eu; \
+	mkdir -p "$(@D)"; \
+	cp "$<" "$@.tmp.json"; \
+	if RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(RUSTC) - --target "$@.tmp.json" --print cfg >/dev/null 2>&1 < /dev/null; then \
+		mv "$@.tmp.json" "$@"; \
+	else \
+		sed 's/"target-pointer-width": "64"/"target-pointer-width": 64/' "$<" > "$@.tmp.json"; \
+		RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(RUSTC) - --target "$@.tmp.json" --print cfg >/dev/null < /dev/null; \
+		mv "$@.tmp.json" "$@"; \
+	fi
+
+kernel: rust-src check-rust-src $(TARGET_JSON)
 	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --bin mirage-kernel \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
