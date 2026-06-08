@@ -17,24 +17,33 @@ and the Makefile packages the ELF with a signed boot module set into a BIOS/UEFI
 
 ## Architecture flow
 
-Mirage boots from the Limine request and response records declared in `src/boot.rs`. Control enters
-through the `_start` entry point in `src/main.rs`, which gathers boot information and hands it to
-`kernel_main`. The architecture layer is initialised with `x86_64::init_architecture` from
-`src/arch/x86_64/mod.rs`, then the mechanism-only kernel and GNU/Mirage policy layers are
-constructed with `Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new()`.
+Mirage boots from the Limine request and response records declared in `src/boot.rs`. The
+handoff sequence is: Limine populates those requests, transfers control to the `_start` assembly
+stub in `src/arch/x86_64/boot.rs`, `_start` calls `__mirage_x86_64_bootstrap` in the same file,
+the bootstrap clears `.bss`, snapshots the Limine state into `BootInfo`, and then hands that
+snapshot to `src/main.rs::kernel_main`. Serial output begins with the stable
+`Mirage kernel booting` marker once `kernel_main` starts.
 
-From there, `bootstrap_with_framebuffer` seeds framebuffer-aware boot state and
-`bootstrap_services` launches the signed boot module set. The supervisor acts as the
-policy/recovery/security broker for those modules, including supervised driver services as the
-preferred driver model, while the kernel settles into the `tick` loop where scheduling, process
-lifecycle, IPC, filesystem mechanisms and external ABI dispatch continue to pass through
-`src/subkernel/` checks for isolation domains, credentials, capabilities and message authorization.
+`kernel_main` checks the Limine base revision, initialises the architecture with
+`x86_64::init_architecture` from `src/arch/x86_64/mod.rs`, constructs the mechanism-only kernel with
+`Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new()`, and applies boot state through
+`kernel.bootstrap_with_boot_info(&boot_info)`. The default non-`full-boot` path then runs the
+minimal supervisor bootstrap, explicitly skips QFS root mounting and userspace init, and admits the
+compiled-in mock manifest for the `echo-service` IPC smoke path. Building with `full-boot` instead
+attempts the fuller boot-source root mount, service manifest startup, and userspace init paths,
+which may still report skipped or stubbed work while those milestones are incomplete.
+
+In both paths, the supervisor remains the policy/recovery/security broker for services, including
+supervised driver services as the preferred driver model, while the kernel settles into the `tick`
+loop after the stable `Mirage reached idle loop` marker. Scheduling, process lifecycle, IPC,
+filesystem mechanisms and external ABI dispatch continue to pass through `src/subkernel/` checks
+for isolation domains, credentials, capabilities and message authorization.
 
 ## Layout
 
 ```
 src/
-├── arch/             # 64-bit x86 architectural scaffolding (initialisation, CPU hints)
+├── arch/             # 64-bit x86 bootstrap, typed boot handoff, and CPU scaffolding
 ├── bin/
 │   └── qfsprogs.rs   # Host QFS tooling gated behind the `qfs-std` feature
 ├── boot.rs           # Limine boot protocol request/response records
@@ -46,7 +55,7 @@ src/
 ├── supervisor/       # Policy, recovery, security brokerage and signed service manifests
 ├── lib.rs            # Crate entry point that exposes the layered kernel modules
 ├── librust.rs        # Local runtime primitives and allocator exports
-├── main.rs           # `_start` entry point wiring the boot data and layers together
+├── main.rs           # `kernel_main` entry that wires boot data into kernel/supervisor layers
 └── stdlib.rs         # no-alloc stdlib-shaped import surface
 
 targets/
@@ -211,7 +220,7 @@ qemu-system-x86_64 -M q35 -m 256M -cdrom build/mirage.iso -serial stdio -display
 ```
 
 The QEMU smoke path now uses COM1 serial diagnostics, so a successful boot should visibly print
-markers such as `Mirage kernel booting...` and `Mirage reached idle loop` before remaining in the
+markers such as `Mirage kernel booting` and `Mirage reached idle loop` before remaining in the
 idle loop without resetting or triple-faulting. For CI and local automation, use
 `scripts/qemu-smoke.sh`; it builds the ISO, captures the serial log, and checks for the expected
 boot markers.
