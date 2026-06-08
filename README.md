@@ -118,8 +118,9 @@ rustup component add rust-src
 
 | Target | Description |
 | --- | --- |
-| `make rust-src` | Installs the Rust `rust-src` component for the active toolchain. |
-| `make kernel` | Builds `target/x86_64-mirage/release/mirage-kernel`. |
+| `make rust-src` | Installs the Rust `rust-src` component for the rustup toolchain that `RUSTC` resolves to, or verifies that non-rustup `RUSTC` already has matching sources. |
+| `make check-rust-src` | Verifies that `$(RUSTC) --print sysroot` contains `lib/rustlib/src/rust/library/Cargo.lock` before a `-Z build-std` build. |
+| `make kernel` | Builds `target/x86_64-mirage/release/mirage-kernel` after checking for matching Rust sources. |
 | `make limine` | Downloads and builds the pinned Limine release into `build/limine`. |
 | `make iso` | Builds the kernel and packages `build/mirage.iso`. |
 | `make run-qemu` | Boots the ISO in QEMU. |
@@ -134,12 +135,19 @@ The Makefile exposes a few variables for local environments and reproducible bui
   freestanding target; override it only if your toolchain setup provides another path for those
   flags.
 * `CARGO`, `RUSTC`, and `RUSTUP` select the Cargo, Rust compiler, and Rustup executables
-  used by `make kernel` and `make rust-src`, which is useful for wrappers or non-default
-  toolchain locations. For example:
+  used by `make kernel`, `make rust-src`, and `make check-rust-src`. By default, the Makefile
+  prefers `rustup which cargo` and `rustup which rustc`, falling back to `which` only when rustup
+  cannot resolve those tools. If you override `CARGO` or `RUSTC`, keep both tools on the same
+  rustup toolchain so `make rust-src` installs sources into the sysroot used by the compiler. For
+  example:
 
   ```sh
   make kernel CARGO="$(rustup which cargo)" RUSTC="$(rustup which rustc)"
   ```
+
+  Avoid passing a system compiler such as `RUSTC=/usr/bin/rustc` unless that compiler's sysroot
+  already contains matching Rust sources at `lib/rustlib/src/rust/library/Cargo.lock`; Cargo's
+  `-Z build-std` path requires those sources for the exact compiler sysroot in use.
 
 ## Build the kernel ELF
 
