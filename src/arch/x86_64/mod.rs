@@ -92,9 +92,29 @@ pub fn init_architecture(boot_info: &BootInfo) {
     configure_cpu_modes();
     initialize_per_cpu_state();
     setup_memory_layout(boot_info);
-    #[cfg(feature = "hw-framebuffer")]
-    framebuffer_console::init_from_boot_info(boot_info);
+    initialize_framebuffer_console(boot_info);
     configure_interrupts();
+}
+
+#[cfg(feature = "hw-framebuffer")]
+fn initialize_framebuffer_console(boot_info: &BootInfo) {
+    match framebuffer_console::init_from_boot_info(boot_info) {
+        Ok(Some(framebuffer)) => {
+            crate::kprintln!("Mirage framebuffer online");
+            crate::kprintln!("  resolution: {}x{}", framebuffer.width, framebuffer.height);
+            crate::kprintln!("  pitch: {}", framebuffer.pitch);
+            crate::kprintln!("  bits per pixel: {}", framebuffer.bits_per_pixel);
+            crate::kprintln!("  framebuffer address: {:#018x}", framebuffer.address.0);
+        }
+        Ok(None) | Err(_) => {
+            crate::kprintln!("framebuffer unavailable; serial console only");
+        }
+    }
+}
+
+#[cfg(not(feature = "hw-framebuffer"))]
+fn initialize_framebuffer_console(_boot_info: &BootInfo) {
+    crate::kprintln!("framebuffer unavailable; serial console only");
 }
 
 /// Run a scheduled thread until hardware returns control through a trap.
