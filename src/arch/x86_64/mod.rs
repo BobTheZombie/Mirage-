@@ -16,6 +16,8 @@ use crate::kernel::thread::{
 pub mod boot;
 pub mod clock;
 pub mod device;
+#[cfg(feature = "hw-framebuffer")]
+pub mod framebuffer_console;
 pub mod gdt;
 pub mod idt;
 pub mod interrupts;
@@ -89,6 +91,8 @@ pub fn init_architecture(boot_info: &BootInfo) {
     configure_cpu_modes();
     initialize_per_cpu_state();
     setup_memory_layout(boot_info);
+    #[cfg(feature = "hw-framebuffer")]
+    framebuffer_console::init_from_boot_info(boot_info);
     configure_interrupts();
 }
 
