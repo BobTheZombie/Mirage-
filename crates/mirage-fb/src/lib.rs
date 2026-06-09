@@ -1,10 +1,13 @@
 #![no_std]
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "hw-framebuffer"), forbid(unsafe_code))]
+#![cfg_attr(feature = "hw-framebuffer", deny(unsafe_op_in_unsafe_fn))]
 
 extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(feature = "hw-framebuffer")]
+use core::ptr::{self, NonNull};
 
 /// Pixel layouts supported by the Mirage framebuffer abstraction.
 ///
@@ -217,6 +220,7 @@ pub enum FramebufferError {
     SizeOverflow,
     BufferTooSmall,
     OutOfBounds,
+    NullAddress,
 }
 
 /// Linear framebuffer backed by mock memory for tests and display-service demos.
@@ -580,6 +584,148 @@ impl<'map> FramebufferMapping<'map> {
         pixels: &[(u8, u8, u8)],
     ) -> Result<(), FramebufferError> {
         self.writer().blit(x, y, width, height, pixels)
+    }
+}
+
+#[cfg(feature = "hw-framebuffer")]
+#[derive(Debug)]
+pub struct HardwareFramebufferMapping {
+    base: NonNull<u8>,
+    info: FramebufferInfo,
+}
+
+#[cfg(feature = "hw-framebuffer")]
+impl HardwareFramebufferMapping {
+    /// Creates a framebuffer mapping from a Limine-provided virtual framebuffer address.
+    ///
+    /// This constructor only accepts validated 32-bits-per-pixel modes. Other encoders
+    /// are intentionally rejected until Mirage adds explicit hardware framebuffer
+    /// support for them.
+    ///
+    /// # Safety
+    ///
+    /// `address` must be a non-null, writable virtual address mapped for at least
+    /// `mode.framebuffer_len()` bytes for the entire lifetime of the returned mapping.
+    /// The caller must ensure no other code concurrently mutates the same framebuffer
+    /// memory in a way that violates Rust's aliasing rules or the active display
+    /// service's ownership model.
+    pub unsafe fn from_limine_address(
+        address: u64,
+        mode: FramebufferMode,
+    ) -> Result<Self, FramebufferError> {
+        if mode.bits_per_pixel() != 32 {
+            return Err(FramebufferError::InvalidBitsPerPixel);
+        }
+
+        let byte_len = mode.framebuffer_len()?;
+        let address = usize::try_from(address).map_err(|_| FramebufferError::SizeOverflow)?;
+        let base = NonNull::new(ptr::with_exposed_provenance_mut(address))
+            .ok_or(FramebufferError::NullAddress)?;
+        let info = FramebufferInfo::new(mode, byte_len)?;
+
+        Ok(Self { base, info })
+    }
+
+    pub const fn base_address(&self) -> NonNull<u8> {
+        self.base
+    }
+
+    pub const fn info(&self) -> FramebufferInfo {
+        self.info
+    }
+
+    pub const fn mode(&self) -> FramebufferMode {
+        self.info.mode()
+    }
+
+    pub fn clear(&mut self, color: (u8, u8, u8)) {
+        for y in 0..self.mode().height() {
+            for x in 0..self.mode().width() {
+                if let Ok(offset) = self.mode().pixel_offset(x, y) {
+                    self.write_pixel_at_offset(offset, color);
+                }
+            }
+        }
+    }
+
+    pub fn put_pixel(
+        &mut self,
+        x: usize,
+        y: usize,
+        color: (u8, u8, u8),
+    ) -> Result<(), FramebufferError> {
+        let offset = self.mode().pixel_offset(x, y)?;
+        self.write_pixel_at_offset(offset, color);
+        Ok(())
+    }
+
+    pub fn draw_rectangle(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: (u8, u8, u8),
+    ) -> Result<(), FramebufferError> {
+        validate_rect(self.mode(), x, y, width, height)?;
+        let end_x = x + width;
+        let end_y = y + height;
+        for row in y..end_y {
+            for column in x..end_x {
+                let offset = self.mode().pixel_offset(column, row)?;
+                self.write_pixel_at_offset(offset, color);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn blit(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        pixels: &[(u8, u8, u8)],
+    ) -> Result<(), FramebufferError> {
+        validate_rect(self.mode(), x, y, width, height)?;
+        let required_pixels = width
+            .checked_mul(height)
+            .ok_or(FramebufferError::SizeOverflow)?;
+        if pixels.len() < required_pixels {
+            return Err(FramebufferError::BufferTooSmall);
+        }
+
+        for row in 0..height {
+            for column in 0..width {
+                let offset = self.mode().pixel_offset(x + column, y + row)?;
+                let color = pixels[row * width + column];
+                self.write_pixel_at_offset(offset, color);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_pixel_at_offset(&mut self, offset: usize, color: (u8, u8, u8)) {
+        let bytes = encode_hardware_pixel(self.mode().pixel_format(), color);
+        for (index, byte) in bytes.iter().enumerate() {
+            // SAFETY: Construction validated that `base` references at least
+            // `info.byte_len()` writable bytes, and all callers derive `offset` from
+            // pitch-aware, bounds-checked framebuffer coordinates in a 32 bpp mode.
+            unsafe {
+                ptr::write_volatile(self.base.as_ptr().add(offset + index), *byte);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "hw-framebuffer")]
+fn encode_hardware_pixel(pixel_format: PixelFormat, color: (u8, u8, u8)) -> [u8; 4] {
+    let (red, green, blue) = color;
+    match pixel_format {
+        PixelFormat::Rgb => [red, green, blue, 0],
+        PixelFormat::Bgr => [blue, green, red, 0],
+        PixelFormat::Xrgb => [0, red, green, blue],
+        PixelFormat::Masks(masks) => encode_masked_pixel(masks, red, green, blue).to_le_bytes(),
     }
 }
 
@@ -1011,6 +1157,44 @@ mod tests {
             mapping.blit(0, 0, 2, 1, &pixels[..1]),
             Err(FramebufferError::BufferTooSmall)
         );
+    }
+
+    #[cfg(feature = "hw-framebuffer")]
+    #[test]
+    fn hardware_mapping_rejects_null_and_non_32_bpp_modes() {
+        let mode_32 = FramebufferMode::new(1, 1, 4, 32, PixelFormat::Rgb).unwrap();
+        let mode_24 = FramebufferMode::new(1, 1, 3, 24, PixelFormat::Rgb).unwrap();
+
+        assert_eq!(
+            unsafe { HardwareFramebufferMapping::from_limine_address(0, mode_32) }.unwrap_err(),
+            FramebufferError::NullAddress
+        );
+        assert_eq!(
+            unsafe { HardwareFramebufferMapping::from_limine_address(0x1000, mode_24) }
+                .unwrap_err(),
+            FramebufferError::InvalidBitsPerPixel
+        );
+    }
+
+    #[cfg(feature = "hw-framebuffer")]
+    #[test]
+    fn hardware_mapping_uses_volatile_32_bpp_pitch_aware_writes() {
+        let mode = FramebufferMode::new(2, 2, 12, 32, PixelFormat::Bgr).unwrap();
+        let mut memory = vec![0xaau8; mode.framebuffer_len().unwrap()];
+        let address = memory.as_mut_ptr().expose_provenance() as u64;
+        let mut mapping =
+            unsafe { HardwareFramebufferMapping::from_limine_address(address, mode) }.unwrap();
+
+        assert_eq!(mapping.info().byte_len(), 24);
+        assert_eq!(mapping.put_pixel(1, 1, (0x11, 0x22, 0x33)), Ok(()));
+        assert_eq!(
+            mapping.put_pixel(2, 0, (1, 2, 3)),
+            Err(FramebufferError::OutOfBounds)
+        );
+        drop(mapping);
+
+        assert_eq!(&memory[16..20], &[0x33, 0x22, 0x11, 0x00]);
+        assert_eq!(&memory[8..12], &[0xaa, 0xaa, 0xaa, 0xaa]);
     }
 
     #[cfg(feature = "hw-framebuffer")]
