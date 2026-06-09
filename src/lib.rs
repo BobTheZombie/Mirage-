@@ -38,18 +38,19 @@ pub mod stdlib;
 pub mod subkernel;
 pub mod supervisor;
 
-/// Print formatted text to the early COM1 serial console.
+/// Print formatted text to the x86_64 early console.
 ///
-/// The early console is a mechanism-only diagnostic path for boot milestones;
-/// higher-level logging policy belongs above the kernel.
+/// Serial remains the primary mechanism-only diagnostic path for boot milestones;
+/// when initialized, the framebuffer console receives a best-effort mirror.
+/// Higher-level logging policy belongs above the kernel.
 #[macro_export]
 macro_rules! kprint {
     ($($arg:tt)*) => {
-        $crate::arch::x86_64::uart16550::early_print(::core::format_args!($($arg)*));
+        $crate::arch::x86_64::early_console::write_fmt(::core::format_args!($($arg)*));
     };
 }
 
-/// Print a line to the early COM1 serial console.
+/// Print a line to the x86_64 early console.
 #[macro_export]
 macro_rules! kprintln {
     () => {
@@ -69,23 +70,23 @@ use core::panic::PanicInfo;
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    crate::arch::x86_64::uart16550::early_print(::core::format_args!(
+    crate::arch::x86_64::early_console::panic_write_fmt(::core::format_args!(
         "\nPANIC\n=== Mirage kernel panic ===\n"
     ));
 
     if let Some(location) = info.location() {
-        crate::arch::x86_64::uart16550::early_print(::core::format_args!(
+        crate::arch::x86_64::early_console::panic_write_fmt(::core::format_args!(
             "file: {}\nline: {}\n",
             location.file(),
             location.line()
         ));
     } else {
-        crate::arch::x86_64::uart16550::early_print(::core::format_args!(
+        crate::arch::x86_64::early_console::panic_write_fmt(::core::format_args!(
             "file: <unknown>\nline: <unknown>\n"
         ));
     }
 
-    crate::arch::x86_64::uart16550::early_print(::core::format_args!(
+    crate::arch::x86_64::early_console::panic_write_fmt(::core::format_args!(
         "message: {}\n",
         info.message()
     ));
