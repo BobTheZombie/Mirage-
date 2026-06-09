@@ -16,6 +16,7 @@ use crate::kernel::thread::{
 pub mod boot;
 pub mod clock;
 pub mod device;
+pub mod early_console;
 #[cfg(feature = "hw-framebuffer")]
 pub mod framebuffer_console;
 pub mod gdt;

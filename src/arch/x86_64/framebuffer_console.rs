@@ -72,6 +72,19 @@ pub fn write_str(text: &str) {
     }
 }
 
+/// Try to write UTF-8 text bytes to the framebuffer console without blocking.
+///
+/// Panic diagnostics use this helper after serial output so a panic that occurs
+/// while the framebuffer console lock is already held cannot deadlock or recurse
+/// through the formatted kernel logging macros.
+pub fn try_write_str(text: &str) {
+    if let Some(mut guard) = CONSOLE.try_lock() {
+        if let Some(console) = guard.as_mut() {
+            let _ = console.write_str(text);
+        }
+    }
+}
+
 /// Write one byte to the framebuffer console if it is available.
 pub fn write_byte(byte: u8) {
     if let Some(console) = CONSOLE.lock().as_mut() {

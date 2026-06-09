@@ -53,6 +53,22 @@ pub fn early_print(args: fmt::Arguments<'_>) {
     let _ = EarlyCom1.write_fmt(args);
 }
 
+/// Write panic diagnostics to COM1 without risking a spin-lock deadlock.
+///
+/// The panic path remains serial-first.  If the normal serial lock is already
+/// held by interrupted logging code, COM1 is written directly rather than
+/// spinning forever.  The UART writer is stateless, so this preserves best-effort
+/// panic output without allocating or invoking higher-level logging.
+pub fn panic_print(args: fmt::Arguments<'_>) {
+    if let Some(_guard) = EARLY_COM1_LOCK.try_lock() {
+        init_early_serial();
+        let _ = EarlyCom1.write_fmt(args);
+    } else {
+        init_early_serial();
+        let _ = EarlyCom1.write_fmt(args);
+    }
+}
+
 impl EarlyCom1 {
     fn write_byte(&mut self, byte: u8) {
         #[cfg(any(test, feature = "qfs-std"))]
