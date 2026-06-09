@@ -59,7 +59,7 @@ hw-amd-telemetry = ["hw-ryzen"]
 hw-nvme = ["hw-pci"]
 hw-ahci = ["hw-pci"]
 hw-xhci = ["hw-pci"]
-hw-framebuffer = []
+hw-framebuffer = ["dep:mirage-fb"]
 full-boot = []
 hw-amdgpu = ["hw-pci", "hw-framebuffer"]
 # Enables host/testing QFS adapters backed by the Rust standard library.
@@ -71,6 +71,7 @@ qfs-std = ["dep:mirage-block", "dep:mirage-storage"]
 # skeleton heap allocator instead of implying a production memory subsystem.
 mirage-block = { path = "crates/mirage-block", optional = true }
 mirage-storage = { path = "crates/mirage-storage", optional = true }
+mirage-fb = { path = "crates/mirage-fb", optional = true }
 mirage-platform = { path = "crates/mirage-platform" }
 mirage-mtss = { path = "crates/mirage-mtss", default-features = false }
 
