@@ -5,7 +5,7 @@
 
 use core::fmt::{self, Write};
 
-use mirage_fb::{FramebufferMode, PixelFormat, PixelMasks};
+use mirage_fb::{BootFramebuffer, FramebufferMode, PixelFormat, PixelMasks};
 
 use crate::arch::x86_64::boot::{BootInfo, FramebufferInfo};
 use crate::kernel::sync::SpinLock;
@@ -65,6 +65,7 @@ pub fn early_print(args: fmt::Arguments<'_>) {
 pub enum FramebufferConsoleError {
     AddressUnavailable,
     DimensionOverflow,
+    InvalidMask,
     InvalidMode(mirage_fb::FramebufferError),
 }
 
@@ -84,19 +85,15 @@ unsafe impl Send for FramebufferConsole {}
 
 impl FramebufferConsole {
     fn new(info: FramebufferInfo) -> Result<Self, FramebufferConsoleError> {
-        let base = info.address.0 as *mut u8;
+        let boot_framebuffer = boot_framebuffer_from_info(info)?;
+        let base = boot_framebuffer.physical_address as *mut u8;
         if base.is_null() {
             return Err(FramebufferConsoleError::AddressUnavailable);
         }
 
-        let mode = FramebufferMode::new(
-            usize::try_from(info.width).map_err(|_| FramebufferConsoleError::DimensionOverflow)?,
-            usize::try_from(info.height).map_err(|_| FramebufferConsoleError::DimensionOverflow)?,
-            usize::try_from(info.pitch).map_err(|_| FramebufferConsoleError::DimensionOverflow)?,
-            usize::from(info.bits_per_pixel),
-            pixel_format(info),
-        )
-        .map_err(FramebufferConsoleError::InvalidMode)?;
+        let mode = boot_framebuffer
+            .mode()
+            .map_err(FramebufferConsoleError::InvalidMode)?;
 
         Ok(Self {
             base,
@@ -206,38 +203,80 @@ impl Write for FramebufferConsole {
     }
 }
 
-fn pixel_format(info: FramebufferInfo) -> PixelFormat {
-    PixelFormat::Masks(PixelMasks::new(
-        mask(info.red_mask_size, info.red_mask_shift),
-        mask(info.green_mask_size, info.green_mask_shift),
-        mask(info.blue_mask_size, info.blue_mask_shift),
-        reserved_mask(info),
-    ))
-}
-
-fn mask(size: u8, shift: u8) -> u32 {
-    if size == 0 || shift >= u32::BITS as u8 {
-        return 0;
+/// Convert typed x86_64 boot framebuffer metadata into the shared Mirage
+/// framebuffer descriptor used by the first hardware framebuffer writer.
+pub fn boot_framebuffer_from_info(
+    info: FramebufferInfo,
+) -> Result<BootFramebuffer, FramebufferConsoleError> {
+    if info.bits_per_pixel != 32 {
+        return Err(FramebufferConsoleError::InvalidMode(
+            mirage_fb::FramebufferError::InvalidBitsPerPixel,
+        ));
     }
 
-    let width_mask = if size >= u32::BITS as u8 {
-        u32::MAX
-    } else {
-        (1u32 << size) - 1
-    };
-    width_mask.checked_shl(u32::from(shift)).unwrap_or(0)
+    let width =
+        usize::try_from(info.width).map_err(|_| FramebufferConsoleError::DimensionOverflow)?;
+    let height =
+        usize::try_from(info.height).map_err(|_| FramebufferConsoleError::DimensionOverflow)?;
+    let pitch =
+        usize::try_from(info.pitch).map_err(|_| FramebufferConsoleError::DimensionOverflow)?;
+    let red_mask = checked_mask(info.red_mask_size, info.red_mask_shift)?;
+    let green_mask = checked_mask(info.green_mask_size, info.green_mask_shift)?;
+    let blue_mask = checked_mask(info.blue_mask_size, info.blue_mask_shift)?;
+    let reserved_mask = reserved_mask(red_mask, green_mask, blue_mask, info.bits_per_pixel)?;
+    let pixel_format = PixelFormat::Masks(PixelMasks::new(
+        red_mask,
+        green_mask,
+        blue_mask,
+        reserved_mask,
+    ));
+
+    Ok(BootFramebuffer {
+        physical_address: info.address.0,
+        width,
+        height,
+        pitch,
+        bits_per_pixel: usize::from(info.bits_per_pixel),
+        pixel_format,
+        red_mask,
+        green_mask,
+        blue_mask,
+        reserved_mask,
+    })
 }
 
-fn reserved_mask(info: FramebufferInfo) -> u32 {
-    let used = mask(info.red_mask_size, info.red_mask_shift)
-        | mask(info.green_mask_size, info.green_mask_shift)
-        | mask(info.blue_mask_size, info.blue_mask_shift);
-    let active_bits = if info.bits_per_pixel >= u32::BITS as u16 {
+fn checked_mask(size: u8, shift: u8) -> Result<u32, FramebufferConsoleError> {
+    if size == 0 {
+        return Ok(0);
+    }
+
+    if u16::from(size) + u16::from(shift) > u32::BITS as u16 {
+        return Err(FramebufferConsoleError::InvalidMask);
+    }
+
+    let width_mask = 1u32
+        .checked_shl(u32::from(size))
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(FramebufferConsoleError::InvalidMask)?;
+    width_mask
+        .checked_shl(u32::from(shift))
+        .ok_or(FramebufferConsoleError::InvalidMask)
+}
+
+fn reserved_mask(
+    red_mask: u32,
+    green_mask: u32,
+    blue_mask: u32,
+    bits_per_pixel: u16,
+) -> Result<u32, FramebufferConsoleError> {
+    let active_bits = if bits_per_pixel == u32::BITS as u16 {
         u32::MAX
     } else {
-        (1u32 << info.bits_per_pixel) - 1
+        1u32.checked_shl(u32::from(bits_per_pixel))
+            .and_then(|value| value.checked_sub(1))
+            .ok_or(FramebufferConsoleError::InvalidMask)?
     };
-    active_bits & !used
+    Ok(active_bits & !(red_mask | green_mask | blue_mask))
 }
 
 fn encode_rgb(bytes_per_pixel: usize, red: u8, green: u8, blue: u8) -> [u8; 4] {
@@ -276,4 +315,93 @@ fn encode_channel(mask: u32, value: u8) -> u32 {
     };
     let scaled = (u32::from(value) * max + 127) / 255;
     (scaled << shift) & mask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::x86_64::boot::VirtualAddress;
+
+    fn framebuffer_info() -> FramebufferInfo {
+        FramebufferInfo {
+            address: VirtualAddress(0x1_0000_0000),
+            width: 1024,
+            height: 768,
+            pitch: 4096,
+            bits_per_pixel: 32,
+            red_mask_size: 8,
+            red_mask_shift: 16,
+            green_mask_size: 8,
+            green_mask_shift: 8,
+            blue_mask_size: 8,
+            blue_mask_shift: 0,
+        }
+    }
+
+    #[test]
+    fn conversion_preserves_64_bit_address_and_masks() {
+        let framebuffer = boot_framebuffer_from_info(framebuffer_info()).unwrap();
+
+        assert_eq!(framebuffer.physical_address, 0x1_0000_0000);
+        assert_eq!(framebuffer.red_mask, 0x00ff_0000);
+        assert_eq!(framebuffer.green_mask, 0x0000_ff00);
+        assert_eq!(framebuffer.blue_mask, 0x0000_00ff);
+        assert_eq!(framebuffer.reserved_mask, 0xff00_0000);
+        assert_eq!(
+            framebuffer.pixel_format,
+            PixelFormat::Masks(PixelMasks::new(
+                0x00ff_0000,
+                0x0000_ff00,
+                0x0000_00ff,
+                0xff00_0000,
+            ))
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_non_32_bpp_modes() {
+        let mut info = framebuffer_info();
+        info.bits_per_pixel = 24;
+
+        assert!(matches!(
+            boot_framebuffer_from_info(info),
+            Err(FramebufferConsoleError::InvalidMode(
+                mirage_fb::FramebufferError::InvalidBitsPerPixel
+            ))
+        ));
+    }
+
+    #[test]
+    fn conversion_rejects_overflowing_masks() {
+        let mut info = framebuffer_info();
+        info.red_mask_size = 32;
+
+        assert!(matches!(
+            boot_framebuffer_from_info(info),
+            Err(FramebufferConsoleError::InvalidMask)
+        ));
+
+        info.red_mask_size = 31;
+        info.red_mask_shift = 2;
+
+        assert!(matches!(
+            boot_framebuffer_from_info(info),
+            Err(FramebufferConsoleError::InvalidMask)
+        ));
+    }
+
+    #[test]
+    fn zero_sized_masks_are_empty() {
+        let mut info = framebuffer_info();
+        info.red_mask_size = 0;
+        info.green_mask_size = 0;
+        info.blue_mask_size = 0;
+
+        let framebuffer = boot_framebuffer_from_info(info).unwrap();
+
+        assert_eq!(framebuffer.red_mask, 0);
+        assert_eq!(framebuffer.green_mask, 0);
+        assert_eq!(framebuffer.blue_mask, 0);
+        assert_eq!(framebuffer.reserved_mask, u32::MAX);
+    }
 }
