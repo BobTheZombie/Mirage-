@@ -24,32 +24,18 @@ static CONSOLE: SpinLock<Option<FramebufferConsole>> = SpinLock::new(None);
 /// [`BootInfo`] is mapped in the active page tables. On Mirage's x86_64 path,
 /// `init_architecture` calls this after `setup_memory_layout` installs the early
 /// framebuffer mapping.
-pub fn init_from_boot_info(boot_info: &BootInfo) {
+pub fn init_from_boot_info(
+    boot_info: &BootInfo,
+) -> Result<Option<FramebufferInfo>, FramebufferConsoleError> {
     let Some(framebuffer) = boot_info.framebuffer else {
-        crate::kprintln!("framebuffer unavailable; serial console only");
-        return;
+        return Ok(None);
     };
 
-    match FramebufferConsole::new(framebuffer) {
-        Ok(mut console) => {
-            console.clear(DEFAULT_BACKGROUND);
-            let _ = console.write_str("GNU/Mirage framebuffer console ready\n");
-            *CONSOLE.lock() = Some(console);
-            crate::kprintln!(
-                "framebuffer console initialized: {}x{}x{} pitch={}",
-                framebuffer.width,
-                framebuffer.height,
-                framebuffer.bits_per_pixel,
-                framebuffer.pitch
-            );
-        }
-        Err(error) => {
-            crate::kprintln!(
-                "framebuffer console unavailable: {:?}; serial console only",
-                error
-            );
-        }
-    }
+    let mut console = FramebufferConsole::new(framebuffer)?;
+    console.clear(DEFAULT_BACKGROUND);
+    let _ = console.write_str("GNU/Mirage framebuffer console ready\n");
+    *CONSOLE.lock() = Some(console);
+    Ok(Some(framebuffer))
 }
 
 /// Write formatted text to the framebuffer console if it has been initialized.
