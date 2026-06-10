@@ -11,13 +11,15 @@ CARGO_JSON_TARGET_SPEC_FLAG := $(shell RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARG
 UNSTABLE_OPTIONS_FLAG := -Z unstable-options
 KERNEL_ELF := target/x86_64-mirage/release/mirage-kernel
 KERNEL_FEATURES ?= hw-framebuffer full-boot
+QEMU_FEATURES ?= hw-framebuffer full-boot
+QEMU_MINIMAL_FEATURES ?= hw-framebuffer
 BUILD_DIR := build
 ISO_ROOT := $(BUILD_DIR)/iso_root
 ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all kernel iso run-qemu smoke-x86_64-boot clean limine rust-src check-rust-src target-json FORCE
+.PHONY: all kernel qemu-kernel image iso run-qemu smoke-x86_64-boot clean limine rust-src check-rust-src target-json FORCE
 
 all: iso
 
@@ -70,6 +72,16 @@ kernel: rust-src check-rust-src $(TARGET_JSON)
 		-Z build-std=core,alloc,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
 
+# QEMU image builds use the fuller boot feature set by default. For a minimal
+# framebuffer-only image, run: QEMU_FEATURES=hw-framebuffer make image
+qemu-kernel: rust-src check-rust-src $(TARGET_JSON)
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --no-default-features --features "$(QEMU_FEATURES)" --bin mirage-kernel \
+		--target $(TARGET_JSON) \
+		$(CARGO_JSON_TARGET_SPEC_FLAG) \
+		$(UNSTABLE_OPTIONS_FLAG) \
+		-Z build-std=core,alloc,compiler_builtins \
+		-Z build-std-features=compiler-builtins-mem
+
 limine: $(LIMINE_BIN)
 
 $(LIMINE_BIN):
@@ -79,7 +91,9 @@ $(LIMINE_BIN):
 	tar -xf $(BUILD_DIR)/limine-binary.tar.xz -C $(LIMINE_DIR) --strip-components=1
 	$(MAKE) -C $(LIMINE_DIR)
 
-iso: kernel limine
+image: iso
+
+iso: qemu-kernel limine
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/limine $(ISO_ROOT)/EFI/BOOT
 	cp $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
