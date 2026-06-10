@@ -6,7 +6,9 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
+use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
 use crate::kernel::cpu::MAX_CORES;
+use crate::kernel::device::{DeviceDriver, MirageInputEvent};
 use crate::kernel::memory;
 use crate::kernel::syscall::{SyscallFrame, SYSCALL_MAX_ARGS};
 use crate::kernel::thread::{
@@ -266,6 +268,49 @@ pub fn timer_tick_pending(last_observed_tick: &mut u64) -> bool {
     } else {
         false
     }
+}
+
+/// Poll the early PS/2 keyboard path for the ESC debug-shell hotkey.
+pub fn poll_debug_shell_hotkey() -> bool {
+    const EVENT_CAPACITY: usize = 4;
+    let event_size = core::mem::size_of::<MirageInputEvent>();
+    let mut buffer = [0u8; core::mem::size_of::<MirageInputEvent>() * EVENT_CAPACITY];
+
+    let Ok(byte_count) = PS2_KEYBOARD_DRIVER.read(&mut buffer) else {
+        return false;
+    };
+    if byte_count == 0 || byte_count % event_size != 0 {
+        return false;
+    }
+
+    let mut offset = 0usize;
+    while offset < byte_count {
+        if let Some(event) = decode_input_event(&buffer[offset..offset + event_size]) {
+            if event.event_type == 1 && event.code == 0x01 && event.value == 1 {
+                return true;
+            }
+        } else {
+            return false;
+        }
+        offset += event_size;
+    }
+
+    false
+}
+
+fn decode_input_event(bytes: &[u8]) -> Option<MirageInputEvent> {
+    if bytes.len() != core::mem::size_of::<MirageInputEvent>() {
+        return None;
+    }
+
+    Some(MirageInputEvent {
+        event_type: u16::from_ne_bytes([bytes[0], bytes[1]]),
+        code: u16::from_ne_bytes([bytes[2], bytes[3]]),
+        value: i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        timestamp_ns: u64::from_ne_bytes([
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]),
+    })
 }
 
 /// Halt the CPU while the boot core is idle until the next interrupt arrives.
