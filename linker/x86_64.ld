@@ -22,6 +22,7 @@ SECTIONS
     .text : AT(ADDR(.text) - KERNEL_VIRT_BASE)
     {
         __text_start = .;
+        KEEP(*(.text._start))
         *(.text .text.*)
         __text_end = .;
     } :text
