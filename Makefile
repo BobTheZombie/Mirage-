@@ -19,7 +19,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all kernel qemu-kernel image iso run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean limine rust-src check-rust-src target-json FORCE
+.PHONY: all kernel qemu-kernel image iso qemu qemu-headless qemu-debug qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean limine rust-src check-rust-src target-json FORCE
 
 all: iso
 
@@ -110,14 +110,23 @@ iso: qemu-kernel limine
 		-o $(ISO_IMAGE) $(ISO_ROOT)
 	$(LIMINE_BIN) bios-install $(ISO_IMAGE)
 
-run-qemu: iso
+qemu: image
 	MIRAGE_SKIP_BUILD=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
-run-qemu-headless: iso
+qemu-headless: image
 	MIRAGE_SKIP_BUILD=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu-headless.sh
 
-run-qemu-debug: iso
+qemu-debug: image
 	MIRAGE_SKIP_BUILD=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu-debug.sh
+
+qemu-check: scripts/qemu-smoke.sh
+	./scripts/qemu-smoke.sh
+
+run-qemu: qemu
+
+run-qemu-headless: qemu-headless
+
+run-qemu-debug: qemu-debug
 
 smoke-x86_64-boot: scripts/x86_64-boot-smoke.sh
 	BUILD_KERNEL=1 KERNEL_ELF=$(KERNEL_ELF) ./scripts/x86_64-boot-smoke.sh
