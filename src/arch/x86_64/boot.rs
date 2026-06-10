@@ -22,64 +22,22 @@ global_asm!(
     .global _start
     .type _start,@function
 _start:
-    mov dx, 0x3f9
-    xor al, al
-    out dx, al
-    mov dx, 0x3fb
-    mov al, 0x80
-    out dx, al
-    mov dx, 0x3f8
-    mov al, 0x03
-    out dx, al
-    mov dx, 0x3f9
-    xor al, al
-    out dx, al
-    mov dx, 0x3fb
-    mov al, 0x03
-    out dx, al
-    mov dx, 0x3fa
-    mov al, 0xc7
-    out dx, al
-    mov dx, 0x3fc
-    mov al, 0x0b
-    out dx, al
-    lea rsi, [rip + .Lmirage_start_msg]
-.Lmirage_start_write:
-    lodsb
-    test al, al
-    jz .Lmirage_start_done
-    mov bl, al
-    mov ecx, 100000
-.Lmirage_start_wait:
-    mov dx, 0x3fd
-    in al, dx
-    test al, 0x20
-    jnz .Lmirage_start_ready
-    loop .Lmirage_start_wait
-.Lmirage_start_ready:
-    mov dx, 0x3f8
-    mov al, bl
-    out dx, al
-    jmp .Lmirage_start_write
-.Lmirage_start_done:
-    mov ecx, 100000
-.Lmirage_start_drain:
-    mov dx, 0x3fd
-    in al, dx
-    test al, 0x40
-    jnz .Lmirage_stack_ready
-    loop .Lmirage_start_drain
-.Lmirage_stack_ready:
     lea rsp, [rip + __stack_top]
     and rsp, -16
     xor rbp, rbp
+
+    lea rdi, [rip + .Lmirage_start_msg]
+    mov esi, .Lmirage_start_msg_len
+    call __mirage_early_com1_write_line_raw
+
     call __mirage_x86_64_bootstrap
 .Lmirage_boot_hang:
     hlt
     jmp .Lmirage_boot_hang
     .size _start, . - _start
 .Lmirage_start_msg:
-    .asciz "MIRAGE: entered _start\r\n"
+    .ascii "MIRAGE: entered _start"
+.set .Lmirage_start_msg_len, . - .Lmirage_start_msg
 "#
 );
 
@@ -106,30 +64,47 @@ extern "Rust" {
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 #[no_mangle]
 pub unsafe extern "C" fn __mirage_x86_64_bootstrap() -> ! {
+    __mirage_early_com1_write_line_raw(
+        b"MIRAGE: entered bootstrap before .bss clear".as_ptr(),
+        b"MIRAGE: entered bootstrap before .bss clear".len(),
+    );
+
     clear_bss();
-    early_com1_write_line_raw(b"MIRAGE: entered bootstrap");
+    crate::arch::x86_64::early_console::write_fmt(format_args!(
+        "MIRAGE: .bss cleared; normal early console online\n"
+    ));
 
     let sections = KernelSections::from_linker();
     let raw_boot = limine::snapshot();
     let boot_info = BootInfo::from_limine(raw_boot, sections);
 
-    early_com1_write_line_raw(b"MIRAGE: calling kernel_main");
+    crate::arch::x86_64::early_console::write_fmt(format_args!("MIRAGE: calling kernel_main\n"));
     kernel_main(boot_info)
 }
 
+/// Raw COM1 line writer for the assembly/Rust bootstrap boundary.
+///
+/// This is safe to call before `.bss` has been cleared: it uses only stack
+/// locals and port I/O, avoids formatting, locks, atomics, and Rust statics,
+/// and always programs COM1 before writing the first byte.
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-unsafe fn early_com1_write_line_raw(message: &[u8]) {
+#[no_mangle]
+pub unsafe extern "C" fn __mirage_early_com1_write_line_raw(message: *const u8, len: usize) {
     early_com1_init_raw();
-    for &byte in message {
-        early_com1_write_byte_raw(byte);
+
+    let mut offset = 0usize;
+    while offset < len {
+        early_com1_write_byte_raw(*message.add(offset));
+        offset += 1;
     }
+
     early_com1_write_byte_raw(b'\r');
     early_com1_write_byte_raw(b'\n');
 }
 
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 unsafe fn early_com1_init_raw() {
-    early_com1_wait_for_raw(0x40);
+    early_com1_cli_raw();
     early_com1_outb_raw(0x3f9, 0x00);
     early_com1_outb_raw(0x3fb, 0x80);
     early_com1_outb_raw(0x3f8, 0x03);
@@ -152,6 +127,12 @@ unsafe fn early_com1_wait_for_raw(mask: u8) {
         core::hint::spin_loop();
         spins += 1;
     }
+}
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+#[inline(always)]
+unsafe fn early_com1_cli_raw() {
+    asm!("cli", options(nomem, nostack));
 }
 
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
