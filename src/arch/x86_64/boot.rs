@@ -5,7 +5,7 @@
 //! kernel `.bss`, snapshots boot-protocol state, and only then calls the Rust kernel entry point.
 
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-use core::arch::global_asm;
+use core::arch::{asm, global_asm};
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 use core::ptr::addr_of;
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
@@ -22,6 +22,54 @@ global_asm!(
     .global _start
     .type _start,@function
 _start:
+    mov dx, 0x3f9
+    xor al, al
+    out dx, al
+    mov dx, 0x3fb
+    mov al, 0x80
+    out dx, al
+    mov dx, 0x3f8
+    mov al, 0x03
+    out dx, al
+    mov dx, 0x3f9
+    xor al, al
+    out dx, al
+    mov dx, 0x3fb
+    mov al, 0x03
+    out dx, al
+    mov dx, 0x3fa
+    mov al, 0xc7
+    out dx, al
+    mov dx, 0x3fc
+    mov al, 0x0b
+    out dx, al
+    lea rsi, [rip + .Lmirage_start_msg]
+.Lmirage_start_write:
+    lodsb
+    test al, al
+    jz .Lmirage_start_done
+    mov bl, al
+    mov ecx, 100000
+.Lmirage_start_wait:
+    mov dx, 0x3fd
+    in al, dx
+    test al, 0x20
+    jnz .Lmirage_start_ready
+    loop .Lmirage_start_wait
+.Lmirage_start_ready:
+    mov dx, 0x3f8
+    mov al, bl
+    out dx, al
+    jmp .Lmirage_start_write
+.Lmirage_start_done:
+    mov ecx, 100000
+.Lmirage_start_drain:
+    mov dx, 0x3fd
+    in al, dx
+    test al, 0x40
+    jnz .Lmirage_stack_ready
+    loop .Lmirage_start_drain
+.Lmirage_stack_ready:
     lea rsp, [rip + __stack_top]
     and rsp, -16
     xor rbp, rbp
@@ -30,6 +78,8 @@ _start:
     hlt
     jmp .Lmirage_boot_hang
     .size _start, . - _start
+.Lmirage_start_msg:
+    .asciz "MIRAGE: entered _start\r\n"
 "#
 );
 
@@ -57,12 +107,65 @@ extern "Rust" {
 #[no_mangle]
 pub unsafe extern "C" fn __mirage_x86_64_bootstrap() -> ! {
     clear_bss();
+    early_com1_write_line_raw(b"MIRAGE: entered bootstrap");
 
     let sections = KernelSections::from_linker();
     let raw_boot = limine::snapshot();
     let boot_info = BootInfo::from_limine(raw_boot, sections);
 
+    early_com1_write_line_raw(b"MIRAGE: calling kernel_main");
     kernel_main(boot_info)
+}
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+unsafe fn early_com1_write_line_raw(message: &[u8]) {
+    early_com1_init_raw();
+    for &byte in message {
+        early_com1_write_byte_raw(byte);
+    }
+    early_com1_write_byte_raw(b'\r');
+    early_com1_write_byte_raw(b'\n');
+}
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+unsafe fn early_com1_init_raw() {
+    early_com1_wait_for_raw(0x40);
+    early_com1_outb_raw(0x3f9, 0x00);
+    early_com1_outb_raw(0x3fb, 0x80);
+    early_com1_outb_raw(0x3f8, 0x03);
+    early_com1_outb_raw(0x3f9, 0x00);
+    early_com1_outb_raw(0x3fb, 0x03);
+    early_com1_outb_raw(0x3fa, 0xc7);
+    early_com1_outb_raw(0x3fc, 0x0b);
+}
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+unsafe fn early_com1_write_byte_raw(byte: u8) {
+    early_com1_wait_for_raw(0x20);
+    early_com1_outb_raw(0x3f8, byte);
+}
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+unsafe fn early_com1_wait_for_raw(mask: u8) {
+    let mut spins = 0usize;
+    while early_com1_inb_raw(0x3fd) & mask == 0 && spins < 100_000 {
+        core::hint::spin_loop();
+        spins += 1;
+    }
+}
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+#[inline(always)]
+unsafe fn early_com1_inb_raw(port: u16) -> u8 {
+    let value: u8;
+    asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    value
+}
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+#[inline(always)]
+unsafe fn early_com1_outb_raw(port: u16, value: u8) {
+    asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
 }
 
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
