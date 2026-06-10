@@ -13,12 +13,12 @@ set -eu
 
 MAKE=${MAKE:-make}
 DEFAULT_KERNEL_ELF=target/x86_64-mirage/release/mirage-kernel
-if [ "${KERNEL_ELF+x}" = x ]; then
+if [ -n "${KERNEL_ELF:-}" ]; then
     BUILD_KERNEL=${BUILD_KERNEL:-0}
 else
     BUILD_KERNEL=${BUILD_KERNEL:-1}
+    KERNEL_ELF=$DEFAULT_KERNEL_ELF
 fi
-KERNEL_ELF=${KERNEL_ELF:-$DEFAULT_KERNEL_ELF}
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
