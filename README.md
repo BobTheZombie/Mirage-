@@ -123,7 +123,8 @@ rustup component add rust-src
 | `make target-json` | Renders a compiler-compatible custom target spec into `build/targets/x86_64-mirage.json`. |
 | `make kernel` | Builds `target/x86_64-mirage/release/mirage-kernel` after checking for matching Rust sources. |
 | `make limine` | Downloads and builds the pinned Limine release into `build/limine`. |
-| `make iso` | Builds the kernel and packages `build/mirage.iso`. |
+| `make image` | Alias for the QEMU ISO image flow, using `QEMU_FEATURES` for the kernel build. |
+| `make iso` | Builds the QEMU kernel and packages `build/mirage.iso`. |
 | `make run-qemu` | Boots the ISO in QEMU. |
 | `make smoke-x86_64-boot` | Builds and validates the x86_64 kernel ELF boot artifact without launching an emulator. |
 | `make clean` | Removes Cargo and build artifacts. |
@@ -132,6 +133,10 @@ The Makefile exposes a few variables for local environments and reproducible bui
 
 * `LIMINE_VERSION=v12.3.2` selects the pinned Limine binary release used by `make limine` and
   `make iso`; override it on the command line to test a different Limine release.
+* `QEMU_FEATURES="hw-framebuffer full-boot"` selects the feature set used by the QEMU image
+  build path (`make image`/`make iso`). For a minimal framebuffer-only image, run
+  `QEMU_FEATURES=hw-framebuffer make image`; `QEMU_MINIMAL_FEATURES=hw-framebuffer` documents
+  that fallback feature set for scripts.
 * `RUSTC_BOOTSTRAP=1` enables the nightly-only Cargo `-Z build-std` flags used for the custom
   freestanding target; override it only if your toolchain setup provides another path for those
   flags.
@@ -191,11 +196,13 @@ RUSTC_BOOTSTRAP=1 CARGO="$(rustup which cargo)" RUSTC="$(rustup which rustc)" \
 
 ## Build a bootable ISO
 
-Build and package the kernel with Limine:
+Build and package the QEMU kernel with Limine:
 
 ```sh
-make iso
+make image
 ```
+
+`make iso` remains available for existing callers and uses the same QEMU image build path.
 
 This produces:
 
@@ -210,6 +217,13 @@ The ISO flow:
 3. Creates an ISO root containing `/boot/mirage-kernel.elf`, `/boot/limine/limine.conf`, BIOS
    Limine files, signed boot module metadata, and fallback UEFI bootloaders under `/EFI/BOOT`.
 4. Runs `xorriso` and `limine bios-install` to make `build/mirage.iso` BIOS/UEFI bootable.
+
+To use a minimal framebuffer-only QEMU build instead of the default `hw-framebuffer full-boot`
+feature set, override the QEMU feature variable:
+
+```sh
+QEMU_FEATURES=hw-framebuffer make image
+```
 
 To use a different Limine release, override the variable:
 
