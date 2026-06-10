@@ -82,7 +82,7 @@ $(LIMINE_BIN):
 iso: kernel limine
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/limine $(ISO_ROOT)/EFI/BOOT
-	cp $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel.elf
+	cp $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
 	cp boot/limine/limine.conf $(ISO_ROOT)/boot/limine/limine.conf
 	cp $(LIMINE_DIR)/limine-bios.sys $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/limine-bios-cd.bin $(ISO_ROOT)/boot/limine/
