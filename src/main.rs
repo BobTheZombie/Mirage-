@@ -19,8 +19,8 @@ use mirage::supervisor::Supervisor;
 
 #[no_mangle]
 pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
-    let mut boot_status = BootStatus::new();
     mirage::kprintln!("Mirage kernel booting...");
+    let mut boot_status = BootStatus::new();
     if !boot_info.limine_base_revision_supported() {
         mirage::kprintln!("unsupported Limine base revision");
         mirage::arch::x86_64::panic_halt();
