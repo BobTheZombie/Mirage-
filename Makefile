@@ -10,6 +10,7 @@ TARGET_JSON = $(BUILD_DIR)/targets/x86_64-mirage.json
 CARGO_JSON_TARGET_SPEC_FLAG := $(shell RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) -Z help 2>/dev/null | sed -n "s/.*-Z json-target-spec.*/-Z json-target-spec/p")
 UNSTABLE_OPTIONS_FLAG := -Z unstable-options
 KERNEL_ELF := target/x86_64-mirage/release/mirage-kernel
+KERNEL_FEATURES ?= hw-framebuffer full-boot
 BUILD_DIR := build
 ISO_ROOT := $(BUILD_DIR)/iso_root
 ISO_IMAGE := $(BUILD_DIR)/mirage.iso
@@ -62,7 +63,7 @@ $(TARGET_JSON): $(TARGET_JSON_SOURCE) FORCE
 	fi
 
 kernel: rust-src check-rust-src $(TARGET_JSON)
-	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --bin mirage-kernel \
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --no-default-features --features "$(KERNEL_FEATURES)" --bin mirage-kernel \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
 		$(UNSTABLE_OPTIONS_FLAG) \
@@ -96,7 +97,7 @@ iso: kernel limine
 	$(LIMINE_BIN) bios-install $(ISO_IMAGE)
 
 run-qemu: iso
-	qemu-system-x86_64 -M q35 -m 256M -cdrom $(ISO_IMAGE) -serial stdio -display none -no-reboot -no-shutdown
+	MIRAGE_SKIP_BUILD=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
 smoke-x86_64-boot: scripts/x86_64-boot-smoke.sh
 	BUILD_KERNEL=1 KERNEL_ELF=$(KERNEL_ELF) ./scripts/x86_64-boot-smoke.sh
