@@ -119,8 +119,8 @@ qemu-headless: image
 qemu-debug: image
 	MIRAGE_SKIP_BUILD=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu-debug.sh
 
-qemu-check: scripts/qemu-smoke.sh
-	./scripts/qemu-smoke.sh
+qemu-check: tools/check-qemu-image.sh
+	./tools/check-qemu-image.sh
 
 run-qemu: qemu
 
