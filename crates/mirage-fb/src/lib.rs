@@ -31,6 +31,62 @@ impl PixelMasks {
         }
     }
 
+    pub const fn from_size_shift(
+        red_size: usize,
+        red_shift: usize,
+        green_size: usize,
+        green_shift: usize,
+        blue_size: usize,
+        blue_shift: usize,
+        reserved_size: usize,
+        reserved_shift: usize,
+    ) -> Result<Self, FramebufferError> {
+        let red = match Self::channel_mask(red_size, red_shift) {
+            Ok(mask) => mask,
+            Err(error) => return Err(error),
+        };
+        let green = match Self::channel_mask(green_size, green_shift) {
+            Ok(mask) => mask,
+            Err(error) => return Err(error),
+        };
+        let blue = match Self::channel_mask(blue_size, blue_shift) {
+            Ok(mask) => mask,
+            Err(error) => return Err(error),
+        };
+        let reserved = match Self::channel_mask(reserved_size, reserved_shift) {
+            Ok(mask) => mask,
+            Err(error) => return Err(error),
+        };
+
+        Ok(Self::new(red, green, blue, reserved))
+    }
+
+    pub const fn channel_mask(size: usize, shift: usize) -> Result<u32, FramebufferError> {
+        if size == 0 {
+            return Ok(0);
+        }
+
+        if size > u32::BITS as usize || shift >= u32::BITS as usize {
+            return Err(FramebufferError::SizeOverflow);
+        }
+
+        let end = match shift.checked_add(size) {
+            Some(value) => value,
+            None => return Err(FramebufferError::SizeOverflow),
+        };
+        if end > u32::BITS as usize {
+            return Err(FramebufferError::SizeOverflow);
+        }
+
+        let unshifted = if size == u32::BITS as usize {
+            u32::MAX
+        } else {
+            (1u32 << size) - 1
+        };
+
+        Ok(unshifted << shift)
+    }
+
     pub const fn rgb888() -> Self {
         Self::new(0x00ff_0000, 0x0000_ff00, 0x0000_00ff, 0xff00_0000)
     }
@@ -982,6 +1038,38 @@ mod tests {
     }
 
     #[test]
+    fn channel_masks_are_generated_from_size_and_shift() {
+        assert_eq!(PixelMasks::channel_mask(8, 16), Ok(0x00ff_0000));
+        assert_eq!(PixelMasks::channel_mask(8, 8), Ok(0x0000_ff00));
+        assert_eq!(PixelMasks::channel_mask(8, 0), Ok(0x0000_00ff));
+        assert_eq!(PixelMasks::channel_mask(0, 31), Ok(0));
+    }
+
+    #[test]
+    fn channel_mask_generation_rejects_overflow_fields() {
+        assert_eq!(
+            PixelMasks::channel_mask(33, 0),
+            Err(FramebufferError::SizeOverflow)
+        );
+        assert_eq!(
+            PixelMasks::channel_mask(1, 32),
+            Err(FramebufferError::SizeOverflow)
+        );
+        assert_eq!(
+            PixelMasks::channel_mask(17, 16),
+            Err(FramebufferError::SizeOverflow)
+        );
+    }
+
+    #[test]
+    fn pixel_masks_convert_boot_style_channel_fields() {
+        assert_eq!(
+            PixelMasks::from_size_shift(8, 16, 8, 8, 8, 0, 8, 24),
+            Ok(PixelMasks::rgb888())
+        );
+    }
+
+    #[test]
     fn mode_validation_rejects_invalid_modes() {
         assert_eq!(
             FramebufferMode::new(0, 1, 3, 24, PixelFormat::Rgb),
@@ -1035,6 +1123,19 @@ mod tests {
         let mut framebuffer = Framebuffer::new(mode).unwrap();
         framebuffer.put_pixel(0, 0, (0x11, 0x22, 0x33)).unwrap();
         assert_eq!(framebuffer.memory(), &[0x00, 0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn masked_32_bpp_pixels_encode_with_pitch_padding() {
+        let mode =
+            FramebufferMode::new(2, 2, 12, 32, PixelFormat::Masks(PixelMasks::rgb888())).unwrap();
+        let mut framebuffer = Framebuffer::from_memory(mode, vec![0xaa; 24]).unwrap();
+
+        framebuffer.put_pixel(1, 1, (0xff, 0x80, 0x00)).unwrap();
+
+        assert_eq!(framebuffer.pixel_offset(1, 1), Ok(16));
+        assert_eq!(&framebuffer.memory()[16..20], &[0x00, 0x80, 0xff, 0x00]);
+        assert_eq!(&framebuffer.memory()[8..12], &[0xaa, 0xaa, 0xaa, 0xaa]);
     }
 
     #[test]
