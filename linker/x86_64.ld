@@ -70,10 +70,15 @@ SECTIONS
         __bss_end = .;
     } :data
 
-    . = ALIGN(16);
-    __stack_bottom = .;
-    . += KERNEL_STACK_SIZE;
-    __stack_top = .;
+    . = ALIGN(4K);
+    .bootstrap_stack (NOLOAD) : AT(ADDR(.bootstrap_stack) - KERNEL_VIRT_BASE)
+    {
+        . = ALIGN(16);
+        __stack_bottom = .;
+        . += KERNEL_STACK_SIZE;
+        . = ALIGN(16);
+        __stack_top = .;
+    } :data
 
     . = ALIGN(4K);
     __kernel_end = .;
