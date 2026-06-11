@@ -27,7 +27,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all build kernel qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
+.PHONY: all build kernel qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
 
 all: iso
 
@@ -238,6 +238,15 @@ qemu-emergency: override MIRAGE_FEATURES :=
 qemu-emergency: override QEMU_FEATURES := emergency-boot
 qemu-emergency: config-generate image
 	QEMU_FEATURES=emergency-boot \
+	MIRAGE_QEMU_SERIAL_ARGS="-serial stdio" \
+	MIRAGE_QEMU_DEBUG_ARGS="-d int,cpu_reset -D build/qemu.log" \
+	MIRAGE_REUSE_IMAGE=1 \
+	MIRAGE_ISO_IMAGE=$(ISO_IMAGE) \
+	tools/run-qemu.sh
+
+# Mirage Boot Milestone 1.0: framebuffer status screen, serial stdio, QEMU log.
+milestone-boot-screen: override QEMU_FEATURES := hw-framebuffer
+milestone-boot-screen: config-generate image
 	MIRAGE_QEMU_SERIAL_ARGS="-serial stdio" \
 	MIRAGE_QEMU_DEBUG_ARGS="-d int,cpu_reset -D build/qemu.log" \
 	MIRAGE_REUSE_IMAGE=1 \

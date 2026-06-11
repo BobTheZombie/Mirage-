@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
 use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
+use crate::kernel::boot_status::{BootState, BootStatus};
 use crate::kernel::cpu::MAX_CORES;
 use crate::kernel::device::{DeviceDriver, MirageInputEvent};
 #[cfg(not(feature = "emergency-boot"))]
@@ -90,7 +91,7 @@ static mut PER_CPU: [PerCpuState; MAX_CORES] = [PerCpuState::new(); MAX_CORES];
 /// state, and interrupt controller state. Emergency boots deliberately stop
 /// after raw serial diagnostics so the halt path cannot reach heap, paging,
 /// framebuffer, or interrupt-controller setup before those subsystems are safe.
-pub fn init_architecture(boot_info: &BootInfo) {
+pub fn init_architecture(boot_info: &BootInfo, boot_status: &mut BootStatus) {
     if INITIALISED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -100,6 +101,7 @@ pub fn init_architecture(boot_info: &BootInfo) {
     #[cfg(feature = "emergency-boot")]
     {
         let _ = boot_info;
+        let _ = boot_status;
         unsafe {
             early_debug::com1_write_str("serial initialized\r\n");
         }
@@ -108,18 +110,26 @@ pub fn init_architecture(boot_info: &BootInfo) {
     #[cfg(not(feature = "emergency-boot"))]
     {
         crate::kprintln!("serial initialized");
+        boot_status.architecture = BootState::Ok;
+        boot_status.bootloader = BootState::Ok;
         configure_cpu_modes();
         initialize_per_cpu_state();
         setup_memory_layout(boot_info);
-        initialize_framebuffer_console(boot_info);
-        configure_interrupts();
+        initialize_framebuffer_console(boot_info, boot_status);
+        configure_interrupts(boot_status);
     }
 }
 
 #[cfg(all(not(feature = "emergency-boot"), feature = "hw-framebuffer"))]
-fn initialize_framebuffer_console(boot_info: &BootInfo) {
+fn initialize_framebuffer_console(boot_info: &BootInfo, boot_status: &mut BootStatus) {
     match framebuffer_console::init_from_boot_info(boot_info) {
         Ok(Some(framebuffer)) => {
+            boot_status.framebuffer = BootState::Online;
+            boot_status.set_framebuffer_mode(
+                framebuffer.width,
+                framebuffer.height,
+                framebuffer.bits_per_pixel,
+            );
             crate::kprintln!("Mirage framebuffer online");
             crate::kprintln!("  resolution: {}x{}", framebuffer.width, framebuffer.height);
             crate::kprintln!("  pitch: {}", framebuffer.pitch);
@@ -127,13 +137,15 @@ fn initialize_framebuffer_console(boot_info: &BootInfo) {
             crate::kprintln!("  framebuffer address: {:#018x}", framebuffer.address.0);
         }
         Ok(None) | Err(_) => {
+            boot_status.framebuffer = BootState::Skipped;
             crate::kprintln!("framebuffer unavailable; serial console only");
         }
     }
 }
 
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "hw-framebuffer")))]
-fn initialize_framebuffer_console(_boot_info: &BootInfo) {
+fn initialize_framebuffer_console(_boot_info: &BootInfo, boot_status: &mut BootStatus) {
+    boot_status.framebuffer = BootState::Skipped;
     crate::kprintln!("framebuffer unavailable; serial console only");
 }
 
@@ -472,11 +484,14 @@ fn print_early_memory_diagnostics(boot_info: &BootInfo) {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
-fn configure_interrupts() {
+fn configure_interrupts(boot_status: &mut BootStatus) {
     idt::initialize();
+    boot_status.idt = BootState::Ok;
     crate::kprintln!("IDT initialized");
     pic::initialize();
+    boot_status.pic = BootState::Ok;
     crate::kprintln!("PIC initialized");
     interrupts::enable();
+    boot_status.interrupts = BootState::Enabled;
     crate::kprintln!("interrupts enabled");
 }

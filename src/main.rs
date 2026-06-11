@@ -7,7 +7,8 @@ extern crate mirage;
 use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
-use mirage::kernel::boot_status::{print_boot_complete_screen, BootStage, BootStatus};
+use mirage::kernel::boot_screen::render_persistent_boot_screen;
+use mirage::kernel::boot_status::BootStatus;
 #[cfg(all(
     not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")),
     not(feature = "full-boot")
@@ -72,16 +73,15 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         unsafe {
             mirage::arch::x86_64::early_debug::boot_marker(8);
         }
-        x86_64::init_architecture(&boot_info);
+        x86_64::init_architecture(&boot_info, &mut boot_status);
         unsafe {
             mirage::arch::x86_64::early_debug::boot_marker(9);
         }
-        boot_status.mark(BootStage::Architecture);
-
         let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
         mirage::kprintln!("kernel constructed");
         kernel.bootstrap_with_boot_info(&boot_info);
-        boot_status.mark(BootStage::Memory);
+        // Memory, paging, and heap remain milestone-pending until ownership and allocator
+        // milestones make those subsystems official boot-screen statuses.
         mirage::kprintln!("boot info applied");
 
         if cpu::MAX_CORES > 1 {
@@ -104,7 +104,6 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
             // Start L2 first, then L1-supervised device-facing daemons.
             let service_report = supervisor.bootstrap_services(&mut kernel);
-            boot_status.mark(BootStage::Supervisor);
             if service_report.all_running() {
                 mirage::kprintln!(
                     "supervisor initialization succeeded: full service manifest running"
@@ -150,7 +149,6 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
             mirage::kprintln!("minimal supervisor bootstrap starting");
             let minimal_report = supervisor.bootstrap_minimal(&mut kernel);
-            boot_status.mark(BootStage::Supervisor);
             mirage::kprintln!("minimal supervisor bootstrap complete");
             match minimal_report.failure {
                 Some(error) => {
@@ -230,10 +228,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         }
 
         kernel.kernel_mtss_init();
-        boot_status.mark(BootStage::Mtss);
         mirage::kprintln!("MTSS initialized");
-        boot_status.mark(BootStage::IdleLoop);
-        print_boot_complete_screen(&boot_status);
+        render_persistent_boot_screen(&boot_status);
         let mut observed_timer_ticks = x86_64::timer_ticks();
         loop {
             if x86_64::poll_debug_shell_hotkey() {

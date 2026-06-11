@@ -1,6 +1,7 @@
 //! Core kernel primitives: process lifecycle, scheduling, IPC routing, and
 //! multi-core orchestration.
 
+pub mod boot_screen;
 pub mod boot_status;
 pub mod cpu;
 pub mod debug_shell;
