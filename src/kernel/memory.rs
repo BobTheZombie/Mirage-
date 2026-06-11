@@ -170,6 +170,14 @@ pub struct AllocationStats {
     pub peak_allocated_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeapStats {
+    pub base: usize,
+    pub end: usize,
+    pub committed_bytes: usize,
+    pub reserved_bytes: usize,
+}
+
 pub struct MemoryManager<const HEAP_SIZE: usize, const MAX_AREAS: usize> {
     heap: [u8; HEAP_SIZE],
     bump_offset: usize,
@@ -472,6 +480,22 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         AllocationStats {
             allocated_bytes: self.allocated_bytes,
             peak_allocated_bytes: self.peak_bytes,
+        }
+    }
+
+    pub fn heap_statistics(&self) -> HeapStats {
+        let base = self.base_address();
+        let reserved = self.capacity();
+        let committed = match self.backing {
+            BackingStore::Static => reserved,
+            BackingStore::Virtual { committed, .. } => committed,
+            BackingStore::Disabled => 0,
+        };
+        HeapStats {
+            base,
+            end: base.saturating_add(reserved),
+            committed_bytes: committed,
+            reserved_bytes: reserved,
         }
     }
 
@@ -1177,6 +1201,10 @@ pub fn copy_to_user(root: u64, ptr: u64, input: &[u8]) -> bool {
 
 pub fn stats() -> AllocationStats {
     MEMORY_MANAGER.lock().statistics()
+}
+
+pub fn heap_stats() -> HeapStats {
+    MEMORY_MANAGER.lock().heap_statistics()
 }
 
 #[cfg(test)]
