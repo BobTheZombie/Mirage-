@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
 use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
-use crate::kernel::boot_status::{BootState, BootStatus};
+use crate::kernel::boot_status::{BootStage, BootState, BootStatus};
 use crate::kernel::cpu::MAX_CORES;
 use crate::kernel::device::{DeviceDriver, MirageInputEvent};
 #[cfg(not(feature = "emergency-boot"))]
@@ -110,7 +110,9 @@ pub fn init_architecture(boot_info: &BootInfo, boot_status: &mut BootStatus) {
     #[cfg(not(feature = "emergency-boot"))]
     {
         crate::kprintln!("serial initialized");
+        boot_status.set_stage(BootStage::Architecture);
         boot_status.architecture = BootState::Ok;
+        boot_status.set_stage(BootStage::BootInfo);
         boot_status.bootloader = BootState::Ok;
         configure_cpu_modes();
         initialize_per_cpu_state();
@@ -122,6 +124,7 @@ pub fn init_architecture(boot_info: &BootInfo, boot_status: &mut BootStatus) {
 
 #[cfg(all(not(feature = "emergency-boot"), feature = "hw-framebuffer"))]
 fn initialize_framebuffer_console(boot_info: &BootInfo, boot_status: &mut BootStatus) {
+    boot_status.set_stage(BootStage::Framebuffer);
     match framebuffer_console::init_from_boot_info(boot_info) {
         Ok(Some(framebuffer)) => {
             boot_status.framebuffer = BootState::Online;
@@ -485,12 +488,15 @@ fn print_early_memory_diagnostics(boot_info: &BootInfo) {
 
 #[cfg(not(feature = "emergency-boot"))]
 fn configure_interrupts(boot_status: &mut BootStatus) {
+    boot_status.set_stage(BootStage::Idt);
     idt::initialize();
     boot_status.idt = BootState::Ok;
     crate::kprintln!("IDT initialized");
+    boot_status.set_stage(BootStage::Pic);
     pic::initialize();
     boot_status.pic = BootState::Ok;
     crate::kprintln!("PIC initialized");
+    boot_status.set_stage(BootStage::Interrupts);
     interrupts::enable();
     boot_status.interrupts = BootState::Enabled;
     crate::kprintln!("interrupts enabled");

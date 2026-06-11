@@ -8,7 +8,7 @@ use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
 use mirage::kernel::boot_screen::render_persistent_boot_screen;
-use mirage::kernel::boot_status::BootStatus;
+use mirage::kernel::boot_status::{BootStage, BootState, BootStatus};
 #[cfg(all(
     not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")),
     not(feature = "full-boot")
@@ -80,9 +80,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
         mirage::kprintln!("kernel constructed");
         kernel.bootstrap_with_boot_info(&boot_info);
+        boot_status.set_stage(BootStage::Memory);
         // Memory, paging, and heap remain milestone-pending until ownership and allocator
         // milestones make those subsystems official boot-screen statuses.
         mirage::kprintln!("boot info applied");
+        render_persistent_boot_screen(&boot_status);
 
         if cpu::MAX_CORES > 1 {
             kernel.bring_up_secondary_cores(cpu::MAX_CORES - 1);
@@ -93,22 +95,29 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
         #[cfg(feature = "full-boot")]
         {
+            boot_status.set_stage(BootStage::RootFs);
             match kernel.mount_root_from_boot_sources(boot_info.modules) {
                 Ok(source) => {
+                    boot_status.root_fs = BootState::Ok;
                     mirage::kprintln!("root mount attempt succeeded: {:?}", source);
                 }
                 Err(error) => {
+                    boot_status.root_fs = BootState::Failed;
                     mirage::kprintln!("root mount attempt failed: {:?}", error);
                 }
             }
+            render_persistent_boot_screen(&boot_status);
 
             // Start L2 first, then L1-supervised device-facing daemons.
+            boot_status.set_stage(BootStage::Supervisor);
             let service_report = supervisor.bootstrap_services(&mut kernel);
             if service_report.all_running() {
+                boot_status.supervisor = BootState::Ok;
                 mirage::kprintln!(
                     "supervisor initialization succeeded: full service manifest running"
                 );
             } else {
+                boot_status.supervisor = BootState::Failed;
                 mirage::kprintln!(
                     "supervisor initialization failed: full service manifest incomplete"
                 );
@@ -128,33 +137,50 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
 
+            render_persistent_boot_screen(&boot_status);
+            boot_status.set_stage(BootStage::Userspace);
             match kernel.bootstrap_userspace_init() {
                 Ok(pid) => {
+                    boot_status.userspace = BootState::Ok;
                     mirage::kprintln!("userspace init attempt succeeded: pid={:?}", pid);
                 }
                 Err(error) => {
+                    boot_status.userspace = BootState::Stub;
                     mirage::kprintln!(
                         "userspace init attempt skipped/stubbed for minimal boot milestone: {:?}",
                         error
                     );
                 }
             }
+            render_persistent_boot_screen(&boot_status);
         }
 
         #[cfg(not(feature = "full-boot"))]
         {
-            mirage::kprintln!(
-                "root mount attempt skipped: minimal boot milestone does not require QFS root yet"
-            );
+            boot_status.set_stage(BootStage::RootFs);
+            match kernel.mount_root_from_boot_sources(boot_info.modules) {
+                Ok(source) => {
+                    boot_status.root_fs = BootState::Ok;
+                    mirage::kprintln!("root mount attempt succeeded: {:?}", source);
+                }
+                Err(error) => {
+                    boot_status.root_fs = BootState::Failed;
+                    mirage::kprintln!("root mount attempt failed: {:?}", error);
+                }
+            }
+            render_persistent_boot_screen(&boot_status);
 
+            boot_status.set_stage(BootStage::Supervisor);
             mirage::kprintln!("minimal supervisor bootstrap starting");
             let minimal_report = supervisor.bootstrap_minimal(&mut kernel);
             mirage::kprintln!("minimal supervisor bootstrap complete");
             match minimal_report.failure {
                 Some(error) => {
+                    boot_status.supervisor = BootState::Failed;
                     mirage::kprintln!("supervisor initialization failed: {:?}", error);
                 }
                 None => {
+                    boot_status.supervisor = BootState::Ok;
                     mirage::kprintln!(
                         "supervisor initialization succeeded: minimal registry entries={}",
                         minimal_report.len()
@@ -162,9 +188,13 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
 
+            render_persistent_boot_screen(&boot_status);
+            boot_status.set_stage(BootStage::Userspace);
+            boot_status.userspace = BootState::Stub;
             mirage::kprintln!(
             "userspace init attempt skipped: minimal boot milestone uses supervisor-only skeleton"
         );
+            render_persistent_boot_screen(&boot_status);
 
             mirage::kprintln!("loading boot manifest");
             // Temporary compiled-in manifest fixture: replace this with Limine module
@@ -227,8 +257,15 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             }
         }
 
+        boot_status.set_stage(BootStage::Mtss);
         kernel.kernel_mtss_init();
+        boot_status.mtss = BootState::Ok;
         mirage::kprintln!("MTSS initialized");
+        if boot_status.memory == BootState::Pending {
+            boot_status.set_stage(BootStage::Memory);
+        } else {
+            boot_status.set_stage(BootStage::IdleLoop);
+        }
         render_persistent_boot_screen(&boot_status);
         let mut observed_timer_ticks = x86_64::timer_ticks();
         loop {

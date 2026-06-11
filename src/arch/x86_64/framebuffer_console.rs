@@ -97,17 +97,20 @@ pub fn write_status(label: &str, value: &str, state: crate::kernel::boot_status:
         crate::kernel::boot_status::BootState::Ok
         | crate::kernel::boot_status::BootState::Online
         | crate::kernel::boot_status::BootState::Enabled => RgbColor::GREEN,
-        crate::kernel::boot_status::BootState::Pending
-        | crate::kernel::boot_status::BootState::Skipped => RgbColor::YELLOW,
+        crate::kernel::boot_status::BootState::Pending => RgbColor::YELLOW,
+        crate::kernel::boot_status::BootState::Skipped
+        | crate::kernel::boot_status::BootState::Stub => RgbColor::CYAN,
         crate::kernel::boot_status::BootState::Failed => RgbColor::RED,
     };
 
     if let Some(console) = CONSOLE.lock().as_mut() {
         let previous = console.foreground;
         console.foreground = RgbColor::GRAY.tuple();
-        let _ = write!(console, "{:<12} : ", label);
+        let _ = write!(console, "{:<12} [ ", label);
         console.foreground = color.tuple();
         let _ = console.write_str(value);
+        console.foreground = RgbColor::GRAY.tuple();
+        let _ = console.write_str(" ]");
         console.foreground = RgbColor::WHITE.tuple();
         let _ = console.write_str("\n");
         console.foreground = previous;
