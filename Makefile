@@ -27,7 +27,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all build kernel qemu-kernel image iso qemu qemu-headless qemu-debug qemu-emergency qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
+.PHONY: all build kernel qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
 
 all: iso
 
@@ -164,6 +164,14 @@ qemu-kernel: config-generate rust-src check-rust-src $(TARGET_JSON)
 		-Z build-std=core,alloc,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
 
+seed-rs-kernel: rust-src check-rust-src $(TARGET_JSON)
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --no-default-features --features seed-rs-qemu-emergency --bin mirage-kernel \
+		--target $(TARGET_JSON) \
+		$(CARGO_JSON_TARGET_SPEC_FLAG) \
+		$(UNSTABLE_OPTIONS_FLAG) \
+		-Z build-std=core,alloc,compiler_builtins \
+		-Z build-std-features=compiler-builtins-mem
+
 limine: $(LIMINE_BIN)
 
 $(LIMINE_BIN):
@@ -191,6 +199,31 @@ iso: config-generate qemu-kernel limine
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		-o $(ISO_IMAGE) $(ISO_ROOT)
 	$(LIMINE_BIN) bios-install $(ISO_IMAGE)
+
+qemu-seed-image: seed-rs-kernel limine
+	rm -rf $(ISO_ROOT)
+	mkdir -p $(ISO_ROOT)/boot/limine $(ISO_ROOT)/EFI/BOOT
+	cp $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
+	cp boot/limine/limine.conf $(ISO_ROOT)/boot/limine/limine.conf
+	cp $(LIMINE_DIR)/limine-bios.sys $(ISO_ROOT)/boot/limine/
+	cp $(LIMINE_DIR)/limine-bios-cd.bin $(ISO_ROOT)/boot/limine/
+	cp $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/
+	cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT)/EFI/BOOT/BOOTX64.EFI
+	cp $(LIMINE_DIR)/BOOTIA32.EFI $(ISO_ROOT)/EFI/BOOT/BOOTIA32.EFI
+	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
+		-no-emul-boot -boot-load-size 4 -boot-info-table \
+		--efi-boot boot/limine/limine-uefi-cd.bin \
+		-efi-boot-part --efi-boot-image --protective-msdos-label \
+		-o $(ISO_IMAGE) $(ISO_ROOT)
+	$(LIMINE_BIN) bios-install $(ISO_IMAGE)
+
+qemu-seed: qemu-seed-image
+	./tools/verify-seed-rs-elf.sh $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
+	qemu-system-x86_64 -machine q35 -m 512M -serial stdio -no-reboot -no-shutdown -d int,cpu_reset -D build/qemu.log -cdrom $(ISO_IMAGE)
+
+qemu-seed-debug: qemu-seed-image
+	./tools/verify-seed-rs-elf.sh $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
+	qemu-system-x86_64 -machine q35 -m 512M -serial stdio -no-reboot -no-shutdown -d int,cpu_reset -D build/qemu.log -S -s -cdrom $(ISO_IMAGE)
 
 qemu: config-generate image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh

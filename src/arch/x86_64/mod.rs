@@ -32,6 +32,8 @@ pub mod msr;
 pub mod paging;
 pub mod pic;
 pub mod ps2_keyboard;
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+pub mod seed_rs;
 pub mod uart16550;
 
 pub use clock::{HardwareClock, HARDWARE_CLOCK};

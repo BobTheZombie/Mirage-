@@ -1,11 +1,11 @@
 //! Earliest x86_64 bootstrap and typed boot information handoff.
 //!
 //! Limine enters the kernel in 64-bit mode with paging enabled. The assembly entry below still
-//! takes ownership of the initial stack contract, aligns it to the SysV x86_64 ABI, clears the
-//! kernel `.bss`, snapshots boot-protocol state, and only then calls the Rust kernel entry point.
+//! takes ownership of the initial stack contract, aligns it to the SysV x86_64 ABI, and
+//! then calls the Rust seed-rs handoff layer.
 
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-use core::arch::{asm, global_asm};
+use core::arch::global_asm;
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 use core::ptr::addr_of;
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
@@ -25,19 +25,11 @@ _start:
     lea rsp, [rip + __stack_top]
     and rsp, -16
     xor rbp, rbp
-
-    lea rdi, [rip + .Lmirage_boot_marker_01]
-    mov esi, .Lmirage_boot_marker_01_len
-    call __mirage_early_com1_write_line_raw
-
-    call __mirage_x86_64_bootstrap
+    call __mirage_x86_64_seed_entry
 .Lmirage_boot_hang:
     hlt
     jmp .Lmirage_boot_hang
     .size _start, . - _start
-.Lmirage_boot_marker_01:
-    .ascii "[MIRAGE BOOT 01]"
-.set .Lmirage_boot_marker_01_len, . - .Lmirage_boot_marker_01
 "#
 );
 
@@ -55,100 +47,23 @@ extern "C" {
     static __data_end: u8;
 }
 
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-extern "Rust" {
-    fn kernel_main(boot_info: BootInfo) -> !;
-}
-
 /// Architecture-owned entry point called by the `_start` assembly stub.
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 #[no_mangle]
-pub unsafe extern "C" fn __mirage_x86_64_bootstrap() -> ! {
-    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 02]".as_ptr(), b"[MIRAGE BOOT 02]".len());
-
-    clear_bss();
-    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 03]".as_ptr(), b"[MIRAGE BOOT 03]".len());
-
-    let sections = KernelSections::from_linker();
-    let raw_boot = limine::snapshot();
-    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 04]".as_ptr(), b"[MIRAGE BOOT 04]".len());
-
-    let boot_info = BootInfo::from_limine(raw_boot, sections);
-    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 05]".as_ptr(), b"[MIRAGE BOOT 05]".len());
-
-    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 06]".as_ptr(), b"[MIRAGE BOOT 06]".len());
-    kernel_main(boot_info)
+pub unsafe extern "C" fn __mirage_x86_64_seed_entry() -> ! {
+    crate::arch::x86_64::seed_rs::x86_64_handoff()
 }
 
-/// Raw COM1 line writer for the assembly/Rust bootstrap boundary.
-///
-/// This is safe to call before `.bss` has been cleared: it uses only stack
-/// locals and port I/O, avoids formatting, locks, atomics, and Rust statics,
-/// and always programs COM1 before writing the first byte.
+/// Backward-compatible symbol for older diagnostics; the seed entry is now the
+/// only handoff path used by `_start`.
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 #[no_mangle]
-pub unsafe extern "C" fn __mirage_early_com1_write_line_raw(message: *const u8, len: usize) {
-    early_com1_init_raw();
-
-    let mut offset = 0usize;
-    while offset < len {
-        early_com1_write_byte_raw(*message.add(offset));
-        offset += 1;
-    }
-
-    early_com1_write_byte_raw(b'\r');
-    early_com1_write_byte_raw(b'\n');
+pub unsafe extern "C" fn __mirage_x86_64_bootstrap() -> ! {
+    __mirage_x86_64_seed_entry()
 }
 
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-unsafe fn early_com1_init_raw() {
-    early_com1_cli_raw();
-    early_com1_outb_raw(0x3f9, 0x00);
-    early_com1_outb_raw(0x3fb, 0x80);
-    early_com1_outb_raw(0x3f8, 0x03);
-    early_com1_outb_raw(0x3f9, 0x00);
-    early_com1_outb_raw(0x3fb, 0x03);
-    early_com1_outb_raw(0x3fa, 0xc7);
-    early_com1_outb_raw(0x3fc, 0x0b);
-}
-
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-unsafe fn early_com1_write_byte_raw(byte: u8) {
-    early_com1_wait_for_raw(0x20);
-    early_com1_outb_raw(0x3f8, byte);
-}
-
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-unsafe fn early_com1_wait_for_raw(mask: u8) {
-    let mut spins = 0usize;
-    while early_com1_inb_raw(0x3fd) & mask == 0 && spins < 100_000 {
-        core::hint::spin_loop();
-        spins += 1;
-    }
-}
-
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-#[inline(always)]
-unsafe fn early_com1_cli_raw() {
-    asm!("cli", options(nomem, nostack));
-}
-
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-#[inline(always)]
-unsafe fn early_com1_inb_raw(port: u16) -> u8 {
-    let value: u8;
-    asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags));
-    value
-}
-
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-#[inline(always)]
-unsafe fn early_com1_outb_raw(port: u16, value: u8) {
-    asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags));
-}
-
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-unsafe fn clear_bss() {
+pub unsafe fn clear_bss() {
     let start = addr_of!(__bss_start) as usize;
     let end = addr_of!(__bss_end) as usize;
     let len = end.saturating_sub(start);
@@ -186,7 +101,7 @@ impl BootInfo {
     }
 
     #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-    fn from_limine(raw: limine::LimineBootSnapshot, sections: KernelSections) -> Self {
+    pub(crate) fn from_limine(raw: limine::LimineBootSnapshot, sections: KernelSections) -> Self {
         let executable = raw.executable_address.map(|address| KernelLoadRange {
             physical_start: PhysicalAddress(address.physical_base),
             virtual_start: VirtualAddress(address.virtual_base),
@@ -529,7 +444,7 @@ pub struct KernelSections {
 
 impl KernelSections {
     #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-    fn from_linker() -> Self {
+    pub fn from_linker() -> Self {
         Self {
             kernel: VirtualRange::from_symbols(addr_of!(__kernel_start), addr_of!(__kernel_end)),
             text: VirtualRange::from_symbols(addr_of!(__text_start), addr_of!(__text_end)),
