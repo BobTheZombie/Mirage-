@@ -29,20 +29,20 @@ cd "$repo_root"
 mode=${MIRAGE_BUILD_MODE:-full}
 case "$mode" in
     full)
-        primary_features=${MIRAGE_QEMU_FEATURES:-${QEMU_FEATURES:-${MIRAGE_KERNEL_FEATURES:-hw-framebuffer full-boot}}}
-        fallback_features=${MIRAGE_QEMU_MINIMAL_FEATURES:-${QEMU_MINIMAL_FEATURES:-${MIRAGE_FALLBACK_KERNEL_FEATURES:-hw-framebuffer}}}
-        printf 'Building Mirage QEMU ISO with features: %s\n' "$primary_features"
-        if make image QEMU_FEATURES="$primary_features"; then
-            :
-        else
-            printf 'warning: full boot build failed; retrying minimal framebuffer build with features: %s\n' "$fallback_features" >&2
-            make image QEMU_FEATURES="$fallback_features"
+        if [ -n "${MIRAGE_FEATURES:-}" ]; then
+            printf 'Using manual MIRAGE_FEATURES override instead of mirage.conf\n'
         fi
+        printf 'Building Mirage QEMU ISO from mirage.conf (mode: full)\n'
+        make image
         ;;
     minimal)
-        features=${MIRAGE_QEMU_FEATURES:-${QEMU_FEATURES:-${MIRAGE_KERNEL_FEATURES:-hw-framebuffer}}}
-        printf 'Building Mirage QEMU ISO in minimal mode with features: %s\n' "$features"
-        make image QEMU_FEATURES="$features"
+        if [ -n "${MIRAGE_FEATURES:-}" ]; then
+            printf 'Using manual MIRAGE_FEATURES override instead of mirage.conf\n'
+            make image
+        else
+            printf 'Building Mirage QEMU ISO in minimal compatibility mode with features: %s\n' "${QEMU_MINIMAL_FEATURES:-hw-framebuffer}"
+            make image QEMU_FEATURES="${QEMU_MINIMAL_FEATURES:-hw-framebuffer}"
+        fi
         ;;
     *)
         error "unknown MIRAGE_BUILD_MODE '$mode' (expected 'full' or 'minimal')"

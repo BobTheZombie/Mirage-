@@ -1,0 +1,265 @@
+# Mirage configuration schema.
+# This file is the source of truth consumed by tools/mirageconfig.
+
+[[options]]
+symbol = "CONFIG_MIRAGE_ARCH_X86_64"
+prompt = "x86_64 architecture support"
+category = "Architecture"
+default = true
+help = "Build Mirage for the current x86_64 architecture skeleton."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_FULL_BOOT"
+prompt = "Full boot path"
+category = "Boot"
+default = true
+help = "Enable the fuller boot path used by the default ISO/QEMU image."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = ["CONFIG_MIRAGE_SUPERVISOR", "CONFIG_MIRAGE_CAPABILITIES", "CONFIG_MIRAGE_IPC"]
+visible_if = []
+type = "bool"
+cargo_feature = "full-boot"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_SERIAL_CONSOLE"
+prompt = "Serial console"
+category = "Boot"
+default = true
+help = "Request a serial console and add -serial stdio to generated QEMU flags."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_VERBOSE_BOOT"
+prompt = "Verbose boot logging"
+category = "Boot"
+default = false
+help = "Add verbose boot intent to generated boot flags/kernel command-line metadata."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_QEMU_DEBUG"
+prompt = "QEMU debug launch flags"
+category = "Boot"
+default = false
+help = "Add -S -s and QEMU debug logging flags to generated QEMU debug arguments."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_FRAMEBUFFER"
+prompt = "Framebuffer console"
+category = "Hardware"
+default = true
+help = "Enable the Mirage framebuffer feature and graphical QEMU launch behavior."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+cargo_feature = "hw-framebuffer"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_PCI"
+prompt = "PCI bus support"
+category = "Hardware"
+default = false
+help = "Enable PCI bus discovery support for hardware-adjacent services/modules."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+cargo_feature = "hw-pci"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_AMD64"
+prompt = "AMD64 platform support"
+category = "Hardware"
+default = false
+help = "Enable AMD64 platform support helpers."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = []
+visible_if = []
+type = "bool"
+cargo_feature = "hw-amd64"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_RYZEN"
+prompt = "AMD Ryzen platform support"
+category = "Hardware"
+default = false
+help = "Enable Ryzen-specific platform support. Selecting this also selects AMD64 support."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = ["CONFIG_MIRAGE_HW_AMD64"]
+visible_if = []
+type = "bool"
+cargo_feature = "hw-ryzen"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_AMD_CHIPSET"
+prompt = "AMD chipset support"
+category = "Hardware"
+default = false
+help = "Enable AMD chipset support; requires Ryzen support and selects PCI."
+depends_on = ["CONFIG_MIRAGE_HW_RYZEN"]
+selects = ["CONFIG_MIRAGE_HW_PCI"]
+visible_if = ["CONFIG_MIRAGE_HW_RYZEN"]
+type = "bool"
+cargo_feature = "hw-amd-chipset"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_AMD_IOMMU"
+prompt = "AMD IOMMU support"
+category = "Hardware"
+default = false
+help = "Enable AMD IOMMU support for Ryzen/PCI development configurations."
+depends_on = ["CONFIG_MIRAGE_HW_RYZEN", "CONFIG_MIRAGE_HW_PCI"]
+selects = []
+visible_if = ["CONFIG_MIRAGE_HW_RYZEN"]
+type = "bool"
+cargo_feature = "hw-amd-iommu"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_NVME"
+prompt = "NVMe storage support"
+category = "Hardware"
+default = false
+help = "Enable NVMe support; depends on PCI."
+depends_on = ["CONFIG_MIRAGE_HW_PCI"]
+selects = []
+visible_if = ["CONFIG_MIRAGE_HW_PCI"]
+type = "bool"
+cargo_feature = "hw-nvme"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_AHCI"
+prompt = "AHCI storage support"
+category = "Hardware"
+default = false
+help = "Enable AHCI support; depends on PCI."
+depends_on = ["CONFIG_MIRAGE_HW_PCI"]
+selects = []
+visible_if = ["CONFIG_MIRAGE_HW_PCI"]
+type = "bool"
+cargo_feature = "hw-ahci"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_XHCI"
+prompt = "xHCI USB support"
+category = "Hardware"
+default = false
+help = "Enable xHCI support; depends on PCI."
+depends_on = ["CONFIG_MIRAGE_HW_PCI"]
+selects = []
+visible_if = ["CONFIG_MIRAGE_HW_PCI"]
+type = "bool"
+cargo_feature = "hw-xhci"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_IPC"
+prompt = "Kernel-enforced IPC transport"
+category = "Kernel Core"
+default = true
+help = "Enable the low-level IPC mechanism used by supervisor/services."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_CAPABILITIES"
+prompt = "Capability enforcement"
+category = "Kernel Core"
+default = true
+help = "Enable kernel-side capability validity checks."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_SUPERVISOR"
+prompt = "Privileged supervisor layer"
+category = "Kernel Core"
+default = true
+help = "Enable the supervisor architecture layer above kernel mechanism."
+depends_on = ["CONFIG_MIRAGE_IPC", "CONFIG_MIRAGE_CAPABILITIES"]
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_MTSS"
+prompt = "MTSS multitasking subsystem"
+category = "Kernel Core"
+default = true
+help = "Enable the portable Mirage multitasking subsystem boundary."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_MEMORY_PAGING"
+prompt = "Virtual memory and paging"
+category = "Memory"
+default = true
+help = "Enable the kernel paging/address-space skeleton."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_MEMORY_FRAME_ALLOCATOR"
+prompt = "Frame allocator skeleton"
+category = "Memory"
+default = true
+help = "Enable the early physical frame allocator skeleton."
+depends_on = ["CONFIG_MIRAGE_MEMORY_PAGING"]
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_MEMORY_HEAP"
+prompt = "Kernel heap skeleton"
+category = "Memory"
+default = true
+help = "Enable the minimal heap support used by the architecture skeleton."
+depends_on = ["CONFIG_MIRAGE_MEMORY_FRAME_ALLOCATOR"]
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_DEBUG"
+prompt = "Debug support"
+category = "Debug"
+default = false
+help = "Enable general Mirage debug intent flags."
+depends_on = []
+selects = []
+visible_if = []
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_TRACE_IPC"
+prompt = "Trace IPC messages"
+category = "Debug"
+default = false
+help = "Enable IPC tracing diagnostics; depends on IPC and Debug support."
+depends_on = ["CONFIG_MIRAGE_DEBUG", "CONFIG_MIRAGE_IPC"]
+selects = []
+visible_if = ["CONFIG_MIRAGE_DEBUG"]
+type = "bool"
