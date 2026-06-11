@@ -14,10 +14,25 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || error "missing required command
 cd "$repo_root"
 
 iso_image=${MIRAGE_ISO_IMAGE:-build/mirage.iso}
-if [ "${MIRAGE_SKIP_BUILD:-0}" != "1" ]; then
-    "$script_dir/build-qemu-image.sh"
+reuse_image=${MIRAGE_REUSE_IMAGE:-0}
+
+if [ "${MIRAGE_SKIP_BUILD:-0}" = "1" ]; then
+    printf 'warning: MIRAGE_SKIP_BUILD=1 is deprecated; use MIRAGE_REUSE_IMAGE=1 to launch an existing image without rebuilding\n' >&2
+    reuse_image=1
 fi
-[ -f "$iso_image" ] || error "missing QEMU image '$iso_image' (run tools/build-qemu-image.sh or unset MIRAGE_SKIP_BUILD)"
+
+case "$reuse_image" in
+    1)
+        [ -f "$iso_image" ] || error "MIRAGE_REUSE_IMAGE=1 requires existing QEMU image '$iso_image' (run tools/build-qemu-image.sh or unset MIRAGE_REUSE_IMAGE)"
+        ;;
+    0|'')
+        "$script_dir/build-qemu-image.sh"
+        [ -f "$iso_image" ] || error "missing QEMU image '$iso_image' after running tools/build-qemu-image.sh"
+        ;;
+    *)
+        error "MIRAGE_REUSE_IMAGE must be '1' to reuse an existing image or unset to rebuild"
+        ;;
+esac
 
 mem=${MIRAGE_QEMU_MEMORY:-512M}
 

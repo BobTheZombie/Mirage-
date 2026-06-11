@@ -111,13 +111,13 @@ iso: qemu-kernel limine
 	$(LIMINE_BIN) bios-install $(ISO_IMAGE)
 
 qemu: image
-	MIRAGE_SKIP_BUILD=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
 qemu-headless: image
-	MIRAGE_SKIP_BUILD=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu-headless.sh
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu-headless.sh
 
 qemu-debug: image
-	MIRAGE_SKIP_BUILD=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu-debug.sh
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu-debug.sh
 
 qemu-check: tools/check-qemu-image.sh
 	./tools/check-qemu-image.sh
