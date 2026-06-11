@@ -8,10 +8,7 @@
 use core::arch::global_asm;
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 use core::ptr::addr_of;
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-use core::ptr::write_bytes;
 
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 use crate::boot::{self as limine, Framebuffer};
 use crate::boot::{LimineFile, MemoryMapEntry as LimineMemoryMapEntry};
 
@@ -66,11 +63,28 @@ pub unsafe extern "C" fn __mirage_x86_64_bootstrap() -> ! {
 pub unsafe fn clear_bss() {
     let start = addr_of!(__bss_start) as usize;
     let end = addr_of!(__bss_end) as usize;
-    let len = end.saturating_sub(start);
+    let mut cursor = start;
 
-    if len != 0 {
-        write_bytes(start as *mut u8, 0, len);
+    while cursor < end {
+        core::ptr::write_volatile(cursor as *mut u8, 0);
+        cursor = cursor.saturating_add(1);
     }
+}
+
+#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+fn bootinfo_marker(message: &str) {
+    unsafe {
+        crate::arch::x86_64::seed_rs::seed_com1_write_str(message);
+    }
+}
+
+#[cfg(any(test, feature = "qfs-std", not(target_os = "none")))]
+fn bootinfo_marker(_message: &str) {}
+
+const BOOT_CSTRING_SCAN_LIMIT: usize = 256;
+
+fn is_aligned<T>(ptr: *const T) -> bool {
+    (ptr as usize) % core::mem::align_of::<T>() == 0
 }
 
 /// Parsed boot information passed from the architecture bootstrap to the kernel proper.
@@ -102,43 +116,66 @@ impl BootInfo {
 
     #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
     pub(crate) fn from_limine(raw: limine::LimineBootSnapshot, sections: KernelSections) -> Self {
+        bootinfo_marker("[bootinfo 01] enter from_limine\r\n");
+
         let executable = raw.executable_address.map(|address| KernelLoadRange {
             physical_start: PhysicalAddress(address.physical_base),
             virtual_start: VirtualAddress(address.virtual_base),
             length: sections.kernel.length(),
         });
+        bootinfo_marker("[bootinfo 02] executable address parsed\r\n");
 
-        Self {
-            boot_protocol: BootProtocol::Limine {
-                base_revision_supported: raw.base_revision_supported,
-            },
-            bootloader: raw
-                .bootloader
-                .map(|info| BootloaderInfo {
-                    name: BootString::from_cstr(info.name),
-                    version: BootString::from_cstr(info.version),
-                })
-                .unwrap_or(BootloaderInfo::unknown()),
-            memory_map: raw.memory_map.map(|map| MemoryMap {
-                entries: map.entries,
-                entry_count: map.entry_count,
-            }),
-            framebuffer: first_framebuffer(raw.framebuffer),
-            serial: None,
-            rsdp: raw.rsdp.map(|rsdp| PhysicalAddress(rsdp.address)),
-            hhdm_offset: raw.hhdm.map(|hhdm| hhdm.offset),
-            kernel: KernelImageInfo {
-                sections,
-                load_range: executable,
-            },
-            modules: raw
-                .modules
-                .map(|modules| BootModules {
-                    entries: modules.modules,
-                    entry_count: modules.module_count,
-                })
-                .unwrap_or(BootModules::empty()),
-        }
+        let boot_protocol = BootProtocol::Limine {
+            base_revision_supported: raw.base_revision_supported,
+        };
+        bootinfo_marker("[bootinfo 03] boot protocol parsed\r\n");
+
+        let bootloader = raw
+            .bootloader
+            .map(|info| BootloaderInfo {
+                name: BootString::from_cstr(info.name),
+                version: BootString::from_cstr(info.version),
+            })
+            .unwrap_or(BootloaderInfo::unknown());
+        bootinfo_marker("[bootinfo 04] bootloader parsed\r\n");
+
+        let memory_map = MemoryMap::from_limine_response(raw.memory_map);
+        bootinfo_marker("[bootinfo 05] memory map parsed\r\n");
+
+        let framebuffer = first_framebuffer(raw.framebuffer);
+        bootinfo_marker("[bootinfo 06] framebuffer parsed\r\n");
+
+        let serial = None;
+        bootinfo_marker("[bootinfo 07] serial parsed\r\n");
+
+        let rsdp = raw.rsdp.map(|rsdp| PhysicalAddress(rsdp.address));
+        bootinfo_marker("[bootinfo 08] rsdp parsed\r\n");
+
+        let hhdm_offset = raw.hhdm.map(|hhdm| hhdm.offset);
+        bootinfo_marker("[bootinfo 09] hhdm parsed\r\n");
+
+        let kernel = KernelImageInfo {
+            sections,
+            load_range: executable,
+        };
+        bootinfo_marker("[bootinfo 10] kernel image parsed\r\n");
+
+        let modules = BootModules::from_limine_response(raw.modules);
+        bootinfo_marker("[bootinfo 11] modules parsed\r\n");
+
+        let boot_info = Self {
+            boot_protocol,
+            bootloader,
+            memory_map,
+            framebuffer,
+            serial,
+            rsdp,
+            hhdm_offset,
+            kernel,
+            modules,
+        };
+        bootinfo_marker("[bootinfo 12] BootInfo return\r\n");
+        boot_info
     }
 }
 
@@ -177,18 +214,22 @@ impl BootString {
     }
 
     pub fn from_cstr(ptr: *const u8) -> Self {
+        bootinfo_marker("[bootstr] before null check\r\n");
         if ptr.is_null() {
+            bootinfo_marker("[bootstr] null pointer return\r\n");
             return Self::empty();
         }
 
+        bootinfo_marker("[bootstr] before scan\r\n");
         let mut len = 0;
-        while len < 256 {
+        while len < BOOT_CSTRING_SCAN_LIMIT {
             let byte = unsafe { ptr.add(len).read() };
             if byte == 0 {
                 break;
             }
             len += 1;
         }
+        bootinfo_marker("[bootstr] after scan\r\n");
 
         Self { ptr, len }
     }
@@ -224,11 +265,47 @@ impl BootModules {
         self.entry_count == 0
     }
 
+    pub fn from_limine_response(response: Option<&limine::ModuleResponse>) -> Self {
+        let Some(response) = response else {
+            bootinfo_marker("[bootmods] response missing\r\n");
+            return Self::empty();
+        };
+
+        let module_count = response.module_count;
+        bootinfo_marker("[bootmods] module_count read\r\n");
+        if module_count == 0 {
+            bootinfo_marker("[bootmods] BootModules return\r\n");
+            return Self::empty();
+        }
+
+        let modules = response.modules;
+        if modules.is_null() {
+            bootinfo_marker("[bootmods] modules pointer null\r\n");
+            bootinfo_marker("[bootmods] BootModules return\r\n");
+            return Self::empty();
+        }
+        if !is_aligned(modules) {
+            bootinfo_marker("[bootmods] modules pointer unaligned\r\n");
+            bootinfo_marker("[bootmods] BootModules return\r\n");
+            return Self::empty();
+        }
+
+        bootinfo_marker("[bootmods] BootModules return\r\n");
+        Self {
+            entries: modules,
+            entry_count: module_count,
+        }
+    }
+
     pub fn module(self, index: u64) -> Option<BootModule> {
-        if index >= self.entry_count || self.entries.is_null() {
+        if index >= self.entry_count || self.entries.is_null() || !is_aligned(self.entries) {
             return None;
         }
-        let file_ptr = unsafe { self.entries.add(index as usize).read() };
+        let offset = usize::try_from(index).ok()?;
+        let file_ptr = unsafe { self.entries.add(offset).read() };
+        if file_ptr.is_null() || !is_aligned(file_ptr) {
+            return None;
+        }
         let file = unsafe { file_ptr.as_ref()? };
         Some(BootModule {
             base: VirtualAddress(file.address as u64),
@@ -315,6 +392,13 @@ pub struct MemoryMap {
 }
 
 impl MemoryMap {
+    pub const fn empty() -> Self {
+        Self {
+            entries: core::ptr::null(),
+            entry_count: 0,
+        }
+    }
+
     pub const fn len(self) -> u64 {
         self.entry_count
     }
@@ -323,12 +407,46 @@ impl MemoryMap {
         self.entry_count == 0
     }
 
-    pub fn entry(self, index: u64) -> Option<MemoryMapEntry> {
-        if index >= self.entry_count || self.entries.is_null() {
+    pub fn from_limine_response(response: Option<&limine::MemoryMapResponse>) -> Option<Self> {
+        let Some(response) = response else {
+            bootinfo_marker("[memmap] response missing\r\n");
+            return None;
+        };
+
+        let entry_count = response.entry_count;
+        bootinfo_marker("[memmap] entry_count read\r\n");
+        if entry_count == 0 {
+            bootinfo_marker("[memmap] MemoryMap return\r\n");
             return None;
         }
 
-        let entry_ptr = unsafe { self.entries.add(index as usize).read() };
+        let entries = response.entries;
+        if entries.is_null() {
+            bootinfo_marker("[memmap] entries pointer null\r\n");
+            return None;
+        }
+        if !is_aligned(entries) {
+            bootinfo_marker("[memmap] entries pointer unaligned\r\n");
+            return None;
+        }
+
+        bootinfo_marker("[memmap] MemoryMap return\r\n");
+        Some(Self {
+            entries,
+            entry_count,
+        })
+    }
+
+    pub fn entry(self, index: u64) -> Option<MemoryMapEntry> {
+        if index >= self.entry_count || self.entries.is_null() || !is_aligned(self.entries) {
+            return None;
+        }
+
+        let offset = usize::try_from(index).ok()?;
+        let entry_ptr = unsafe { self.entries.add(offset).read() };
+        if entry_ptr.is_null() || !is_aligned(entry_ptr) {
+            return None;
+        }
         let entry = unsafe { entry_ptr.as_ref()? };
         Some(MemoryMapEntry {
             base: PhysicalAddress(entry.base),
@@ -389,18 +507,38 @@ pub struct FramebufferInfo {
     pub blue_mask_shift: u8,
 }
 
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
-fn first_framebuffer(
-    response: Option<&'static limine::FramebufferResponse>,
-) -> Option<FramebufferInfo> {
-    let response = response?;
-    if response.framebuffer_count == 0 || response.framebuffers.is_null() {
+fn first_framebuffer(response: Option<&limine::FramebufferResponse>) -> Option<FramebufferInfo> {
+    bootinfo_marker("[fb] enter\r\n");
+    let Some(response) = response else {
+        bootinfo_marker("[fb] response missing\r\n");
+        return None;
+    };
+
+    let framebuffer_count = response.framebuffer_count;
+    bootinfo_marker("[fb] framebuffer_count read\r\n");
+    if framebuffer_count == 0 {
         return None;
     }
 
-    let framebuffer_ptr = unsafe { response.framebuffers.read() };
+    let framebuffers = response.framebuffers;
+    if framebuffers.is_null() {
+        bootinfo_marker("[fb] framebuffers pointer null\r\n");
+        return None;
+    }
+    if !is_aligned(framebuffers) {
+        bootinfo_marker("[fb] framebuffers pointer unaligned\r\n");
+        return None;
+    }
+
+    let framebuffer_ptr = unsafe { framebuffers.read() };
+    bootinfo_marker("[fb] first framebuffer pointer read\r\n");
+    if framebuffer_ptr.is_null() || !is_aligned(framebuffer_ptr) {
+        return None;
+    }
+
     let framebuffer: &Framebuffer = unsafe { framebuffer_ptr.as_ref()? };
-    Some(FramebufferInfo {
+    bootinfo_marker("[fb] framebuffer ref acquired\r\n");
+    let info = FramebufferInfo {
         address: VirtualAddress(framebuffer.address as u64),
         width: framebuffer.width,
         height: framebuffer.height,
@@ -412,7 +550,9 @@ fn first_framebuffer(
         green_mask_shift: framebuffer.green_mask_shift,
         blue_mask_size: framebuffer.blue_mask_size,
         blue_mask_shift: framebuffer.blue_mask_shift,
-    })
+    };
+    bootinfo_marker("[fb] framebuffer info return\r\n");
+    Some(info)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -529,5 +669,52 @@ mod tests {
     fn limine_base_revision_helper_reflects_boot_protocol_field() {
         assert!(boot_info_with_limine_base_revision(true).limine_base_revision_supported());
         assert!(!boot_info_with_limine_base_revision(false).limine_base_revision_supported());
+    }
+
+    #[test]
+    fn boot_string_from_cstr_null_pointer_returns_empty() {
+        let boot_string = BootString::from_cstr(core::ptr::null());
+        assert_eq!(boot_string, BootString::empty());
+        assert_eq!(boot_string.as_bytes(), b"");
+    }
+
+    #[test]
+    fn boot_string_bounded_scan_stops_at_nul() {
+        static VALUE: &[u8] = b"Mirage\0ignored";
+        let boot_string = BootString::from_cstr(VALUE.as_ptr());
+        assert_eq!(boot_string.as_bytes(), b"Mirage");
+    }
+
+    #[test]
+    fn boot_modules_empty_construction() {
+        assert!(BootModules::empty().is_empty());
+        assert!(BootModules::from_limine_response(None).is_empty());
+    }
+
+    #[test]
+    fn memory_map_empty_construction() {
+        assert!(MemoryMap::empty().is_empty());
+        assert_eq!(MemoryMap::from_limine_response(None), None);
+    }
+
+    #[test]
+    fn memory_map_entry_out_of_bounds_returns_none() {
+        let entry = LimineMemoryMapEntry {
+            base: 0x1000,
+            length: 0x2000,
+            entry_type: 0,
+        };
+        let entry_ptrs = [&entry as *const LimineMemoryMapEntry];
+        let map = MemoryMap {
+            entries: entry_ptrs.as_ptr(),
+            entry_count: 1,
+        };
+
+        assert_eq!(map.entry(1), None);
+    }
+
+    #[test]
+    fn first_framebuffer_missing_response_returns_none() {
+        assert_eq!(first_framebuffer(None), None);
     }
 }
