@@ -342,10 +342,110 @@ fn configure_cpu_modes() {
 }
 
 fn setup_memory_layout(boot_info: &BootInfo) {
+    validate_boot_memory_handoff(boot_info);
+
     paging::initialize(boot_info);
     memory::initialize_from_boot_info(boot_info);
     crate::kprintln!("memory map parsed");
     crate::kprintln!("memory initialized");
+    print_early_memory_diagnostics(boot_info);
+}
+
+fn validate_boot_memory_handoff(boot_info: &BootInfo) {
+    let mut fatal = false;
+
+    if boot_info.memory_map.is_none() {
+        crate::kprintln!("FATAL: boot memory map is missing; cannot initialize physical memory");
+        fatal = true;
+    }
+
+    if boot_info.hhdm_offset.is_none() {
+        crate::kprintln!("FATAL: HHDM offset is missing; cannot translate bootloader mappings");
+        fatal = true;
+    }
+
+    if fatal {
+        crate::kprintln!("FATAL: Mirage requires a complete Limine memory handoff; halting");
+        panic_halt();
+    }
+}
+
+fn print_early_memory_diagnostics(boot_info: &BootInfo) {
+    let translator = paging::AddressTranslator::new(boot_info);
+    let physical = memory::physical_stats();
+    let heap = memory::heap_stats();
+
+    crate::kprintln!("early memory diagnostics:");
+
+    if let Some(hhdm_offset) = boot_info.hhdm_offset {
+        crate::kprintln!("  HHDM offset: {:#018x}", hhdm_offset);
+    }
+
+    if let Some(load) = boot_info.kernel.load_range {
+        let physical_end = load.physical_start.0.saturating_add(load.length);
+        let virtual_end = load.virtual_start.0.saturating_add(load.length);
+        crate::kprintln!(
+            "  kernel physical: {:#018x}..{:#018x}",
+            load.physical_start.0,
+            physical_end
+        );
+        crate::kprintln!(
+            "  kernel virtual:  {:#018x}..{:#018x}",
+            load.virtual_start.0,
+            virtual_end
+        );
+    } else {
+        crate::kprintln!("  kernel load range: unavailable from bootloader");
+    }
+
+    if let Some(framebuffer) = boot_info.framebuffer {
+        let framebuffer_len = framebuffer.pitch.saturating_mul(framebuffer.height);
+        let framebuffer_start = translator.physical_for_virtual(framebuffer.address.0);
+        let framebuffer_end = framebuffer_start.saturating_add(framebuffer_len);
+        crate::kprintln!(
+            "  framebuffer physical: {:#018x}..{:#018x} ({} bytes)",
+            framebuffer_start,
+            framebuffer_end,
+            framebuffer_len
+        );
+    } else {
+        crate::kprintln!("  framebuffer physical: none");
+    }
+
+    crate::kprintln!(
+        "  boot modules: count={}, reserved={} bytes",
+        boot_info.modules.len(),
+        physical.module_bytes
+    );
+    crate::kprintln!(
+        "  allocator metadata physical: {:#018x}..{:#018x} ({} bytes)",
+        physical.metadata_physical_start,
+        physical.metadata_physical_end,
+        physical.metadata_bytes
+    );
+    crate::kprintln!(
+        "  memory bytes: total_map={}, usable={}, reserved={}, bootloader_reclaimable={}, acpi={}, mmio_framebuffer={}, kernel_module={}",
+        physical.total_memory_map_bytes,
+        physical.usable_bytes,
+        physical.reserved_bytes,
+        physical.bootloader_reclaimable_bytes,
+        physical.acpi_bytes,
+        physical.mmio_framebuffer_bytes,
+        physical.kernel_module_bytes
+    );
+    crate::kprintln!(
+        "  frames: total={}, free={}, used={}",
+        physical.total_frame_count,
+        physical.free_frame_count,
+        physical.used_frame_count
+    );
+    crate::kprintln!(
+        "  heap: {:#018x}..{:#018x}, committed={} bytes, reserved={} bytes",
+        heap.base,
+        heap.end,
+        heap.committed_bytes,
+        heap.reserved_bytes
+    );
 }
 
 fn configure_interrupts() {

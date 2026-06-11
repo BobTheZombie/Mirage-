@@ -101,24 +101,36 @@ impl PhysicalRegion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicalMemoryStats {
     /// Original bytes described by the boot memory map, before allocator reservations.
+    pub total_memory_map_bytes: u64,
+    /// Backwards-compatible alias for callers that still display `total_bytes`.
     pub total_bytes: u64,
     /// Original Limine `Usable` bytes. This is not decremented as frames are allocated.
     pub total_usable_bytes: u64,
-    /// Backwards-compatible alias for callers that still display `usable_bytes`.
+    /// Boot memory-map usable bytes. Kept separate from live free-frame counts.
     pub usable_bytes: u64,
     /// Original non-usable/reserved bytes plus explicit kernel/module/MMIO/metadata reservations.
     pub reserved_bytes: u64,
+    pub bootloader_reclaimable_bytes: u64,
     pub acpi_bytes: u64,
+    /// Live MMIO and framebuffer reservation bytes.
+    pub mmio_framebuffer_bytes: u64,
+    /// Backwards-compatible MMIO byte count.
     pub mmio_bytes: u64,
+    /// Live kernel image plus boot module reservation bytes.
+    pub kernel_module_bytes: u64,
     pub kernel_bytes: u64,
     pub module_bytes: u64,
-    pub bootloader_reclaimable_bytes: u64,
+    pub total_frame_count: usize,
+    pub free_frame_count: usize,
+    pub used_frame_count: usize,
     pub frame_count: usize,
     pub free_frames: usize,
     pub used_frames: usize,
     /// Backwards-compatible allocated-frame count.
     pub allocated_frames: usize,
     pub metadata_bytes: usize,
+    pub metadata_physical_start: u64,
+    pub metadata_physical_end: u64,
 }
 
 #[repr(u8)]
@@ -156,20 +168,28 @@ impl<const MAX_REGIONS: usize> PhysicalFrameAllocator<MAX_REGIONS> {
             free_frames: 0,
             used_frames: 0,
             stats: PhysicalMemoryStats {
+                total_memory_map_bytes: 0,
                 total_bytes: 0,
                 total_usable_bytes: 0,
                 usable_bytes: 0,
                 reserved_bytes: 0,
+                bootloader_reclaimable_bytes: 0,
                 acpi_bytes: 0,
+                mmio_framebuffer_bytes: 0,
                 mmio_bytes: 0,
+                kernel_module_bytes: 0,
                 kernel_bytes: 0,
                 module_bytes: 0,
-                bootloader_reclaimable_bytes: 0,
+                total_frame_count: 0,
+                free_frame_count: 0,
+                used_frame_count: 0,
                 frame_count: 0,
                 free_frames: 0,
                 used_frames: 0,
                 allocated_frames: 0,
                 metadata_bytes: 0,
+                metadata_physical_start: 0,
+                metadata_physical_end: 0,
             },
             initialized: false,
         }
@@ -411,7 +431,9 @@ impl<const MAX_REGIONS: usize> PhysicalFrameAllocator<MAX_REGIONS> {
     }
 
     fn account_original_region(&mut self, kind: PhysicalRegionKind, length: u64) {
-        self.stats.total_bytes = self.stats.total_bytes.saturating_add(length);
+        self.stats.total_memory_map_bytes =
+            self.stats.total_memory_map_bytes.saturating_add(length);
+        self.stats.total_bytes = self.stats.total_memory_map_bytes;
         match kind {
             PhysicalRegionKind::Usable => {
                 self.stats.total_usable_bytes =
@@ -575,17 +597,29 @@ impl<const MAX_REGIONS: usize> PhysicalFrameAllocator<MAX_REGIONS> {
         }
         self.free_frames = free;
         self.used_frames = used;
+        self.stats.total_frame_count = self.frame_count;
+        self.stats.free_frame_count = self.free_frames;
+        self.stats.used_frame_count = self.used_frames;
         self.stats.frame_count = self.frame_count;
         self.stats.free_frames = self.free_frames;
         self.stats.used_frames = self.used_frames;
         self.stats.allocated_frames = self.used_frames;
         self.stats.metadata_bytes = self.metadata_bytes;
+        self.stats.metadata_physical_start = self.metadata_physical_start;
+        self.stats.metadata_physical_end = self
+            .metadata_physical_start
+            .saturating_add(self.metadata_bytes as u64);
         self.stats.reserved_bytes = self
             .live_bytes_for(PhysicalRegionKind::Reserved)
             .saturating_add(self.live_bytes_for(PhysicalRegionKind::AllocatorMetadata));
         self.stats.kernel_bytes = self.live_bytes_for(PhysicalRegionKind::Kernel);
         self.stats.module_bytes = self.live_bytes_for(PhysicalRegionKind::Module);
+        self.stats.kernel_module_bytes = self
+            .stats
+            .kernel_bytes
+            .saturating_add(self.stats.module_bytes);
         self.stats.mmio_bytes = self.live_bytes_for(PhysicalRegionKind::Mmio);
+        self.stats.mmio_framebuffer_bytes = self.stats.mmio_bytes;
         self.stats.acpi_bytes = self.live_bytes_for(PhysicalRegionKind::Acpi);
         self.stats.bootloader_reclaimable_bytes =
             self.live_bytes_for(PhysicalRegionKind::BootloaderReclaimable);
