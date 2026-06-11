@@ -80,6 +80,7 @@ impl MemoryProtection {
 }
 
 pub mod frame_allocator;
+pub mod heap;
 
 pub use frame_allocator::{
     MemoryError, PhysFrame, PhysicalFrameAllocator, PhysicalMemoryStats, PhysicalRegion,
@@ -93,7 +94,9 @@ enum BackingStore {
         base: usize,
         capacity: usize,
         committed: usize,
+        frames: usize,
     },
+    Disabled,
 }
 
 impl BackingStore {
@@ -101,6 +104,7 @@ impl BackingStore {
         match self {
             BackingStore::Static => HEAP_SIZE,
             BackingStore::Virtual { capacity, .. } => capacity,
+            BackingStore::Disabled => 0,
         }
     }
 
@@ -108,6 +112,7 @@ impl BackingStore {
         match self {
             BackingStore::Static => static_heap as usize,
             BackingStore::Virtual { base, .. } => base,
+            BackingStore::Disabled => 0,
         }
     }
 }
@@ -188,15 +193,32 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
         }
     }
 
-    pub fn promote_to_virtual_heap(&mut self, base: usize, capacity: usize) {
-        if self.allocated_bytes != 0 || self.bump_offset != 0 || capacity == 0 {
+    pub fn promote_to_virtual_heap(
+        &mut self,
+        base: usize,
+        capacity: usize,
+        committed: usize,
+        frames: usize,
+    ) {
+        if self.allocated_bytes != 0
+            || self.bump_offset != 0
+            || capacity == 0
+            || committed > capacity
+        {
             return;
         }
         self.backing = BackingStore::Virtual {
             base,
             capacity,
-            committed: 0,
+            committed,
+            frames,
         };
+    }
+
+    pub fn disable_static_heap(&mut self) {
+        if matches!(self.backing, BackingStore::Static) {
+            self.backing = BackingStore::Disabled;
+        }
     }
 
     fn ensure_backing(
@@ -207,29 +229,25 @@ impl<const HEAP_SIZE: usize, const MAX_AREAS: usize> MemoryManager<HEAP_SIZE, MA
     ) -> Option<()> {
         match self.backing {
             BackingStore::Static => Some(()),
+            BackingStore::Disabled => None,
             BackingStore::Virtual {
                 base,
                 capacity,
                 committed,
+                frames: _,
             } => {
                 let required = offset.checked_add(size)?;
                 if required > capacity {
                     return None;
                 }
                 let target = self.align_up(required, PAGE_SIZE)?;
-                let mut next = committed;
-                while next < target {
-                    let frame = allocate_physical_frame()?;
-                    if paging::map_kernel_page(frame, (base + next) as u64, protection).is_none() {
-                        deallocate_physical_frame(frame);
-                        return None;
-                    }
-                    next += PAGE_SIZE;
-                }
+                let layout =
+                    heap::grow_committed(base, capacity, committed, target, protection).ok()?;
                 self.backing = BackingStore::Virtual {
                     base,
                     capacity,
-                    committed: target,
+                    committed: layout.committed_bytes,
+                    frames: layout.frame_count,
                 };
                 Some(())
             }
@@ -787,15 +805,50 @@ impl AddressSpaceTable {
 static ADDRESS_SPACES: SpinLock<AddressSpaceTable> = SpinLock::new(AddressSpaceTable::new());
 
 pub fn initialize_from_boot_info(boot_info: &BootInfo) {
-    if PHYSICAL_ALLOCATOR
-        .lock()
-        .ingest_boot_info(boot_info)
-        .is_ok()
-    {
-        MEMORY_MANAGER
-            .lock()
-            .promote_to_virtual_heap(EARLY_HEAP_BASE, EARLY_HEAP_BYTES);
+    match PHYSICAL_ALLOCATOR.lock().ingest_boot_info(boot_info) {
+        Ok(()) => {
+            crate::kprintln!("physical frame allocator initialized");
+        }
+        Err(error) => {
+            crate::kprintln!(
+                "physical frame allocator initialization failed: {:?}",
+                error
+            );
+            MEMORY_MANAGER.lock().disable_static_heap();
+            return;
+        }
     }
+
+    match paging::enable_frame_backed_mapping(boot_info) {
+        Ok(()) => {
+            crate::kprintln!("frame-backed kernel mapper initialized");
+        }
+        Err(error) => {
+            crate::kprintln!(
+                "frame-backed kernel mapper initialization failed: {:?}",
+                error
+            );
+            MEMORY_MANAGER.lock().disable_static_heap();
+            return;
+        }
+    }
+
+    match heap::initialize() {
+        Ok(layout) => MEMORY_MANAGER.lock().promote_to_virtual_heap(
+            layout.base,
+            layout.reserved_bytes,
+            layout.committed_bytes,
+            layout.frame_count,
+        ),
+        Err(error) => {
+            crate::kprintln!("kernel heap initialization failed: {:?}", error);
+            MEMORY_MANAGER.lock().disable_static_heap();
+        }
+    }
+}
+
+pub fn physical_allocator_initialized() -> bool {
+    PHYSICAL_ALLOCATOR.lock().initialized()
 }
 
 pub fn allocate_frame() -> Result<PhysFrame, MemoryError> {
