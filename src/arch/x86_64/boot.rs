@@ -26,8 +26,8 @@ _start:
     and rsp, -16
     xor rbp, rbp
 
-    lea rdi, [rip + .Lmirage_start_msg]
-    mov esi, .Lmirage_start_msg_len
+    lea rdi, [rip + .Lmirage_boot_marker_01]
+    mov esi, .Lmirage_boot_marker_01_len
     call __mirage_early_com1_write_line_raw
 
     call __mirage_x86_64_bootstrap
@@ -35,9 +35,9 @@ _start:
     hlt
     jmp .Lmirage_boot_hang
     .size _start, . - _start
-.Lmirage_start_msg:
-    .ascii "MIRAGE: entered _start"
-.set .Lmirage_start_msg_len, . - .Lmirage_start_msg
+.Lmirage_boot_marker_01:
+    .ascii "[MIRAGE BOOT 01]"
+.set .Lmirage_boot_marker_01_len, . - .Lmirage_boot_marker_01
 "#
 );
 
@@ -64,21 +64,19 @@ extern "Rust" {
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 #[no_mangle]
 pub unsafe extern "C" fn __mirage_x86_64_bootstrap() -> ! {
-    __mirage_early_com1_write_line_raw(
-        b"MIRAGE: entered bootstrap before .bss clear".as_ptr(),
-        b"MIRAGE: entered bootstrap before .bss clear".len(),
-    );
+    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 02]".as_ptr(), b"[MIRAGE BOOT 02]".len());
 
     clear_bss();
-    crate::arch::x86_64::early_console::write_fmt(format_args!(
-        "MIRAGE: .bss cleared; normal early console online\n"
-    ));
+    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 03]".as_ptr(), b"[MIRAGE BOOT 03]".len());
 
     let sections = KernelSections::from_linker();
     let raw_boot = limine::snapshot();
-    let boot_info = BootInfo::from_limine(raw_boot, sections);
+    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 04]".as_ptr(), b"[MIRAGE BOOT 04]".len());
 
-    crate::arch::x86_64::early_console::write_fmt(format_args!("MIRAGE: calling kernel_main\n"));
+    let boot_info = BootInfo::from_limine(raw_boot, sections);
+    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 05]".as_ptr(), b"[MIRAGE BOOT 05]".len());
+
+    __mirage_early_com1_write_line_raw(b"[MIRAGE BOOT 06]".as_ptr(), b"[MIRAGE BOOT 06]".len());
     kernel_main(boot_info)
 }
 

@@ -19,6 +19,9 @@ use mirage::supervisor::Supervisor;
 
 #[no_mangle]
 pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
+    unsafe {
+        mirage::arch::x86_64::early_debug::boot_marker(7);
+    }
     mirage::kprintln!("Mirage kernel booting...");
     let mut boot_status = BootStatus::new();
     if !boot_info.limine_base_revision_supported() {
@@ -26,7 +29,13 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         mirage::arch::x86_64::panic_halt();
     }
     mirage::kprintln!("architecture init starting");
+    unsafe {
+        mirage::arch::x86_64::early_debug::boot_marker(8);
+    }
     x86_64::init_architecture(&boot_info);
+    unsafe {
+        mirage::arch::x86_64::early_debug::boot_marker(9);
+    }
     boot_status.mark(BootStage::Architecture);
 
     let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
