@@ -51,8 +51,8 @@ pub unsafe fn com1_write_str(s: &str) {
 
 /// Emit a compact boot progress marker to COM1.
 ///
-/// The marker format is intentionally fixed and allocation-free: `M`, the raw
-/// marker byte, then `\r\n`.
+/// The marker format is intentionally fixed and allocation-free:
+/// `[MIRAGE BOOT NN]\r\n`.
 ///
 /// # Safety
 ///
@@ -60,8 +60,13 @@ pub unsafe fn com1_write_str(s: &str) {
 /// privilege level where direct access to the legacy COM1 UART ports is allowed.
 pub unsafe fn boot_marker(id: u8) {
     com1_init();
-    com1_write_byte_initialised(b'M');
-    com1_write_byte_initialised(id);
+
+    for byte in b"[MIRAGE BOOT " {
+        com1_write_byte_initialised(*byte);
+    }
+    com1_write_byte_initialised(b'0' + ((id / 10) % 10));
+    com1_write_byte_initialised(b'0' + (id % 10));
+    com1_write_byte_initialised(b']');
     com1_write_byte_initialised(b'\r');
     com1_write_byte_initialised(b'\n');
 }
