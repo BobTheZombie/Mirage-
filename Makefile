@@ -5,23 +5,81 @@ RUSTC_BOOTSTRAP ?= 1
 LIMINE_VERSION ?= v12.3.2
 LIMINE_VERSION_NUMBER := $(patsubst v%,%,$(LIMINE_VERSION))
 LIMINE_URL := https://github.com/limine-bootloader/limine/releases/download/$(LIMINE_VERSION)/limine-binary.tar.xz
+BUILD_DIR := build
+CONFIG_SCHEMA := config/MirageConfig.toml
+CONFIG_FILE ?= mirage.conf
+CONFIG_OUT_DIR := target/mirage/config
+CONFIG_RS := $(CONFIG_OUT_DIR)/generated.rs
+CONFIG_CARGO_ENV := $(CONFIG_OUT_DIR)/cargo_features.env
+CONFIG_BUILD_ENV := $(CONFIG_OUT_DIR)/build_flags.env
+MIRAGECONFIG := $(CARGO) run -q -p mirageconfig --
 TARGET_JSON_SOURCE := targets/x86_64-mirage.json
 TARGET_JSON = $(BUILD_DIR)/targets/x86_64-mirage.json
 CARGO_JSON_TARGET_SPEC_FLAG := $(shell RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) -Z help 2>/dev/null | sed -n "s/.*-Z json-target-spec.*/-Z json-target-spec/p")
 UNSTABLE_OPTIONS_FLAG := -Z unstable-options
 KERNEL_ELF := target/x86_64-mirage/release/mirage-kernel
-KERNEL_FEATURES ?= hw-framebuffer full-boot
-QEMU_FEATURES ?= hw-framebuffer full-boot
+# Backward-compatible manual feature variables. Leave empty to use mirage.conf.
+KERNEL_FEATURES ?=
+QEMU_FEATURES ?=
 QEMU_MINIMAL_FEATURES ?= hw-framebuffer
-BUILD_DIR := build
 ISO_ROOT := $(BUILD_DIR)/iso_root
 ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all kernel qemu-kernel image iso qemu qemu-headless qemu-debug qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean limine rust-src check-rust-src target-json FORCE
+.PHONY: all build kernel qemu-kernel image iso qemu qemu-headless qemu-debug qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
 
 all: iso
+
+build: kernel
+
+mirageconfig:
+	$(MIRAGECONFIG) --menu --config $(CONFIG_FILE) --generate
+
+defconfig:
+	$(MIRAGECONFIG) --defconfig --config $(CONFIG_FILE) --generate
+
+oldconfig:
+	$(MIRAGECONFIG) --oldconfig --config $(CONFIG_FILE) --generate
+
+savedefconfig:
+	$(MIRAGECONFIG) --savedefconfig --config $(CONFIG_FILE) --output mirage.defconfig
+
+listconfig:
+	$(MIRAGECONFIG) --list
+
+checkconfig: config-check
+
+config-generate: $(CONFIG_RS) $(CONFIG_CARGO_ENV) $(CONFIG_BUILD_ENV)
+
+$(CONFIG_RS) $(CONFIG_CARGO_ENV) $(CONFIG_BUILD_ENV): $(CONFIG_SCHEMA) FORCE
+	@set -eu; \
+	if [ ! -f "$(CONFIG_FILE)" ]; then \
+		echo "$(CONFIG_FILE) is missing; creating default configuration"; \
+		$(MAKE) defconfig; \
+	else \
+		$(MIRAGECONFIG) --oldconfig --config $(CONFIG_FILE) --generate; \
+	fi
+
+config-check: config-generate
+	$(MIRAGECONFIG) --check --config $(CONFIG_FILE) --generate
+
+config-print: config-generate
+	@set -eu; \
+	printf 'Config file: %s\n' "$(CONFIG_FILE)"; \
+	printf 'Generated artifacts: %s\n' "$(CONFIG_OUT_DIR)"; \
+	if [ -n "$${MIRAGE_FEATURES:-}" ]; then \
+		echo "Using manual MIRAGE_FEATURES override instead of mirage.conf"; \
+		printf 'Cargo features: %s\n' "$$MIRAGE_FEATURES"; \
+	else \
+		. "$(CONFIG_CARGO_ENV)"; \
+		printf 'Cargo features: %s\n' "$$MIRAGE_FEATURES"; \
+	fi; \
+	. "$(CONFIG_BUILD_ENV)"; \
+	printf 'QEMU display args: %s\n' "$${MIRAGE_QEMU_DISPLAY_ARGS:-}"; \
+	printf 'QEMU serial args: %s\n' "$${MIRAGE_QEMU_SERIAL_ARGS:-}"; \
+	printf 'QEMU debug args: %s\n' "$${MIRAGE_QEMU_DEBUG_ARGS:-}"; \
+	printf 'Kernel cmdline: %s\n' "$${MIRAGE_KERNEL_CMDLINE:-}"
 
 rust-src:
 	@set -eu; \
@@ -64,18 +122,42 @@ $(TARGET_JSON): $(TARGET_JSON_SOURCE) FORCE
 		mv "$@.tmp.json" "$@"; \
 	fi
 
-kernel: rust-src check-rust-src $(TARGET_JSON)
-	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --no-default-features --features "$(KERNEL_FEATURES)" --bin mirage-kernel \
+kernel: config-generate rust-src check-rust-src $(TARGET_JSON)
+	@set -eu; \
+	if [ -n "$${MIRAGE_FEATURES:-}" ]; then \
+		echo "Using manual MIRAGE_FEATURES override instead of mirage.conf"; \
+		features="$$MIRAGE_FEATURES"; \
+	elif [ -n "$(KERNEL_FEATURES)" ]; then \
+		echo "Using legacy KERNEL_FEATURES override instead of mirage.conf"; \
+		features="$(KERNEL_FEATURES)"; \
+	elif [ -f "$(CONFIG_CARGO_ENV)" ]; then \
+		. "$(CONFIG_CARGO_ENV)"; \
+		features="$$MIRAGE_FEATURES"; \
+	else \
+		features=""; \
+	fi; \
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --no-default-features --features "$$features" --bin mirage-kernel \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
 		$(UNSTABLE_OPTIONS_FLAG) \
 		-Z build-std=core,alloc,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
 
-# QEMU image builds use the fuller boot feature set by default. For a minimal
-# framebuffer-only image, run: QEMU_FEATURES=hw-framebuffer make image
-qemu-kernel: rust-src check-rust-src $(TARGET_JSON)
-	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --no-default-features --features "$(QEMU_FEATURES)" --bin mirage-kernel \
+qemu-kernel: config-generate rust-src check-rust-src $(TARGET_JSON)
+	@set -eu; \
+	if [ -n "$${MIRAGE_FEATURES:-}" ]; then \
+		echo "Using manual MIRAGE_FEATURES override instead of mirage.conf"; \
+		features="$$MIRAGE_FEATURES"; \
+	elif [ -n "$(QEMU_FEATURES)" ]; then \
+		echo "Using legacy QEMU_FEATURES override instead of mirage.conf"; \
+		features="$(QEMU_FEATURES)"; \
+	elif [ -f "$(CONFIG_CARGO_ENV)" ]; then \
+		. "$(CONFIG_CARGO_ENV)"; \
+		features="$$MIRAGE_FEATURES"; \
+	else \
+		features=""; \
+	fi; \
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --no-default-features --features "$$features" --bin mirage-kernel \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
 		$(UNSTABLE_OPTIONS_FLAG) \
@@ -91,9 +173,9 @@ $(LIMINE_BIN):
 	tar -xf $(BUILD_DIR)/limine-binary.tar.xz -C $(LIMINE_DIR) --strip-components=1
 	$(MAKE) -C $(LIMINE_DIR)
 
-image: iso
+image: config-generate iso
 
-iso: qemu-kernel limine
+iso: config-generate qemu-kernel limine
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/limine $(ISO_ROOT)/EFI/BOOT
 	cp $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
@@ -110,13 +192,13 @@ iso: qemu-kernel limine
 		-o $(ISO_IMAGE) $(ISO_ROOT)
 	$(LIMINE_BIN) bios-install $(ISO_IMAGE)
 
-qemu: image
+qemu: config-generate image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
-qemu-headless: image
+qemu-headless: config-generate image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu-headless.sh
 
-qemu-debug: image
+qemu-debug: config-generate image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu-debug.sh
 
 qemu-check: tools/check-qemu-image.sh
@@ -133,4 +215,12 @@ smoke-x86_64-boot: scripts/x86_64-boot-smoke.sh
 
 clean:
 	$(CARGO) clean
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(CONFIG_OUT_DIR)
+
+distclean: clean
+	@if [ "$(CONFIG_CLEAN)" = "1" ]; then \
+		rm -f $(CONFIG_FILE); \
+		echo "Removed $(CONFIG_FILE) because CONFIG_CLEAN=1"; \
+	else \
+		echo "Preserved $(CONFIG_FILE) (use CONFIG_CLEAN=1 to remove it)"; \
+	fi

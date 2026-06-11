@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "tools/mirageconfig",
     "crates/mirage-ahci",
     "crates/mirage-amd-chipset",
     "crates/mirage-amd-iommu",

@@ -13,6 +13,20 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || error "missing required command
 
 cd "$repo_root"
 
+config_flags="$repo_root/target/mirage/config/build_flags.env"
+manual_qemu_debug_args=${MIRAGE_QEMU_DEBUG_ARGS+x}
+manual_qemu_debug_value=${MIRAGE_QEMU_DEBUG_ARGS:-}
+if [ -f "$config_flags" ]; then
+    # shellcheck disable=SC1090
+    . "$config_flags"
+fi
+if [ "$manual_qemu_debug_args" = x ]; then
+    MIRAGE_QEMU_DEBUG_ARGS=$manual_qemu_debug_value
+fi
+MIRAGE_QEMU_DISPLAY_ARGS=${MIRAGE_QEMU_DISPLAY_ARGS:-}
+MIRAGE_QEMU_SERIAL_ARGS=${MIRAGE_QEMU_SERIAL_ARGS-"-serial stdio"}
+MIRAGE_QEMU_DEBUG_ARGS=${MIRAGE_QEMU_DEBUG_ARGS:-}
+
 iso_image=${MIRAGE_ISO_IMAGE:-build/mirage.iso}
 reuse_image=${MIRAGE_REUSE_IMAGE:-0}
 
@@ -132,7 +146,9 @@ exec qemu-system-x86_64 \
     $accel_args \
     $firmware_args \
     -cdrom "$iso_image" \
-    -serial stdio \
+    ${MIRAGE_QEMU_DISPLAY_ARGS:-} \
+    ${MIRAGE_QEMU_SERIAL_ARGS:-} \
+    ${MIRAGE_QEMU_DEBUG_ARGS:-} \
     -no-reboot \
     -no-shutdown \
     "$@"
