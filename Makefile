@@ -219,11 +219,11 @@ qemu-seed-image: seed-rs-kernel limine
 
 qemu-seed: qemu-seed-image
 	./tools/verify-seed-rs-elf.sh $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
-	qemu-system-x86_64 -machine q35 -m 512M -serial stdio -no-reboot -no-shutdown -d int,cpu_reset -D build/qemu.log -cdrom $(ISO_IMAGE)
+	qemu-system-x86_64 -machine q35 -m 512M -serial stdio -display none -no-reboot -no-shutdown -d int,cpu_reset -D build/qemu.log -cdrom $(ISO_IMAGE)
 
 qemu-seed-debug: qemu-seed-image
 	./tools/verify-seed-rs-elf.sh $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
-	qemu-system-x86_64 -machine q35 -m 512M -serial stdio -no-reboot -no-shutdown -d int,cpu_reset -D build/qemu.log -S -s -cdrom $(ISO_IMAGE)
+	qemu-system-x86_64 -machine q35 -m 512M -serial stdio -display none -no-reboot -no-shutdown -d int,cpu_reset -D build/qemu.log -S -s -cdrom $(ISO_IMAGE)
 
 qemu: config-generate image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh

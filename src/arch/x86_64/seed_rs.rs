@@ -49,6 +49,7 @@ pub unsafe fn seed_com1_init() {
     // disabled at the UART and CPU interrupt delivery is disabled until the
     // normal architecture path chooses to enable it.
     asm!("cli", options(nomem, nostack, preserves_flags));
+    seed_enable_sse();
 
     outb(COM1_INTERRUPT_ENABLE, 0x00);
     outb(COM1_LINE_CONTROL, 0x80);
@@ -61,6 +62,20 @@ pub unsafe fn seed_com1_init() {
     outb(COM1_FIFO_CONTROL, 0xc7);
     // Data terminal ready, request to send, and OUT2 for PC-compatible UARTs.
     outb(COM1_MODEM_CONTROL, 0x0b);
+}
+
+/// Enable SSE/SSE2 before optimized Rust code can emit XMM moves in the seed path.
+unsafe fn seed_enable_sse() {
+    let mut cr0: u64;
+    asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+    cr0 &= !(1 << 2);
+    cr0 |= 1 << 1;
+    asm!("mov cr0, {}", in(reg) cr0, options(nomem, nostack, preserves_flags));
+
+    let mut cr4: u64;
+    asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+    cr4 |= (1 << 9) | (1 << 10);
+    asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
 }
 
 /// Write one byte to COM1 using only raw x86_64 port I/O.
