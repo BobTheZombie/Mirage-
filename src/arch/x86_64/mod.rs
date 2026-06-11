@@ -19,6 +19,7 @@ pub mod boot;
 pub mod clock;
 pub mod device;
 pub mod early_console;
+pub mod early_debug;
 #[cfg(feature = "hw-framebuffer")]
 pub mod framebuffer_console;
 pub mod gdt;
