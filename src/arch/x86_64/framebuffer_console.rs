@@ -12,6 +12,31 @@ use crate::kernel::sync::SpinLock;
 
 const DEFAULT_FOREGROUND: (u8, u8, u8) = (0xff, 0xff, 0xff);
 const DEFAULT_BACKGROUND: (u8, u8, u8) = (0x00, 0x00, 0x00);
+
+/// RGB color used by the early framebuffer text renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RgbColor {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+impl RgbColor {
+    pub const WHITE: Self = Self::new(0xff, 0xff, 0xff);
+    pub const GRAY: Self = Self::new(0xb0, 0xb0, 0xb0);
+    pub const GREEN: Self = Self::new(0x40, 0xff, 0x40);
+    pub const YELLOW: Self = Self::new(0xff, 0xd7, 0x40);
+    pub const RED: Self = Self::new(0xff, 0x40, 0x40);
+    pub const CYAN: Self = Self::new(0x40, 0xff, 0xff);
+
+    pub const fn new(red: u8, green: u8, blue: u8) -> Self {
+        Self { red, green, blue }
+    }
+
+    const fn tuple(self) -> (u8, u8, u8) {
+        (self.red, self.green, self.blue)
+    }
+}
 const CELL_WIDTH: usize = 8;
 const CELL_HEIGHT: usize = 8;
 const TAB_WIDTH: usize = 4;
@@ -53,8 +78,39 @@ pub fn early_print(args: fmt::Arguments<'_>) {
 /// This is intentionally independent from the serial console path: an absent or
 /// invalid framebuffer makes this a no-op and never prevents serial diagnostics.
 pub fn write_str(text: &str) {
+    write_colored(text, RgbColor::WHITE);
+}
+
+/// Write UTF-8 text bytes using the supplied foreground color.
+pub fn write_colored(text: &str, foreground: RgbColor) {
     if let Some(console) = CONSOLE.lock().as_mut() {
+        let previous = console.foreground;
+        console.foreground = foreground.tuple();
         let _ = console.write_str(text);
+        console.foreground = previous;
+    }
+}
+
+/// Write an aligned status line with a color selected from a boot state.
+pub fn write_status(label: &str, value: &str, state: crate::kernel::boot_status::BootState) {
+    let color = match state {
+        crate::kernel::boot_status::BootState::Ok
+        | crate::kernel::boot_status::BootState::Online
+        | crate::kernel::boot_status::BootState::Enabled => RgbColor::GREEN,
+        crate::kernel::boot_status::BootState::Pending
+        | crate::kernel::boot_status::BootState::Skipped => RgbColor::YELLOW,
+        crate::kernel::boot_status::BootState::Failed => RgbColor::RED,
+    };
+
+    if let Some(console) = CONSOLE.lock().as_mut() {
+        let previous = console.foreground;
+        console.foreground = RgbColor::GRAY.tuple();
+        let _ = write!(console, "{:<12} : ", label);
+        console.foreground = color.tuple();
+        let _ = console.write_str(value);
+        console.foreground = RgbColor::WHITE.tuple();
+        let _ = console.write_str("\n");
+        console.foreground = previous;
     }
 }
 
