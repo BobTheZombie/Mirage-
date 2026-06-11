@@ -922,3 +922,7 @@ fn user_flags_from_protection(protection: MemoryProtection) -> MappingFlags {
 pub fn installed() -> bool {
     INSTALLED.load(Ordering::SeqCst)
 }
+
+pub fn frame_backed_mapping_enabled() -> bool {
+    FRAME_ALLOCATOR_READY.load(Ordering::SeqCst)
+}
