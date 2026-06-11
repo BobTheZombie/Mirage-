@@ -9,6 +9,7 @@ use crate::arch::x86_64::boot::BootInfo;
 use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
 use crate::kernel::cpu::MAX_CORES;
 use crate::kernel::device::{DeviceDriver, MirageInputEvent};
+#[cfg(not(feature = "emergency-boot"))]
 use crate::kernel::memory;
 use crate::kernel::syscall::{SyscallFrame, SYSCALL_MAX_ARGS};
 use crate::kernel::thread::{
@@ -83,23 +84,37 @@ static mut PER_CPU: [PerCpuState; MAX_CORES] = [PerCpuState::new(); MAX_CORES];
 
 /// Perform one-time CPU and memory initialisation.
 ///
-/// Install descriptor tables, early paging, and interrupt controller state.
+/// Normal boots install descriptor tables, early paging, framebuffer console
+/// state, and interrupt controller state. Emergency boots deliberately stop
+/// after raw serial diagnostics so the halt path cannot reach heap, paging,
+/// framebuffer, or interrupt-controller setup before those subsystems are safe.
 pub fn init_architecture(boot_info: &BootInfo) {
     if INITIALISED.swap(true, Ordering::SeqCst) {
         return;
     }
 
     uart16550::init_early_serial();
-    crate::kprintln!("serial initialized");
 
-    configure_cpu_modes();
-    initialize_per_cpu_state();
-    setup_memory_layout(boot_info);
-    initialize_framebuffer_console(boot_info);
-    configure_interrupts();
+    #[cfg(feature = "emergency-boot")]
+    {
+        let _ = boot_info;
+        unsafe {
+            early_debug::com1_write_str("serial initialized\r\n");
+        }
+    }
+
+    #[cfg(not(feature = "emergency-boot"))]
+    {
+        crate::kprintln!("serial initialized");
+        configure_cpu_modes();
+        initialize_per_cpu_state();
+        setup_memory_layout(boot_info);
+        initialize_framebuffer_console(boot_info);
+        configure_interrupts();
+    }
 }
 
-#[cfg(feature = "hw-framebuffer")]
+#[cfg(all(not(feature = "emergency-boot"), feature = "hw-framebuffer"))]
 fn initialize_framebuffer_console(boot_info: &BootInfo) {
     match framebuffer_console::init_from_boot_info(boot_info) {
         Ok(Some(framebuffer)) => {
@@ -115,7 +130,7 @@ fn initialize_framebuffer_console(boot_info: &BootInfo) {
     }
 }
 
-#[cfg(not(feature = "hw-framebuffer"))]
+#[cfg(all(not(feature = "emergency-boot"), not(feature = "hw-framebuffer")))]
 fn initialize_framebuffer_console(_boot_info: &BootInfo) {
     crate::kprintln!("framebuffer unavailable; serial console only");
 }
@@ -227,6 +242,7 @@ pub fn per_cpu_state_ptr(core_index: usize) -> u64 {
     unsafe { core::ptr::addr_of!(PER_CPU[index]) as u64 }
 }
 
+#[cfg(not(feature = "emergency-boot"))]
 fn initialize_per_cpu_state() {
     let mut idx = 0usize;
     while idx < MAX_CORES {
@@ -336,12 +352,14 @@ pub fn panic_halt() -> ! {
     interrupts::halt_forever()
 }
 
+#[cfg(not(feature = "emergency-boot"))]
 fn configure_cpu_modes() {
     interrupts::disable();
     gdt::initialize();
     crate::kprintln!("GDT initialized");
 }
 
+#[cfg(not(feature = "emergency-boot"))]
 fn setup_memory_layout(boot_info: &BootInfo) {
     validate_boot_memory_handoff(boot_info);
 
@@ -352,6 +370,7 @@ fn setup_memory_layout(boot_info: &BootInfo) {
     print_early_memory_diagnostics(boot_info);
 }
 
+#[cfg(not(feature = "emergency-boot"))]
 fn validate_boot_memory_handoff(boot_info: &BootInfo) {
     let mut fatal = false;
 
@@ -371,6 +390,7 @@ fn validate_boot_memory_handoff(boot_info: &BootInfo) {
     }
 }
 
+#[cfg(not(feature = "emergency-boot"))]
 fn print_early_memory_diagnostics(boot_info: &BootInfo) {
     let translator = paging::AddressTranslator::new(boot_info);
     let physical = memory::physical_stats();
@@ -449,6 +469,7 @@ fn print_early_memory_diagnostics(boot_info: &BootInfo) {
     );
 }
 
+#[cfg(not(feature = "emergency-boot"))]
 fn configure_interrupts() {
     idt::initialize();
     crate::kprintln!("IDT initialized");
