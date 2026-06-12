@@ -27,6 +27,8 @@ pub const AMD_DISPLAY_VENDOR_ID: PciVendorId = PciVendorId::new(0x1002);
 const CLASS_DISPLAY: u8 = 0x03;
 const CLASS_BRIDGE: u8 = 0x06;
 const CLASS_SYSTEM: u8 = 0x08;
+const CLASS_MULTIMEDIA: u8 = 0x04;
+const CLASS_SERIAL_BUS: u8 = 0x0c;
 
 const SUBCLASS_HOST_BRIDGE: u8 = 0x00;
 const SUBCLASS_ISA_BRIDGE: u8 = 0x01;
@@ -34,6 +36,9 @@ const SUBCLASS_PCI_BRIDGE: u8 = 0x04;
 const SUBCLASS_IOMMU: u8 = 0x06;
 const SUBCLASS_VGA: u8 = 0x00;
 const SUBCLASS_DISPLAY_OTHER: u8 = 0x80;
+const SUBCLASS_AUDIO: u8 = 0x03;
+const SUBCLASS_SMBUS: u8 = 0x05;
+const SUBCLASS_I2C: u8 = 0x80;
 
 /// Mirage-visible chipset service identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -177,6 +182,11 @@ pub enum AmdControllerRole {
     XhciUsb,
     Iommu,
     AmdGpuDisplay,
+    PspSecurityProcessor,
+    SmbusI2c,
+    AudioController,
+    AcpAudioDmic,
+    NvmeStorage,
 }
 
 impl AmdControllerRole {
@@ -186,6 +196,10 @@ impl AmdControllerRole {
             Self::XhciUsb => "usbd.xhci",
             Self::Iommu => "platform.amd-iommu",
             Self::AmdGpuDisplay => "displayd.amdgpu",
+            Self::PspSecurityProcessor => "platform.amd-psp",
+            Self::SmbusI2c => "platform.amd-smbus-i2c",
+            Self::AudioController | Self::AcpAudioDmic => "audiod.amd",
+            Self::NvmeStorage => "storaged.nvme",
         }
     }
 
@@ -195,6 +209,11 @@ impl AmdControllerRole {
             Self::XhciUsb => "mirage.platform.usb.xhci-candidate.v1",
             Self::Iommu => "mirage.platform.iommu.amd-candidate.v1",
             Self::AmdGpuDisplay => "mirage.platform.display.amdgpu-candidate.v1",
+            Self::PspSecurityProcessor => "mirage.platform.security.amd-psp-candidate.v1",
+            Self::SmbusI2c => "mirage.platform.bus.amd-smbus-i2c-candidate.v1",
+            Self::AudioController => "mirage.platform.audio.hda-candidate.v1",
+            Self::AcpAudioDmic => "mirage.platform.audio.amd-acp-dmic-candidate.v1",
+            Self::NvmeStorage => "mirage.platform.storage.nvme-candidate.v1",
         }
     }
 }
@@ -417,6 +436,7 @@ pub struct AmdChipset {
     usb_controllers: Vec<AmdUsbController>,
     iommu_units: Vec<AmdDeviceCandidate>,
     gpu_candidates: Vec<AmdDeviceCandidate>,
+    soc_devices: Vec<AmdDeviceCandidate>,
 }
 
 impl AmdChipset {
@@ -428,6 +448,7 @@ impl AmdChipset {
         let mut usb_controllers = Vec::new();
         let mut iommu_units = Vec::new();
         let mut gpu_candidates = Vec::new();
+        let mut soc_devices = Vec::new();
 
         for device in pci_bus.devices() {
             let function = AmdPciFunction::from_pci_device(device);
@@ -462,9 +483,46 @@ impl AmdChipset {
             }
 
             if is_amd_gpu_device(device) {
-                gpu_candidates.push(AmdDeviceCandidate::new(
+                let candidate = AmdDeviceCandidate::new(function, AmdControllerRole::AmdGpuDisplay);
+                gpu_candidates.push(candidate);
+                soc_devices.push(candidate);
+            }
+
+            if is_amd_chipset_device(device) {
+                if is_psp_security_processor(device) {
+                    soc_devices.push(AmdDeviceCandidate::new(
+                        function,
+                        AmdControllerRole::PspSecurityProcessor,
+                    ));
+                }
+                if is_smbus_or_i2c(device.class_code()) {
+                    soc_devices.push(AmdDeviceCandidate::new(
+                        function,
+                        AmdControllerRole::SmbusI2c,
+                    ));
+                }
+                if is_audio(device.class_code()) {
+                    soc_devices.push(AmdDeviceCandidate::new(
+                        function,
+                        AmdControllerRole::AudioController,
+                    ));
+                }
+                if is_acp_audio_dmic(device) {
+                    soc_devices.push(AmdDeviceCandidate::new(
+                        function,
+                        AmdControllerRole::AcpAudioDmic,
+                    ));
+                }
+                if device.is_nvme() {
+                    soc_devices.push(AmdDeviceCandidate::new(
+                        function,
+                        AmdControllerRole::NvmeStorage,
+                    ));
+                }
+            } else if device.is_nvme() {
+                soc_devices.push(AmdDeviceCandidate::new(
                     function,
-                    AmdControllerRole::AmdGpuDisplay,
+                    AmdControllerRole::NvmeStorage,
                 ));
             }
         }
@@ -482,6 +540,7 @@ impl AmdChipset {
             usb_controllers,
             iommu_units,
             gpu_candidates,
+            soc_devices,
         }
     }
 
@@ -503,6 +562,10 @@ impl AmdChipset {
 
     pub fn gpu_candidates(&self) -> &[AmdDeviceCandidate] {
         &self.gpu_candidates
+    }
+
+    pub fn soc_devices(&self) -> &[AmdDeviceCandidate] {
+        &self.soc_devices
     }
 }
 
@@ -531,6 +594,24 @@ const fn is_iommu(class_code: PciClassCode) -> bool {
     class_code.class().get() == CLASS_SYSTEM && class_code.subclass().get() == SUBCLASS_IOMMU
 }
 
+fn is_psp_security_processor(device: &PciDevice) -> bool {
+    matches!(device.device_id().get(), 0x15df | 0x1630 | 0x1649)
+}
+
+const fn is_smbus_or_i2c(class_code: PciClassCode) -> bool {
+    class_code.class().get() == CLASS_SERIAL_BUS
+        && (class_code.subclass().get() == SUBCLASS_SMBUS
+            || class_code.subclass().get() == SUBCLASS_I2C)
+}
+
+const fn is_audio(class_code: PciClassCode) -> bool {
+    class_code.class().get() == CLASS_MULTIMEDIA && class_code.subclass().get() == SUBCLASS_AUDIO
+}
+
+fn is_acp_audio_dmic(device: &PciDevice) -> bool {
+    matches!(device.device_id().get(), 0x15e2 | 0x15e3 | 0x15e5)
+}
+
 const fn is_display_gpu_candidate(class_code: PciClassCode) -> bool {
     class_code.class().get() == CLASS_DISPLAY
         && (class_code.subclass().get() == SUBCLASS_VGA
@@ -546,6 +627,7 @@ mod tests {
     const CLASS_SERIAL_BUS: u8 = 0x0c;
     const SUBCLASS_SATA: u8 = 0x06;
     const SUBCLASS_USB: u8 = 0x03;
+    const SUBCLASS_NVM: u8 = 0x08;
     const PROGIF_AHCI: u8 = 0x01;
     const PROGIF_XHCI: u8 = 0x30;
 
@@ -631,6 +713,37 @@ mod tests {
         assert_eq!(iommus.len(), 1);
         assert_eq!(iommus[0].role(), AmdControllerRole::Iommu);
         assert_eq!(iommus[0].service_hint(), "platform.amd-iommu");
+    }
+
+    #[test]
+    fn detects_renoir_soc_inventory_devices() {
+        let access = MockPciConfigAccess::new()
+            .with_function(
+                addr(0, 0),
+                endpoint(0x1022, 0x1630, CLASS_SYSTEM, 0x00, 0x00),
+            )
+            .with_function(
+                addr(1, 0),
+                endpoint(0x1022, 0x790b, CLASS_SERIAL_BUS, SUBCLASS_SMBUS, 0x00),
+            )
+            .with_function(
+                addr(2, 0),
+                endpoint(0x1022, 0x15e3, CLASS_MULTIMEDIA, SUBCLASS_AUDIO, 0x00),
+            )
+            .with_function(
+                addr(3, 0),
+                endpoint(0x144d, 0xa808, CLASS_MASS_STORAGE, SUBCLASS_NVM, 0x02),
+            );
+        let bus = PciBus::enumerate(0, &access).unwrap();
+        let chipset = AmdChipset::discover(&bus);
+        let roles: Vec<AmdControllerRole> =
+            chipset.soc_devices().iter().map(|d| d.role()).collect();
+
+        assert!(roles.contains(&AmdControllerRole::PspSecurityProcessor));
+        assert!(roles.contains(&AmdControllerRole::SmbusI2c));
+        assert!(roles.contains(&AmdControllerRole::AudioController));
+        assert!(roles.contains(&AmdControllerRole::AcpAudioDmic));
+        assert!(roles.contains(&AmdControllerRole::NvmeStorage));
     }
 
     #[test]

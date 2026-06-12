@@ -14,7 +14,158 @@
 //! marketing-name claims and falls back to structured unknown status instead of
 //! panicking on unmodeled AMD64 processors.
 
-use mirage_amd64::PrivilegeRing;
+use mirage_amd64::{AmdCacheInfo, AmdCpuId, AmdFeatureSet, AmdTopology, AmdVendor, PrivilegeRing};
+
+/// Fixed-size CPUID brand string buffer. Bytes after the first NUL are padding.
+pub type RyzenBrandString = [u8; 48];
+
+/// Hardware-backed AMD Ryzen/APU platform information surfaced during boot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RyzenPlatformInfo {
+    pub vendor: [u8; 12],
+    pub family: u16,
+    pub model: u16,
+    pub stepping: u8,
+    pub brand_string: RyzenBrandString,
+    pub core_count: u16,
+    pub thread_count: u16,
+    pub has_invariant_tsc: bool,
+    pub has_x2apic: bool,
+    pub has_sme: bool,
+    pub has_svm: bool,
+}
+
+impl RyzenPlatformInfo {
+    pub fn discover() -> Self {
+        Self::from_cpuid(AmdCpuId::read())
+    }
+
+    pub fn from_cpuid(cpuid: AmdCpuId) -> Self {
+        let (family, model, stepping) = cpuid.family_model_stepping();
+        let features = cpuid.features();
+        let topology = AmdTopology::from_cpuid(cpuid);
+        Self::from_parts(
+            cpuid.vendor().as_bytes(),
+            family.0,
+            model.0,
+            stepping.0,
+            cpuid.brand_string(),
+            topology.cores_per_package,
+            topology.logical_processors_per_package,
+            features,
+        )
+    }
+
+    pub const fn from_parts(
+        vendor: [u8; 12],
+        family: u16,
+        model: u16,
+        stepping: u8,
+        brand_string: RyzenBrandString,
+        core_count: u16,
+        thread_count: u16,
+        features: AmdFeatureSet,
+    ) -> Self {
+        Self {
+            vendor,
+            family,
+            model,
+            stepping,
+            brand_string,
+            core_count,
+            thread_count,
+            has_invariant_tsc: features.invariant_tsc,
+            has_x2apic: features.x2apic,
+            has_sme: features.sme,
+            has_svm: features.svm,
+        }
+    }
+
+    pub const fn is_amd(self) -> bool {
+        matches!(AmdVendor::from_bytes(self.vendor), AmdVendor::Amd)
+    }
+
+    pub const fn is_renoir_lucienne_zen2_mobile(self) -> bool {
+        self.is_amd() && self.family == 0x17 && self.model >= 0x60 && self.model <= 0x7f
+    }
+
+    pub const fn is_ryzen_4500u_class(self) -> bool {
+        self.is_renoir_lucienne_zen2_mobile() && self.core_count == 6 && self.thread_count == 6
+    }
+}
+
+/// One scheduler-visible logical CPU placement record.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RyzenTopologyEntry {
+    pub logical_cpu_id: u16,
+    pub package_id: u16,
+    pub physical_core_id: u16,
+    pub smt_sibling_id: Option<u16>,
+    pub cache_group_id: u16,
+    pub preferred_core: bool,
+}
+
+/// Fixed no-heap topology table for early Ryzen boot reporting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RyzenTopologyTable {
+    entries: [Option<RyzenTopologyEntry>; Self::MAX_LOGICAL_CPUS],
+    len: usize,
+    pub cache: AmdCacheInfo,
+}
+
+impl RyzenTopologyTable {
+    pub const MAX_LOGICAL_CPUS: usize = 256;
+
+    pub const fn empty(cache: AmdCacheInfo) -> Self {
+        Self {
+            entries: [None; Self::MAX_LOGICAL_CPUS],
+            len: 0,
+            cache,
+        }
+    }
+
+    pub fn from_current_cpu(cpuid: AmdCpuId) -> Self {
+        let topology = AmdTopology::from_cpuid(cpuid);
+        let cache = AmdCacheInfo::from_cpuid(cpuid);
+        let mut table = Self::empty(cache);
+        let count = topology
+            .logical_processors_per_package
+            .min(Self::MAX_LOGICAL_CPUS as u16);
+        let threads_per_core = topology.threads_per_core.max(1);
+        let mut cpu = 0u16;
+        while cpu < count {
+            let core = cpu / threads_per_core;
+            let sibling = if threads_per_core > 1 {
+                Some(core * threads_per_core + ((cpu + 1) % threads_per_core))
+            } else {
+                None
+            };
+            table.entries[cpu as usize] = Some(RyzenTopologyEntry {
+                logical_cpu_id: cpu,
+                package_id: topology.package_id.0,
+                physical_core_id: core,
+                smt_sibling_id: sibling,
+                cache_group_id: core,
+                preferred_core: false,
+            });
+            cpu += 1;
+        }
+        table.len = count as usize;
+        table
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn entries(&self) -> &[Option<RyzenTopologyEntry>] {
+        &self.entries[..self.len]
+    }
+}
+
+pub fn mirage_ryzen_topology() -> RyzenTopologyTable {
+    RyzenTopologyTable::from_current_cpu(AmdCpuId::read())
+}
 
 /// The CPUID vendor string used by AMD processors.
 pub const AMD_CPUID_VENDOR: [u8; 12] = *b"AuthenticAMD";
@@ -738,6 +889,28 @@ fn detect_input() -> Option<RyzenDetectionInput> {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Copy)]
+    struct MockCpuid<'a> {
+        leaves: &'a [(u32, u32, mirage_amd64::CpuidLeaf)],
+    }
+    impl mirage_amd64::AmdCpuidReader for MockCpuid<'_> {
+        fn cpuid(&self, leaf: u32, subleaf: u32) -> mirage_amd64::CpuidLeaf {
+            self.leaves
+                .iter()
+                .find(|(l, s, _)| *l == leaf && *s == subleaf)
+                .map(|(_, _, v)| *v)
+                .unwrap_or_default()
+        }
+    }
+    fn vendor_leaf() -> mirage_amd64::CpuidLeaf {
+        mirage_amd64::CpuidLeaf::new(
+            0x0000_0001,
+            u32::from_le_bytes(*b"Auth"),
+            u32::from_le_bytes(*b"cAMD"),
+            u32::from_le_bytes(*b"enti"),
+        )
+    }
+
     fn platform(family: u16, model: u16) -> RyzenPlatform {
         RyzenPlatform::from_detection_input(RyzenDetectionInput::amd(RyzenCpuId::new(
             family, model, 1,
@@ -840,6 +1013,52 @@ mod tests {
         assert_eq!(zen4.support, RyzenSupportStatus::Supported);
         assert_eq!(zen4.generation, RyzenGeneration::Zen4);
         assert!(zen4.is_supported());
+    }
+
+    #[test]
+    fn platform_info_identifies_4500u_class_renoir() {
+        let mut brand = [0u8; 48];
+        brand[..17].copy_from_slice(b"AMD Ryzen 5 4500U");
+        let features = mirage_amd64::AmdFeatureSet {
+            invariant_tsc: true,
+            x2apic: true,
+            svm: true,
+            sme: true,
+            ..mirage_amd64::AmdFeatureSet::default()
+        };
+        let info =
+            RyzenPlatformInfo::from_parts(AMD_CPUID_VENDOR, 0x17, 0x60, 1, brand, 6, 6, features);
+        assert!(info.is_renoir_lucienne_zen2_mobile());
+        assert!(info.is_ryzen_4500u_class());
+        assert!(info.has_invariant_tsc);
+        assert!(info.has_x2apic);
+        assert!(info.has_sme);
+        assert!(info.has_svm);
+    }
+
+    #[test]
+    fn topology_table_exports_mtss_scheduler_hints() {
+        let cpuid = mirage_amd64::AmdCpuId::from_reader(&MockCpuid {
+            leaves: &[
+                (0x0000_0000, 0, vendor_leaf()),
+                (
+                    0x0000_0001,
+                    0,
+                    mirage_amd64::CpuidLeaf::new(0, 6 << 16, 0, 0),
+                ),
+                (
+                    0x8000_0000,
+                    0,
+                    mirage_amd64::CpuidLeaf::new(0x8000_0008, 0, 0, 0),
+                ),
+                (0x8000_0008, 0, mirage_amd64::CpuidLeaf::new(0, 0, 5, 0)),
+            ],
+        });
+        let table = RyzenTopologyTable::from_current_cpu(cpuid);
+
+        assert_eq!(table.len(), 6);
+        assert_eq!(table.entries()[5].unwrap().physical_core_id, 5);
+        assert_eq!(table.entries()[5].unwrap().smt_sibling_id, None);
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub enum AmdGpuAsicFamily {
     Polaris,
     Vega,
     Navi,
+    Renoir,
     RDNA2,
     RDNA3,
 }
@@ -87,6 +88,7 @@ impl AmdGpuPciInfo {
             (AMD_VENDOR_ID, 0x67df) => Some(AmdGpuAsicFamily::Polaris),
             (AMD_VENDOR_ID, 0x687f) => Some(AmdGpuAsicFamily::Vega),
             (AMD_VENDOR_ID, 0x731f) => Some(AmdGpuAsicFamily::Navi),
+            (AMD_VENDOR_ID, 0x1636) => Some(AmdGpuAsicFamily::Renoir),
             (AMD_VENDOR_ID, 0x73bf) => Some(AmdGpuAsicFamily::RDNA2),
             (AMD_VENDOR_ID, 0x744c) => Some(AmdGpuAsicFamily::RDNA3),
             (AMD_VENDOR_ID, _) => Some(AmdGpuAsicFamily::Unknown),
@@ -439,6 +441,7 @@ impl AmdGpuAsicFamily {
             Self::Polaris => "Mock AMDGPU Polaris",
             Self::Vega => "Mock AMDGPU Vega",
             Self::Navi => "Mock AMDGPU Navi",
+            Self::Renoir => "AMD Renoir APU",
             Self::RDNA2 => "Mock AMDGPU RDNA2",
             Self::RDNA3 => "Mock AMDGPU RDNA3",
         }
@@ -585,6 +588,11 @@ pub mod hw_amdgpu {
             device_id: 0x731f,
             family: AmdGpuAsicFamily::Navi,
             marketing_name: "Navi",
+        },
+        AmdGpuDeviceIdEntry {
+            device_id: 0x1636,
+            family: AmdGpuAsicFamily::Renoir,
+            marketing_name: "Renoir Radeon Vega Mobile",
         },
         AmdGpuDeviceIdEntry {
             device_id: 0x73bf,
@@ -863,6 +871,11 @@ pub mod hw_amdgpu {
                 .ok_or(AmdGpuError::UnsupportedPciDevice)
         }
 
+        pub fn is_renoir_apu(pci_device: &PciDevice) -> Result<bool, AmdGpuError> {
+            let pci = Self::read_pci_info(pci_device)?;
+            Ok(Self::detect_asic_family(pci)? == AmdGpuAsicFamily::Renoir)
+        }
+
         pub fn map_vram_aperture(
             pci_device: &PciDevice,
             bar_layout: AmdGpuBarLayout,
@@ -1118,6 +1131,10 @@ mod tests {
         assert_eq!(
             AmdGpuPciInfo::mock(0x73bf).asic_family(),
             Some(AmdGpuAsicFamily::RDNA2)
+        );
+        assert_eq!(
+            AmdGpuPciInfo::mock(0x1636).asic_family(),
+            Some(AmdGpuAsicFamily::Renoir)
         );
         assert_eq!(
             AmdGpuPciInfo::mock(0xffff).asic_family(),

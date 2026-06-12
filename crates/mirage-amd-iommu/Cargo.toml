@@ -11,6 +11,7 @@ default = []
 hw-amd-iommu = ["mirage-ryzen/hw-ryzen"]
 
 [dependencies]
+mirage-acpi = { path = "../mirage-acpi" }
 mirage-cap = { path = "../mirage-cap" }
 mirage-ipc = { path = "../mirage-ipc" }
 mirage-pci = { path = "../mirage-pci" }
