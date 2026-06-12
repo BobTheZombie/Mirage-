@@ -706,7 +706,7 @@ fn platform_device_from_pci(device: &mirage_pci::PciDevice) -> PlatformDevice {
 #[cfg(feature = "hw-pci")]
 const fn pci_device_name(pci: PciFunctionInfo) -> &'static str {
     if pci.vendor_id == 0x1002 && (pci.device_id == 0x1636 || pci.device_id == 0x1638) {
-        "Renoir AMDGPU"
+        "AMDGPU Renoir"
     } else if pci.vendor_id == 0x1022
         && pci.class == 0x0c
         && pci.subclass == 0x03
@@ -872,7 +872,7 @@ mod tests {
         let mut registry: PlatformRegistry<2> = PlatformRegistry::new();
         let cpu = PlatformDevice::amd_cpu("AMD Ryzen 5 4500U", 0x17, 0x60, 0x01);
         let gpu = PlatformDevice::pci(
-            "Renoir AMDGPU",
+            "AMDGPU Renoir",
             PlatformDeviceKind::Display,
             3,
             0,

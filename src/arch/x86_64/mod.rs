@@ -447,7 +447,7 @@ struct PciProbeDevice {
 impl PciProbeDevice {
     const fn platform_name(self) -> &'static str {
         if self.vendor_id == 0x1002 && (self.device_id == 0x1636 || self.device_id == 0x1638) {
-            "Renoir AMDGPU"
+            "AMDGPU Renoir"
         } else if self.vendor_id == 0x1022
             && self.class == 0x0c
             && self.subclass == 0x03

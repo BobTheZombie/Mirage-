@@ -13,7 +13,7 @@ const TITLE: &str = "GNU/MIRAGE";
 #[cfg(feature = "hw-framebuffer")]
 const SUBTITLE: &str = "Mirage Boot Milestone 1.1";
 #[cfg(feature = "hw-framebuffer")]
-const PROMPT: &str = "Press ESC for debug shell";
+const PROMPT: &str = "Press Esc for Debug Shell";
 #[cfg(feature = "hw-framebuffer")]
 const PROGRESS_BAR_WIDTH: u8 = 28;
 
@@ -193,12 +193,16 @@ fn status_color(state: PhaseState) -> crate::arch::x86_64::framebuffer_console::
     use crate::arch::x86_64::framebuffer_console::RgbColor;
 
     match state {
-        PhaseState::Ok | PhaseState::Online | PhaseState::Enabled => RgbColor::GREEN,
-        PhaseState::Started | PhaseState::Pending => RgbColor::YELLOW,
-        PhaseState::Registered | PhaseState::Skipped => RgbColor::GRAY,
-        PhaseState::Detected | PhaseState::Stub => RgbColor::CYAN,
+        PhaseState::Ok => RgbColor::GREEN,
+        PhaseState::Online => RgbColor::BRIGHT_GREEN,
+        PhaseState::Enabled => RgbColor::CYAN,
+        PhaseState::Detected => RgbColor::BLUE,
+        PhaseState::Started => RgbColor::WHITE,
+        PhaseState::Pending => RgbColor::YELLOW,
+        PhaseState::Stub => RgbColor::MAGENTA,
+        PhaseState::Skipped => RgbColor::DARK_GRAY,
         PhaseState::Failed => RgbColor::RED,
-        PhaseState::Unregistered => RgbColor::GRAY,
+        PhaseState::Registered | PhaseState::Unregistered => RgbColor::GRAY,
     }
 }
 
