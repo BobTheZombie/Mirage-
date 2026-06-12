@@ -397,10 +397,10 @@ fn initialize_input_hardware(boot_info: &BootInfo) {
         XhciKeyboardStatus::SkippedNoKeyboard => {
             boot_phase_skipped(BootPhase::UsbKeyboard, "USB HID keyboard not present")
         }
-        XhciKeyboardStatus::Failed => boot_phase_failed(
-            BootPhase::UsbKeyboard,
-            "USB HID keyboard initialization failed",
-        ),
+        XhciKeyboardStatus::Failed(message) => {
+            boot_phase_failed(BootPhase::UsbKeyboard, message);
+            crate::kprintln!("USB HID keyboard initialization failed: {}", message);
+        }
     }
     #[cfg(not(feature = "hw-usb-hid"))]
     boot_phase_skipped(BootPhase::UsbKeyboard, "hw-usb-hid feature disabled");

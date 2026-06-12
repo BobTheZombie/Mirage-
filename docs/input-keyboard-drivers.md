@@ -78,10 +78,17 @@ USB HID boot report decoding is implemented independently from enumeration:
 `KeyboardEvent` queue as PS/2. This covers modifiers, printable US ASCII, ESC,
 arrows, F keys, enter, backspace, tab, ctrl, alt, and shift.
 
+The initialization path is fail-closed and stage-instrumented. It prints
+`[usbkbd 01]` through `[usbkbd 13]` milestones, uses bounded waits for
+controller halt/reset/run and root-port reset/enable, reports `Skipped` when no
+connected USB keyboard candidate exists, and reports `Failed` with the stage
+message on timeout. It never waits for a keypress before declaring the keyboard
+online.
+
 Known limitation: Mirage still needs a DMA allocator contract and complete xHCI
-command/event/transfer ring ownership before full device enumeration can be
-safely marked online. Therefore the driver reports `Skipped` when a controller is
-present but no HID keyboard has been enumerated instead of faking success.
+command/event/transfer ring ownership before descriptor-driven enumeration can
+replace the provisional early-boot root-port candidate path used for QEMU
+`usb-kbd`. Runtime interrupt endpoint polling remains future work.
 
 ## ACPI EC hotkey events
 
