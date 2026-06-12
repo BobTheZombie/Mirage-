@@ -142,6 +142,15 @@ pub fn init_architecture(boot_info: &BootInfo) {
 
 #[cfg(all(not(feature = "emergency-boot"), feature = "hw-framebuffer"))]
 fn initialize_framebuffer_console(boot_info: &BootInfo) {
+    if boot_info.framebuffer.is_none() {
+        boot_phase_skipped(
+            BootPhase::Framebuffer,
+            "framebuffer unavailable; serial console only",
+        );
+        crate::kprintln!("framebuffer unavailable; serial console only");
+        return;
+    }
+
     boot_phase_start(BootPhase::Framebuffer);
     match framebuffer_console::init_from_boot_info(boot_info) {
         Ok(Some(framebuffer)) => {
@@ -153,11 +162,8 @@ fn initialize_framebuffer_console(boot_info: &BootInfo) {
             crate::kprintln!("  framebuffer address: {:#018x}", framebuffer.address.0);
         }
         Ok(None) | Err(_) => {
-            boot_phase_skipped(
-                BootPhase::Framebuffer,
-                "framebuffer unavailable; serial console only",
-            );
-            crate::kprintln!("framebuffer unavailable; serial console only");
+            boot_phase_failed(BootPhase::Framebuffer, "framebuffer initialization failed");
+            crate::kprintln!("framebuffer initialization failed; serial console only");
         }
     }
 }
@@ -351,6 +357,20 @@ pub fn panic_halt() -> ! {
     interrupts::halt_forever()
 }
 
+#[cfg(all(not(feature = "emergency-boot"), feature = "hw-usb-hid"))]
+fn mark_driver_phase(phase: BootPhase, status: DriverStatus, skipped: &'static str) {
+    match status {
+        DriverStatus::Online => {
+            boot_phase_start(phase);
+            boot_phase_online(phase);
+        }
+        DriverStatus::Initialized => {
+            boot_phase_start(phase);
+            boot_phase_ok(phase);
+        }
+        DriverStatus::Skipped => boot_phase_skipped(phase, skipped),
+        DriverStatus::Failed => boot_phase_failed(phase, "driver module failed"),
+        DriverStatus::Registered => boot_phase_skipped(phase, "driver module did not start"),
 #[cfg(not(feature = "emergency-boot"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CpuProbe {
@@ -556,25 +576,29 @@ fn initialize_storage_hardware() {
 fn initialize_input_hardware(boot_info: &BootInfo) {
     let mut any_online = false;
 
-    boot_phase_start(BootPhase::I8042);
     #[cfg(feature = "hw-i8042")]
-    boot_phase_ok(BootPhase::I8042);
+    {
+        boot_phase_start(BootPhase::I8042);
+        boot_phase_ok(BootPhase::I8042);
+    }
     #[cfg(not(feature = "hw-i8042"))]
     boot_phase_skipped(BootPhase::I8042, "hw-i8042 feature disabled");
 
-    boot_phase_start(BootPhase::Ps2Keyboard);
     #[cfg(feature = "hw-ps2-keyboard")]
-    match PS2_KEYBOARD_DRIVER.initialize(false) {
-        Ok(()) => {
-            boot_phase_ok(BootPhase::Ps2Keyboard);
-            any_online = true;
-        }
-        Err(error) => {
-            boot_phase_failed(
-                BootPhase::Ps2Keyboard,
-                "PS/2 keyboard initialization failed",
-            );
-            crate::kprintln!("PS/2 keyboard initialization failed: {:?}", error);
+    {
+        boot_phase_start(BootPhase::Ps2Keyboard);
+        match PS2_KEYBOARD_DRIVER.initialize(false) {
+            Ok(()) => {
+                boot_phase_ok(BootPhase::Ps2Keyboard);
+                any_online = true;
+            }
+            Err(error) => {
+                boot_phase_failed(
+                    BootPhase::Ps2Keyboard,
+                    "PS/2 keyboard initialization failed",
+                );
+                crate::kprintln!("PS/2 keyboard initialization failed: {:?}", error);
+            }
         }
     }
     #[cfg(not(feature = "hw-ps2-keyboard"))]
@@ -583,6 +607,37 @@ fn initialize_input_hardware(boot_info: &BootInfo) {
     #[cfg(feature = "hw-usb-hid")]
     {
         let usb_status = USB_HID_KEYBOARD_DRIVER.initialize_stack(boot_info.hhdm_offset);
+        mark_driver_phase(
+            BootPhase::Xhci,
+            usb_status.xhci,
+            "xHCI controller not present",
+        );
+        mark_driver_phase(
+            BootPhase::UsbCore,
+            usb_status.core,
+            "usb-core0 dependency skipped",
+        );
+        mark_driver_phase(
+            BootPhase::UsbHid,
+            usb_status.hid,
+            "USB HID device not present",
+        );
+        match usb_status.keyboard {
+            XhciKeyboardStatus::Online => {
+                boot_phase_start(BootPhase::UsbKeyboard);
+                boot_phase_online(BootPhase::UsbKeyboard);
+                any_online = true;
+            }
+            XhciKeyboardStatus::SkippedNoController => {
+                boot_phase_skipped(BootPhase::UsbKeyboard, "xHCI controller not present")
+            }
+            XhciKeyboardStatus::SkippedNoKeyboard => {
+                boot_phase_skipped(BootPhase::UsbKeyboard, "USB HID keyboard not present")
+            }
+            XhciKeyboardStatus::Failed(message) => {
+                boot_phase_failed(BootPhase::UsbKeyboard, message);
+                crate::kprintln!("USB HID keyboard initialization failed: {}", message);
+            }
         if usb_status.keyboard == XhciKeyboardStatus::Online {
             any_online = true;
         }
@@ -595,21 +650,25 @@ fn initialize_input_hardware(boot_info: &BootInfo) {
         boot_phase_skipped(BootPhase::UsbKeyboard, "hw-usb-hid feature disabled");
     }
 
-    boot_phase_start(BootPhase::AcpiEc);
     #[cfg(feature = "hw-acpi-ec")]
-    boot_phase_ok(BootPhase::AcpiEc);
+    {
+        boot_phase_start(BootPhase::AcpiEc);
+        boot_phase_ok(BootPhase::AcpiEc);
+    }
     #[cfg(not(feature = "hw-acpi-ec"))]
     boot_phase_skipped(BootPhase::AcpiEc, "hw-acpi-ec feature disabled");
 
-    boot_phase_start(BootPhase::EcHotkeys);
     #[cfg(feature = "hw-laptop-hotkeys")]
-    match ACPI_EC_HOTKEY_DRIVER.initialize(boot_info) {
-        AcpiEcStatus::Online => {
-            boot_phase_ok(BootPhase::EcHotkeys);
-            any_online = true;
+    {
+        boot_phase_start(BootPhase::EcHotkeys);
+        match ACPI_EC_HOTKEY_DRIVER.initialize(boot_info) {
+            AcpiEcStatus::Online => {
+                boot_phase_ok(BootPhase::EcHotkeys);
+                any_online = true;
+            }
+            AcpiEcStatus::SkippedNoAcpi => boot_phase_skipped(BootPhase::EcHotkeys, "ACPI absent"),
+            AcpiEcStatus::SkippedNoEc => boot_phase_skipped(BootPhase::EcHotkeys, "EC absent"),
         }
-        AcpiEcStatus::SkippedNoAcpi => boot_phase_skipped(BootPhase::EcHotkeys, "ACPI absent"),
-        AcpiEcStatus::SkippedNoEc => boot_phase_skipped(BootPhase::EcHotkeys, "EC absent"),
     }
     #[cfg(not(feature = "hw-laptop-hotkeys"))]
     boot_phase_skipped(BootPhase::EcHotkeys, "hw-laptop-hotkeys feature disabled");
