@@ -72,6 +72,7 @@ pub struct PlatformDevice {
     pub class_code: Option<u8>,
     pub subclass: Option<u8>,
     pub prog_if: Option<u8>,
+    pub header_type: Option<u8>,
 }
 
 impl PlatformDevice {
@@ -89,6 +90,7 @@ impl PlatformDevice {
             class_code: None,
             subclass: None,
             prog_if: None,
+            header_type: None,
         }
     }
 
@@ -102,6 +104,7 @@ impl PlatformDevice {
             class_code: Some(family),
             subclass: Some(model),
             prog_if: Some(stepping),
+            header_type: None,
         }
     }
 
@@ -116,6 +119,7 @@ impl PlatformDevice {
         class_code: u8,
         subclass: u8,
         prog_if: u8,
+        header_type: u8,
     ) -> Self {
         Self {
             name,
@@ -130,6 +134,7 @@ impl PlatformDevice {
             class_code: Some(class_code),
             subclass: Some(subclass),
             prog_if: Some(prog_if),
+            header_type: Some(header_type),
         }
     }
 
@@ -143,6 +148,7 @@ impl PlatformDevice {
             class_code: None,
             subclass: None,
             prog_if: None,
+            header_type: None,
         }
     }
 
@@ -422,6 +428,7 @@ pub struct PciFunctionInfo {
     pub class: u8,
     pub subclass: u8,
     pub prog_if: u8,
+    pub header_type: u8,
     pub revision_id: u8,
     pub bar0_base: Option<u64>,
     pub bar0_length: Option<u64>,
@@ -692,6 +699,7 @@ fn platform_device_from_pci(device: &mirage_pci::PciDevice) -> PlatformDevice {
         pci.class,
         pci.subclass,
         pci.prog_if,
+        pci.header_type,
     )
 }
 
@@ -729,6 +737,7 @@ fn pci_info(device: &mirage_pci::PciDevice) -> PciFunctionInfo {
         class: class.class().get(),
         subclass: class.subclass().get(),
         prog_if: class.prog_if().get(),
+        header_type: device.header().header_type(),
         revision_id: device.revision_id(),
         bar0_base: bar0.map(|bar| bar.base()),
         bar0_length: bar0.and_then(|bar| bar.length()),
@@ -871,6 +880,7 @@ mod tests {
             0x1002,
             0x1636,
             0x03,
+            0x00,
             0x00,
             0x00,
         );

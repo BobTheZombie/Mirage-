@@ -311,16 +311,15 @@ impl DriverModule for XhciHostModule {
             function.function
         );
         enable_pci_command(function);
-        let bar0 = pci_read_u32(function, 0x10) & !0x0f;
-        if bar0 == 0 {
+        let Some(bar0) = pci_mmio_bar_base(function, 0x10) else {
             USB_DRIVER_STACK
                 .lock()
                 .registry
                 .set_status(XHCI_MODULE, DriverStatus::Failed);
             return Err(DriverError::InvalidMmio("MMIO BAR discovery failed"));
-        }
+        };
         let mmio = current_hhdm_offset()
-            .map(|offset| (offset + bar0 as u64) as usize)
+            .map(|offset| (offset + bar0) as usize)
             .unwrap_or(bar0 as usize);
         crate::kprintln!("[xhci] mmio base: {:#x}", bar0);
 
@@ -1140,37 +1139,73 @@ pub fn hid_usage_ascii(usage: u8, modifiers: KeyModifiers) -> Option<u8> {
 }
 
 fn find_xhci_controller() -> Option<PciFunction> {
-    let mut bus = 0u16;
-    while bus <= 255 {
-        let mut device = 0u8;
-        while device <= 31 {
-            let mut function = 0u8;
-            while function <= 7 {
-                let f = PciFunction {
-                    bus: bus as u8,
-                    device,
-                    function,
-                };
-                let vendor = (pci_read_u32(f, 0x00) & 0xffff) as u16;
-                if vendor != 0xffff {
-                    let class_reg = pci_read_u32(f, 0x08);
-                    let class = (class_reg >> 24) as u8;
-                    let subclass = (class_reg >> 16) as u8;
-                    let prog_if = (class_reg >> 8) as u8;
-                    if class == PCI_CLASS_SERIAL_BUS
-                        && subclass == PCI_SUBCLASS_USB
-                        && prog_if == PCI_PROGIF_XHCI
-                    {
-                        return Some(f);
-                    }
-                }
-                function += 1;
+    // Trust only bus 0 until bridge bus discovery exists. Follow PCI rules:
+    // read function 0 first and scan functions 1..7 only for multifunction devices.
+    let bus = 0u8;
+    let mut device = 0u8;
+    while device <= 31 {
+        let function0 = PciFunction {
+            bus,
+            device,
+            function: 0,
+        };
+        let id0 = pci_read_u32(function0, 0x00);
+        if (id0 & 0xffff) as u16 != 0xffff {
+            if is_xhci_pci_function(function0) {
+                return Some(function0);
             }
-            device += 1;
+
+            let header_type = ((pci_read_u32(function0, 0x0c) >> 16) & 0xff) as u8;
+            if (header_type & 0x80) != 0 {
+                let mut function = 1u8;
+                while function <= 7 {
+                    let candidate = PciFunction {
+                        bus,
+                        device,
+                        function,
+                    };
+                    let id = pci_read_u32(candidate, 0x00);
+                    if (id & 0xffff) as u16 != 0xffff && is_xhci_pci_function(candidate) {
+                        return Some(candidate);
+                    }
+                    function += 1;
+                }
+            }
         }
-        bus += 1;
+        device += 1;
     }
     None
+}
+
+fn is_xhci_pci_function(function: PciFunction) -> bool {
+    let class_reg = pci_read_u32(function, 0x08);
+    let class = (class_reg >> 24) as u8;
+    let subclass = (class_reg >> 16) as u8;
+    let prog_if = (class_reg >> 8) as u8;
+    class == PCI_CLASS_SERIAL_BUS && subclass == PCI_SUBCLASS_USB && prog_if == PCI_PROGIF_XHCI
+}
+
+fn pci_mmio_bar_base(function: PciFunction, offset: u8) -> Option<u64> {
+    let raw = pci_read_u32(function, offset);
+    if raw == 0 || raw == 0xffff_ffff || (raw & 0x1) != 0 {
+        return None;
+    }
+
+    let memory_type = (raw >> 1) & 0x3;
+    let base = match memory_type {
+        0x0 => (raw & !0x0f) as u64,
+        0x2 => {
+            let high = pci_read_u32(function, offset + 4);
+            ((high as u64) << 32) | ((raw & !0x0f) as u64)
+        }
+        _ => return None,
+    };
+
+    if base == 0 {
+        None
+    } else {
+        Some(base)
+    }
 }
 
 fn pci_read_u32(function: PciFunction, offset: u8) -> u32 {
@@ -1180,15 +1215,8 @@ fn pci_read_u32(function: PciFunction, offset: u8) -> u32 {
         | ((function.function as u32) << 8)
         | ((offset as u32) & 0xfc);
     unsafe {
-        outb(PCI_CONFIG_ADDRESS, address as u8);
-        outb(PCI_CONFIG_ADDRESS + 1, (address >> 8) as u8);
-        outb(PCI_CONFIG_ADDRESS + 2, (address >> 16) as u8);
-        outb(PCI_CONFIG_ADDRESS + 3, (address >> 24) as u8);
-        let b0 = inb(PCI_CONFIG_DATA) as u32;
-        let b1 = inb(PCI_CONFIG_DATA + 1) as u32;
-        let b2 = inb(PCI_CONFIG_DATA + 2) as u32;
-        let b3 = inb(PCI_CONFIG_DATA + 3) as u32;
-        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        crate::arch::x86_64::io::outl(PCI_CONFIG_ADDRESS, address);
+        crate::arch::x86_64::io::inl(PCI_CONFIG_DATA)
     }
 }
 
@@ -1199,14 +1227,8 @@ fn pci_write_u32(function: PciFunction, offset: u8, value: u32) {
         | ((function.function as u32) << 8)
         | ((offset as u32) & 0xfc);
     unsafe {
-        outb(PCI_CONFIG_ADDRESS, address as u8);
-        outb(PCI_CONFIG_ADDRESS + 1, (address >> 8) as u8);
-        outb(PCI_CONFIG_ADDRESS + 2, (address >> 16) as u8);
-        outb(PCI_CONFIG_ADDRESS + 3, (address >> 24) as u8);
-        outb(PCI_CONFIG_DATA, value as u8);
-        outb(PCI_CONFIG_DATA + 1, (value >> 8) as u8);
-        outb(PCI_CONFIG_DATA + 2, (value >> 16) as u8);
-        outb(PCI_CONFIG_DATA + 3, (value >> 24) as u8);
+        crate::arch::x86_64::io::outl(PCI_CONFIG_ADDRESS, address);
+        crate::arch::x86_64::io::outl(PCI_CONFIG_DATA, value);
     }
 }
 
