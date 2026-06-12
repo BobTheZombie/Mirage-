@@ -437,9 +437,11 @@ struct PciProbeDevice {
     function: u8,
     vendor_id: u16,
     device_id: u16,
+    revision: u8,
     class: u8,
     subclass: u8,
     prog_if: u8,
+    header_type: u8,
 }
 
 impl PciProbeDevice {
@@ -487,6 +489,7 @@ impl PciProbeDevice {
             self.class,
             self.subclass,
             self.prog_if,
+            self.header_type,
         )
     }
 }
@@ -500,94 +503,223 @@ struct PciProbeFunction {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
-fn pci_probe_read_u32(function: PciProbeFunction, offset: u8) -> u32 {
-    let address = 0x8000_0000u32
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PciClassFields {
+    revision: u8,
+    prog_if: u8,
+    subclass: u8,
+    class_code: u8,
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const PCI_CONFIG_ADDRESS_PORT: u16 = 0x0cf8;
+#[cfg(not(feature = "emergency-boot"))]
+const PCI_CONFIG_DATA_PORT: u16 = 0x0cfc;
+
+#[cfg(not(feature = "emergency-boot"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PciConfigBackend {
+    /// Legacy PCI mechanism #1. This is the only backend used until ACPI MCFG
+    /// is parsed and the ECAM/MMCONFIG physical window is mapped by VM code.
+    LegacyCf8Cfc,
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const fn pci_config_backend() -> PciConfigBackend {
+    PciConfigBackend::LegacyCf8Cfc
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const fn pci_config_address(function: PciProbeFunction, offset: u8) -> u32 {
+    0x8000_0000u32
         | ((function.bus as u32) << 16)
         | ((function.device as u32) << 11)
         | ((function.function as u32) << 8)
-        | ((offset as u32) & 0xfc);
-    unsafe {
-        crate::arch::x86_64::io::outb(0xcf8, address as u8);
-        crate::arch::x86_64::io::outb(0xcf9, (address >> 8) as u8);
-        crate::arch::x86_64::io::outb(0xcfa, (address >> 16) as u8);
-        crate::arch::x86_64::io::outb(0xcfb, (address >> 24) as u8);
-        let b0 = crate::arch::x86_64::io::inb(0xcfc) as u32;
-        let b1 = crate::arch::x86_64::io::inb(0xcfd) as u32;
-        let b2 = crate::arch::x86_64::io::inb(0xcfe) as u32;
-        let b3 = crate::arch::x86_64::io::inb(0xcff) as u32;
-        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        | ((offset as u32) & 0xfc)
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const fn pci_vendor_id(raw_id: u32) -> u16 {
+    (raw_id & 0xffff) as u16
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const fn pci_device_id(raw_id: u32) -> u16 {
+    (raw_id >> 16) as u16
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const fn pci_device_present(raw_id: u32) -> bool {
+    pci_vendor_id(raw_id) != 0xffff
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const fn pci_class_fields(class_reg: u32) -> PciClassFields {
+    PciClassFields {
+        revision: (class_reg & 0xff) as u8,
+        prog_if: ((class_reg >> 8) & 0xff) as u8,
+        subclass: ((class_reg >> 16) & 0xff) as u8,
+        class_code: ((class_reg >> 24) & 0xff) as u8,
     }
 }
 
 #[cfg(not(feature = "emergency-boot"))]
+const fn pci_header_type(header_reg: u32) -> u8 {
+    ((header_reg >> 16) & 0xff) as u8
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const fn pci_is_multifunction(header_type: u8) -> bool {
+    (header_type & 0x80) != 0
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const fn pci_vendor_name(vendor_id: u16) -> &'static str {
+    match vendor_id {
+        0x1022 => "AMD",
+        0x1002 => "AMD/ATI",
+        0x8086 => "Intel",
+        0x10ec => "Realtek",
+        0x1b36 => "Red Hat/QEMU",
+        0x1234 => "QEMU",
+        0x1af4 => "VirtIO",
+        0x144d => "Samsung",
+        0x15ad => "VMware",
+        _ => "unknown vendor",
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+const fn pci_class_name(class_code: u8) -> &'static str {
+    match class_code {
+        0x01 => "storage",
+        0x02 => "network",
+        0x03 => "display",
+        0x04 => "multimedia",
+        0x06 => "bridge",
+        0x0c => "serial bus",
+        0x0d => "wireless",
+        _ => "unknown class",
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn pci_probe_read_u32(function: PciProbeFunction, offset: u8) -> u32 {
+    let address = pci_config_address(function, offset);
+    unsafe {
+        crate::arch::x86_64::io::outl(PCI_CONFIG_ADDRESS_PORT, address);
+        crate::arch::x86_64::io::inl(PCI_CONFIG_DATA_PORT)
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn pci_probe_function(function: PciProbeFunction) -> Option<PciProbeDevice> {
+    let raw_id = pci_probe_read_u32(function, 0x00);
+    let vendor_id = pci_vendor_id(raw_id);
+    let device_id = pci_device_id(raw_id);
+
+    if function.bus == 0 && function.device < 4 {
+        crate::kprintln!(
+            "[pci] {:02x}:{:02x}.{} raw id=0x{:08x} vendor=0x{:04x} device=0x{:04x}",
+            function.bus,
+            function.device,
+            function.function,
+            raw_id,
+            vendor_id,
+            device_id
+        );
+    }
+
+    if !pci_device_present(raw_id) {
+        return None;
+    }
+
+    let class_reg = pci_probe_read_u32(function, 0x08);
+    let header_reg = pci_probe_read_u32(function, 0x0c);
+    let class = pci_class_fields(class_reg);
+    let header_type = pci_header_type(header_reg);
+
+    if function.bus == 0 && function.device < 4 {
+        crate::kprintln!(
+            "[pci] {:02x}:{:02x}.{} class=0x{:02x} subclass=0x{:02x} prog_if=0x{:02x} header=0x{:02x} vendor_name=\"{}\" class_name=\"{}\"",
+            function.bus,
+            function.device,
+            function.function,
+            class.class_code,
+            class.subclass,
+            class.prog_if,
+            header_type,
+            pci_vendor_name(vendor_id),
+            pci_class_name(class.class_code)
+        );
+    }
+
+    Some(PciProbeDevice {
+        bus: function.bus,
+        device: function.device,
+        function: function.function,
+        vendor_id,
+        device_id,
+        revision: class.revision,
+        class: class.class_code,
+        subclass: class.subclass,
+        prog_if: class.prog_if,
+        header_type,
+    })
+}
+
+#[cfg(not(feature = "emergency-boot"))]
 fn scan_pci_devices(mut visitor: impl FnMut(PciProbeDevice)) {
-    let mut bus = 0u16;
-    while bus <= 255 {
-        let mut device = 0u8;
-        while device < 32 {
-            let mut function = 0u8;
-            while function < 8 {
-                let f = PciProbeFunction {
-                    bus: bus as u8,
-                    device,
-                    function,
-                };
-                let id = pci_probe_read_u32(f, 0x00);
-                let vendor_id = (id & 0xffff) as u16;
-                if vendor_id != 0xffff {
-                    let device_id = (id >> 16) as u16;
-                    let class_reg = pci_probe_read_u32(f, 0x08);
-                    visitor(PciProbeDevice {
-                        bus: bus as u8,
+    match pci_config_backend() {
+        PciConfigBackend::LegacyCf8Cfc => {
+            crate::kprintln!("[pci] config access: legacy CF8/CFC");
+        }
+    }
+
+    // Only bus 0 is trusted until bridge enumeration is implemented.
+    let bus = 0u8;
+    let mut device = 0u8;
+    while device < 32 {
+        let function0 = PciProbeFunction {
+            bus,
+            device,
+            function: 0,
+        };
+        if let Some(device0) = pci_probe_function(function0) {
+            visitor(device0);
+            if pci_is_multifunction(device0.header_type) {
+                let mut function = 1u8;
+                while function < 8 {
+                    if let Some(found) = pci_probe_function(PciProbeFunction {
+                        bus,
                         device,
                         function,
-                        vendor_id,
-                        device_id,
-                        class: (class_reg >> 24) as u8,
-                        subclass: (class_reg >> 16) as u8,
-                        prog_if: (class_reg >> 8) as u8,
-                    });
+                    }) {
+                        visitor(found);
+                    }
+                    function += 1;
                 }
-                function += 1;
             }
-            device += 1;
         }
-        bus += 1;
+        device += 1;
     }
 }
 
 #[cfg(not(feature = "emergency-boot"))]
 fn pci_any(mut predicate: impl FnMut(u16, u16, u8, u8, u8) -> bool) -> bool {
-    let mut bus = 0u16;
-    while bus <= 255 {
-        let mut device = 0u8;
-        while device < 32 {
-            let mut function = 0u8;
-            while function < 8 {
-                let f = PciProbeFunction {
-                    bus: bus as u8,
-                    device,
-                    function,
-                };
-                let id = pci_probe_read_u32(f, 0x00);
-                let vendor = (id & 0xffff) as u16;
-                if vendor != 0xffff {
-                    let device_id = (id >> 16) as u16;
-                    let class_reg = pci_probe_read_u32(f, 0x08);
-                    let class = (class_reg >> 24) as u8;
-                    let subclass = (class_reg >> 16) as u8;
-                    let prog_if = (class_reg >> 8) as u8;
-                    if predicate(vendor, device_id, class, subclass, prog_if) {
-                        return true;
-                    }
-                }
-                function += 1;
-            }
-            device += 1;
+    let mut found = false;
+    scan_pci_devices(|device| {
+        if predicate(
+            device.vendor_id,
+            device.device_id,
+            device.class,
+            device.subclass,
+            device.prog_if,
+        ) {
+            found = true;
         }
-        bus += 1;
-    }
-    false
+    });
+    found
 }
 
 #[cfg(not(feature = "emergency-boot"))]
@@ -1007,4 +1139,56 @@ fn configure_interrupts() {
     interrupts::enable();
     boot_phase_enabled(BootPhase::Interrupts);
     crate::kprintln!("interrupts enabled");
+}
+
+#[cfg(all(test, not(feature = "emergency-boot")))]
+mod pci_config_tests {
+    use super::*;
+
+    #[test]
+    fn pci_config_address_uses_legacy_cf8_formula() {
+        let function = PciProbeFunction {
+            bus: 0x12,
+            device: 0x05,
+            function: 0x03,
+        };
+
+        assert_eq!(
+            pci_config_address(function, 0x13),
+            0x8000_0000 | (0x12 << 16) | (0x05 << 11) | (0x03 << 8) | 0x10
+        );
+    }
+
+    #[test]
+    fn extracts_vendor_and_device_from_raw_id() {
+        let raw = 0x5678_1234;
+
+        assert_eq!(pci_vendor_id(raw), 0x1234);
+        assert_eq!(pci_device_id(raw), 0x5678);
+    }
+
+    #[test]
+    fn detects_absent_vendor_id() {
+        assert!(!pci_device_present(0xffff_ffff));
+        assert!(!pci_device_present(0x0001_ffff));
+        assert!(pci_device_present(0x0001_8086));
+    }
+
+    #[test]
+    fn extracts_revision_class_subclass_and_prog_if() {
+        let fields = pci_class_fields(0x0106_027a);
+
+        assert_eq!(fields.revision, 0x7a);
+        assert_eq!(fields.prog_if, 0x02);
+        assert_eq!(fields.subclass, 0x06);
+        assert_eq!(fields.class_code, 0x01);
+    }
+
+    #[test]
+    fn extracts_header_type_and_multifunction_bit() {
+        assert_eq!(pci_header_type(0x0080_0000), 0x80);
+        assert!(pci_is_multifunction(0x80));
+        assert!(pci_is_multifunction(0x81));
+        assert!(!pci_is_multifunction(0x00));
+    }
 }
