@@ -222,18 +222,20 @@ impl BootPhaseManager {
         }
     }
 
-    pub fn transition(&mut self, phase: BootPhase, state: PhaseState, message: &'static str) {
-        self.current_phase = phase;
+    pub fn transition(
+        &mut self,
+        phase: BootPhase,
+        state: PhaseState,
+        message: &'static str,
+    ) -> bool {
         let index = phase.index();
         if self.records[index].state == PhaseState::Unregistered {
-            self.records[index] = BootPhaseRecord {
-                descriptor: fallback_descriptor(phase),
-                state: PhaseState::Registered,
-                message: "auto-registered",
-            };
+            return false;
         }
+        self.current_phase = phase;
         self.records[index].state = state;
         self.records[index].message = message;
+        true
     }
 
     pub const fn state(&self, phase: BootPhase) -> PhaseState {
@@ -414,20 +416,6 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         4,
     ),
     descriptor(
-        BootPhase::I8042,
-        "I8042",
-        SubsystemCategory::Input,
-        false,
-        2,
-    ),
-    descriptor(
-        BootPhase::Ps2Keyboard,
-        "PS/2 Kbd",
-        SubsystemCategory::Input,
-        false,
-        3,
-    ),
-    descriptor(
         BootPhase::Amd64Cpu,
         "AMD64 CPU",
         SubsystemCategory::Architecture,
@@ -508,6 +496,20 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         BootPhase::Ahci,
         "AHCI",
         SubsystemCategory::Storage,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::I8042,
+        "I8042",
+        SubsystemCategory::Input,
+        false,
+        2,
+    ),
+    descriptor(
+        BootPhase::Ps2Keyboard,
+        "PS/2 Kbd",
+        SubsystemCategory::Input,
         false,
         3,
     ),
@@ -641,14 +643,88 @@ const fn fallback_descriptor(phase: BootPhase) -> SubsystemDescriptor {
 
 static BOOT_PHASE_MANAGER: SpinLock<BootPhaseManager> = SpinLock::new(BootPhaseManager::new());
 
-/// Register all Milestone 1.1 core subsystems and leave them pending.
-pub fn boot_register_default_subsystems() {
-    let mut index = 0usize;
-    while index < DEFAULT_SUBSYSTEM_DESCRIPTORS.len() {
-        boot_register_subsystem(DEFAULT_SUBSYSTEM_DESCRIPTORS[index]);
-        index += 1;
+/// Register only subsystems compiled into this kernel build and leave them pending.
+pub fn boot_register_compiled_subsystems() {
+    register_phase(BootPhase::SeedRs);
+    register_phase(BootPhase::BootInfo);
+    register_phase(BootPhase::KernelMain);
+    register_phase(BootPhase::Architecture);
+    register_phase(BootPhase::Serial);
+    register_phase(BootPhase::Gdt);
+    register_phase(BootPhase::MemoryMap);
+    register_phase(BootPhase::PhysicalAllocator);
+    register_phase(BootPhase::KernelMapper);
+    register_phase(BootPhase::Paging);
+    register_phase(BootPhase::Heap);
+    register_phase(BootPhase::Memory);
+    #[cfg(feature = "hw-framebuffer")]
+    register_phase(BootPhase::Framebuffer);
+    register_phase(BootPhase::Idt);
+    register_phase(BootPhase::Pic);
+    register_phase(BootPhase::Interrupts);
+    #[cfg(feature = "hw-amd64")]
+    register_phase(BootPhase::Amd64Cpu);
+    #[cfg(feature = "hw-ryzen")]
+    {
+        register_phase(BootPhase::RyzenCpu);
+        register_phase(BootPhase::RyzenTopology);
     }
+    #[cfg(feature = "hw-amd-chipset")]
+    register_phase(BootPhase::AmdSoc);
+    #[cfg(feature = "hw-amd-iommu")]
+    register_phase(BootPhase::AmdIommu);
+    #[cfg(feature = "hw-acpi")]
+    register_phase(BootPhase::AcpiTables);
+    #[cfg(feature = "hw-amd-telemetry")]
+    {
+        register_phase(BootPhase::Thermal);
+        register_phase(BootPhase::Battery);
+    }
+    #[cfg(feature = "hw-amdgpu")]
+    register_phase(BootPhase::AmdGpuRenoir);
+    #[cfg(feature = "hw-xhci")]
+    register_phase(BootPhase::AmdXhci);
+    #[cfg(feature = "hw-nvme")]
+    register_phase(BootPhase::Nvme);
+    #[cfg(feature = "hw-ahci")]
+    register_phase(BootPhase::Ahci);
+    #[cfg(feature = "hw-i8042")]
+    register_phase(BootPhase::I8042);
+    #[cfg(feature = "hw-ps2-keyboard")]
+    register_phase(BootPhase::Ps2Keyboard);
+    #[cfg(feature = "hw-usb-hid")]
+    {
+        register_phase(BootPhase::Xhci);
+        register_phase(BootPhase::UsbCore);
+        register_phase(BootPhase::UsbHid);
+        register_phase(BootPhase::UsbKeyboard);
+    }
+    #[cfg(feature = "hw-acpi-ec")]
+    register_phase(BootPhase::AcpiEc);
+    #[cfg(feature = "hw-laptop-hotkeys")]
+    register_phase(BootPhase::EcHotkeys);
+    #[cfg(feature = "hw-keyboard")]
+    register_phase(BootPhase::Input);
+    register_phase(BootPhase::KernelConstructed);
+    register_phase(BootPhase::BootInfoApplied);
+    register_phase(BootPhase::SupervisorCreated);
+    register_phase(BootPhase::RootFs);
+    register_phase(BootPhase::Supervisor);
+    register_phase(BootPhase::Userspace);
+    register_phase(BootPhase::Mtss);
+    register_phase(BootPhase::BootScreen);
+    register_phase(BootPhase::IdleLoop);
     BOOT_PHASE_MANAGER.lock().mark_registered_pending();
+}
+
+/// Compatibility shim for older seed-rs code paths; this no longer registers
+/// nonexistent services.
+pub fn boot_register_default_subsystems() {
+    boot_register_compiled_subsystems();
+}
+
+fn register_phase(phase: BootPhase) {
+    boot_register_subsystem(fallback_descriptor(phase));
 }
 
 pub fn boot_register_subsystem(descriptor: SubsystemDescriptor) {
@@ -722,15 +798,14 @@ pub fn boot_phase_render_screen() {
 }
 
 fn transition(phase: BootPhase, state: PhaseState, message: &'static str) {
-    let auto_registered = {
+    let registered = {
         let mut manager = BOOT_PHASE_MANAGER.lock();
-        let was_unregistered = manager.state(phase) == PhaseState::Unregistered;
-        manager.transition(phase, state, message);
-        was_unregistered
+        manager.transition(phase, state, message)
     };
 
-    if auto_registered {
-        write_auto_registration_warning_serial(phase);
+    if !registered {
+        write_unregistered_transition_serial(phase, state);
+        return;
     }
     write_transition_serial(phase, state, message);
 
@@ -746,7 +821,13 @@ fn framebuffer_ready() -> bool {
     )
 }
 
+#[allow(unreachable_code)]
 fn write_registration_serial(phase: BootPhase) {
+    #[cfg(test)]
+    {
+        let _ = phase;
+        return;
+    }
     unsafe {
         crate::arch::x86_64::early_debug::com1_write_str("[phase] ");
         crate::arch::x86_64::early_debug::com1_write_str(phase.name());
@@ -754,7 +835,13 @@ fn write_registration_serial(phase: BootPhase) {
     }
 }
 
+#[allow(unreachable_code)]
 fn write_duplicate_registration_serial(phase: BootPhase) {
+    #[cfg(test)]
+    {
+        let _ = phase;
+        return;
+    }
     unsafe {
         crate::arch::x86_64::early_debug::com1_write_str(
             "[phase] WARNING: duplicate registration for ",
@@ -764,14 +851,23 @@ fn write_duplicate_registration_serial(phase: BootPhase) {
     }
 }
 
-fn write_auto_registration_warning_serial(phase: BootPhase) {
+#[allow(unreachable_code)]
+fn write_unregistered_transition_serial(phase: BootPhase, state: PhaseState) {
+    #[cfg(test)]
+    {
+        let _ = (phase, state);
+        return;
+    }
     unsafe {
-        crate::arch::x86_64::early_debug::com1_write_str("[phase] WARNING: ");
+        crate::arch::x86_64::early_debug::com1_write_str("[phase] WARNING: ignored ");
+        crate::arch::x86_64::early_debug::com1_write_str(state.as_str());
+        crate::arch::x86_64::early_debug::com1_write_str(" for unregistered ");
         crate::arch::x86_64::early_debug::com1_write_str(phase.name());
-        crate::arch::x86_64::early_debug::com1_write_str(" started without registration\r\n");
+        crate::arch::x86_64::early_debug::com1_write_str("\r\n");
     }
 }
 
+#[allow(unreachable_code)]
 fn write_transition_serial(phase: BootPhase, state: PhaseState, message: &'static str) {
     unsafe {
         crate::arch::x86_64::early_debug::com1_write_str("[phase] ");
@@ -810,6 +906,17 @@ mod tests {
     }
 
     #[test]
+    fn unregistered_transition_is_ignored() {
+        let mut manager = BootPhaseManager::new();
+        assert!(!manager.transition(BootPhase::UsbKeyboard, PhaseState::Started, "started"));
+        assert_eq!(
+            manager.state(BootPhase::UsbKeyboard),
+            PhaseState::Unregistered
+        );
+        assert!(manager.record(BootPhase::UsbKeyboard).is_none());
+    }
+
+    #[test]
     fn progress_uses_registered_weights() {
         let mut manager = BootPhaseManager::new();
         manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[0]);
@@ -830,9 +937,9 @@ mod tests {
         let clear_bss = handoff
             .find("boot::clear_bss();")
             .expect("seed handoff should clear BSS before registration");
-        let register_defaults = handoff
-            .find("boot_register_default_subsystems();")
-            .expect("seed handoff should register default boot phases");
+        let register_compiled = handoff
+            .find("boot_register_compiled_subsystems();")
+            .expect("seed handoff should register compiled boot phases");
         let start_seed = handoff
             .find("boot_phase_start(BootPhase::SeedRs);")
             .expect("seed handoff should start the Seed-rs phase");
@@ -841,12 +948,12 @@ mod tests {
             .expect("seed handoff should emit its first diagnostic after phase start");
 
         assert!(
-            clear_bss < register_defaults,
+            clear_bss < register_compiled,
             "BSS must be cleared before writing the boot phase manager's static table"
         );
         assert!(
-            register_defaults < start_seed,
-            "default registration must precede Seed-rs start to avoid auto-registration warnings"
+            register_compiled < start_seed,
+            "compiled registration must precede Seed-rs start to avoid auto-registration warnings"
         );
         assert!(
             start_seed < first_marker,

@@ -7,6 +7,7 @@ pub mod boot_status;
 pub mod cpu;
 pub mod debug_shell;
 pub mod device;
+pub mod dispatch;
 pub mod elf;
 pub mod exec;
 pub mod fs;
