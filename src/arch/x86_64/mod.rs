@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
 use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
-use crate::kernel::boot_status::{BootStage, BootState, BootStatus};
+use crate::kernel::boot_phase::{boot_phase_ok, boot_phase_skipped, boot_phase_start, BootPhase};
 use crate::kernel::cpu::MAX_CORES;
 use crate::kernel::device::{DeviceDriver, MirageInputEvent};
 #[cfg(not(feature = "emergency-boot"))]
@@ -91,17 +91,18 @@ static mut PER_CPU: [PerCpuState; MAX_CORES] = [PerCpuState::new(); MAX_CORES];
 /// state, and interrupt controller state. Emergency boots deliberately stop
 /// after raw serial diagnostics so the halt path cannot reach heap, paging,
 /// framebuffer, or interrupt-controller setup before those subsystems are safe.
-pub fn init_architecture(boot_info: &BootInfo, boot_status: &mut BootStatus) {
+pub fn init_architecture(boot_info: &BootInfo) {
     if INITIALISED.swap(true, Ordering::SeqCst) {
         return;
     }
 
+    #[cfg(not(feature = "emergency-boot"))]
+    boot_phase_start(BootPhase::Serial);
     uart16550::init_early_serial();
 
     #[cfg(feature = "emergency-boot")]
     {
         let _ = boot_info;
-        let _ = boot_status;
         unsafe {
             early_debug::com1_write_str("serial initialized\r\n");
         }
@@ -110,29 +111,21 @@ pub fn init_architecture(boot_info: &BootInfo, boot_status: &mut BootStatus) {
     #[cfg(not(feature = "emergency-boot"))]
     {
         crate::kprintln!("serial initialized");
-        boot_status.set_stage(BootStage::Architecture);
-        boot_status.architecture = BootState::Ok;
-        boot_status.set_stage(BootStage::BootInfo);
-        boot_status.bootloader = BootState::Ok;
+        boot_phase_ok(BootPhase::Serial);
         configure_cpu_modes();
         initialize_per_cpu_state();
         setup_memory_layout(boot_info);
-        initialize_framebuffer_console(boot_info, boot_status);
-        configure_interrupts(boot_status);
+        initialize_framebuffer_console(boot_info);
+        configure_interrupts();
     }
 }
 
 #[cfg(all(not(feature = "emergency-boot"), feature = "hw-framebuffer"))]
-fn initialize_framebuffer_console(boot_info: &BootInfo, boot_status: &mut BootStatus) {
-    boot_status.set_stage(BootStage::Framebuffer);
+fn initialize_framebuffer_console(boot_info: &BootInfo) {
+    boot_phase_start(BootPhase::Framebuffer);
     match framebuffer_console::init_from_boot_info(boot_info) {
         Ok(Some(framebuffer)) => {
-            boot_status.framebuffer = BootState::Online;
-            boot_status.set_framebuffer_mode(
-                framebuffer.width,
-                framebuffer.height,
-                framebuffer.bits_per_pixel,
-            );
+            boot_phase_ok(BootPhase::Framebuffer);
             crate::kprintln!("Mirage framebuffer online");
             crate::kprintln!("  resolution: {}x{}", framebuffer.width, framebuffer.height);
             crate::kprintln!("  pitch: {}", framebuffer.pitch);
@@ -140,15 +133,18 @@ fn initialize_framebuffer_console(boot_info: &BootInfo, boot_status: &mut BootSt
             crate::kprintln!("  framebuffer address: {:#018x}", framebuffer.address.0);
         }
         Ok(None) | Err(_) => {
-            boot_status.framebuffer = BootState::Skipped;
+            boot_phase_skipped(
+                BootPhase::Framebuffer,
+                "framebuffer unavailable; serial console only",
+            );
             crate::kprintln!("framebuffer unavailable; serial console only");
         }
     }
 }
 
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "hw-framebuffer")))]
-fn initialize_framebuffer_console(_boot_info: &BootInfo, boot_status: &mut BootStatus) {
-    boot_status.framebuffer = BootState::Skipped;
+fn initialize_framebuffer_console(_boot_info: &BootInfo) {
+    boot_phase_skipped(BootPhase::Framebuffer, "framebuffer feature disabled");
     crate::kprintln!("framebuffer unavailable; serial console only");
 }
 
@@ -372,16 +368,29 @@ pub fn panic_halt() -> ! {
 #[cfg(not(feature = "emergency-boot"))]
 fn configure_cpu_modes() {
     interrupts::disable();
+    boot_phase_start(BootPhase::Gdt);
     gdt::initialize();
+    boot_phase_ok(BootPhase::Gdt);
     crate::kprintln!("GDT initialized");
 }
 
 #[cfg(not(feature = "emergency-boot"))]
 fn setup_memory_layout(boot_info: &BootInfo) {
+    boot_phase_start(BootPhase::MemoryMap);
     validate_boot_memory_handoff(boot_info);
+    boot_phase_ok(BootPhase::MemoryMap);
 
+    boot_phase_start(BootPhase::KernelMapper);
     paging::initialize(boot_info);
+    boot_phase_ok(BootPhase::KernelMapper);
+
+    boot_phase_start(BootPhase::PhysicalAllocator);
     memory::initialize_from_boot_info(boot_info);
+    boot_phase_ok(BootPhase::PhysicalAllocator);
+    boot_phase_start(BootPhase::Heap);
+    boot_phase_ok(BootPhase::Heap);
+    boot_phase_start(BootPhase::Memory);
+    boot_phase_ok(BootPhase::Memory);
     crate::kprintln!("memory map parsed");
     crate::kprintln!("memory initialized");
     print_early_memory_diagnostics(boot_info);
@@ -487,17 +496,17 @@ fn print_early_memory_diagnostics(boot_info: &BootInfo) {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
-fn configure_interrupts(boot_status: &mut BootStatus) {
-    boot_status.set_stage(BootStage::Idt);
+fn configure_interrupts() {
+    boot_phase_start(BootPhase::Idt);
     idt::initialize();
-    boot_status.idt = BootState::Ok;
+    boot_phase_ok(BootPhase::Idt);
     crate::kprintln!("IDT initialized");
-    boot_status.set_stage(BootStage::Pic);
+    boot_phase_start(BootPhase::Pic);
     pic::initialize();
-    boot_status.pic = BootState::Ok;
+    boot_phase_ok(BootPhase::Pic);
     crate::kprintln!("PIC initialized");
-    boot_status.set_stage(BootStage::Interrupts);
+    boot_phase_start(BootPhase::Interrupts);
     interrupts::enable();
-    boot_status.interrupts = BootState::Enabled;
+    boot_phase_ok(BootPhase::Interrupts);
     crate::kprintln!("interrupts enabled");
 }

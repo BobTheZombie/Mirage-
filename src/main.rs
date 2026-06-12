@@ -7,8 +7,9 @@ extern crate mirage;
 use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
-use mirage::kernel::boot_screen::render_persistent_boot_screen;
-use mirage::kernel::boot_status::{BootStage, BootState, BootStatus};
+use mirage::kernel::boot_phase::{
+    boot_phase_failed, boot_phase_ok, boot_phase_start, boot_phase_stub, BootPhase,
+};
 #[cfg(all(
     not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")),
     not(feature = "full-boot")
@@ -34,10 +35,8 @@ use mirage::supervisor::Supervisor;
 
 #[no_mangle]
 pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
-    #[cfg(not(feature = "seed-rs-qemu-emergency"))]
-    unsafe {
-        mirage::arch::x86_64::early_debug::boot_marker(7);
-    }
+    #[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
+    boot_phase_start(BootPhase::KernelMain);
 
     #[cfg(feature = "seed-rs-qemu-emergency")]
     {
@@ -64,60 +63,57 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
     #[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
     {
         mirage::kprintln!("Mirage kernel booting...");
-        let mut boot_status = BootStatus::new();
         if !boot_info.limine_base_revision_supported() {
+            boot_phase_failed(BootPhase::BootInfo, "unsupported Limine base revision");
             mirage::kprintln!("unsupported Limine base revision");
             mirage::arch::x86_64::panic_halt();
         }
+        boot_phase_ok(BootPhase::KernelMain);
         mirage::kprintln!("architecture init starting");
-        unsafe {
-            mirage::arch::x86_64::early_debug::boot_marker(8);
-        }
-        x86_64::init_architecture(&boot_info, &mut boot_status);
-        unsafe {
-            mirage::arch::x86_64::early_debug::boot_marker(9);
-        }
+        boot_phase_start(BootPhase::Architecture);
+        x86_64::init_architecture(&boot_info);
+        boot_phase_ok(BootPhase::Architecture);
+        boot_phase_start(BootPhase::KernelConstructed);
         let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
+        boot_phase_ok(BootPhase::KernelConstructed);
         mirage::kprintln!("kernel constructed");
+        boot_phase_start(BootPhase::BootInfoApplied);
         kernel.bootstrap_with_boot_info(&boot_info);
-        boot_status.set_stage(BootStage::Memory);
-        // Memory, paging, and heap remain milestone-pending until ownership and allocator
-        // milestones make those subsystems official boot-screen statuses.
+        boot_phase_ok(BootPhase::BootInfoApplied);
         mirage::kprintln!("boot info applied");
-        render_persistent_boot_screen(&boot_status);
 
         if cpu::MAX_CORES > 1 {
             kernel.bring_up_secondary_cores(cpu::MAX_CORES - 1);
         }
 
+        boot_phase_start(BootPhase::SupervisorCreated);
         let supervisor = Supervisor::new();
+        boot_phase_ok(BootPhase::SupervisorCreated);
         mirage::kprintln!("supervisor created");
 
         #[cfg(feature = "full-boot")]
         {
-            boot_status.set_stage(BootStage::RootFs);
+            boot_phase_start(BootPhase::RootFs);
             match kernel.mount_root_from_boot_sources(boot_info.modules) {
                 Ok(source) => {
-                    boot_status.root_fs = BootState::Ok;
+                    boot_phase_ok(BootPhase::RootFs);
                     mirage::kprintln!("root mount attempt succeeded: {:?}", source);
                 }
                 Err(error) => {
-                    boot_status.root_fs = BootState::Failed;
+                    boot_phase_failed(BootPhase::RootFs, "root mount failed");
                     mirage::kprintln!("root mount attempt failed: {:?}", error);
                 }
             }
-            render_persistent_boot_screen(&boot_status);
-
             // Start L2 first, then L1-supervised device-facing daemons.
-            boot_status.set_stage(BootStage::Supervisor);
+            boot_phase_start(BootPhase::Supervisor);
             let service_report = supervisor.bootstrap_services(&mut kernel);
             if service_report.all_running() {
-                boot_status.supervisor = BootState::Ok;
+                boot_phase_ok(BootPhase::Supervisor);
                 mirage::kprintln!(
                     "supervisor initialization succeeded: full service manifest running"
                 );
             } else {
-                boot_status.supervisor = BootState::Failed;
+                boot_phase_failed(BootPhase::Supervisor, "full service manifest incomplete");
                 mirage::kprintln!(
                     "supervisor initialization failed: full service manifest incomplete"
                 );
@@ -137,50 +133,49 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
 
-            render_persistent_boot_screen(&boot_status);
-            boot_status.set_stage(BootStage::Userspace);
+            boot_phase_start(BootPhase::Userspace);
             match kernel.bootstrap_userspace_init() {
                 Ok(pid) => {
-                    boot_status.userspace = BootState::Ok;
+                    boot_phase_ok(BootPhase::Userspace);
                     mirage::kprintln!("userspace init attempt succeeded: pid={:?}", pid);
                 }
                 Err(error) => {
-                    boot_status.userspace = BootState::Stub;
+                    boot_phase_stub(
+                        BootPhase::Userspace,
+                        "userspace init unavailable in milestone",
+                    );
                     mirage::kprintln!(
                         "userspace init attempt skipped/stubbed for minimal boot milestone: {:?}",
                         error
                     );
                 }
             }
-            render_persistent_boot_screen(&boot_status);
         }
 
         #[cfg(not(feature = "full-boot"))]
         {
-            boot_status.set_stage(BootStage::RootFs);
+            boot_phase_start(BootPhase::RootFs);
             match kernel.mount_root_from_boot_sources(boot_info.modules) {
                 Ok(source) => {
-                    boot_status.root_fs = BootState::Ok;
+                    boot_phase_ok(BootPhase::RootFs);
                     mirage::kprintln!("root mount attempt succeeded: {:?}", source);
                 }
                 Err(error) => {
-                    boot_status.root_fs = BootState::Failed;
+                    boot_phase_failed(BootPhase::RootFs, "root mount failed");
                     mirage::kprintln!("root mount attempt failed: {:?}", error);
                 }
             }
-            render_persistent_boot_screen(&boot_status);
-
-            boot_status.set_stage(BootStage::Supervisor);
+            boot_phase_start(BootPhase::Supervisor);
             mirage::kprintln!("minimal supervisor bootstrap starting");
             let minimal_report = supervisor.bootstrap_minimal(&mut kernel);
             mirage::kprintln!("minimal supervisor bootstrap complete");
             match minimal_report.failure {
                 Some(error) => {
-                    boot_status.supervisor = BootState::Failed;
+                    boot_phase_failed(BootPhase::Supervisor, "minimal supervisor bootstrap failed");
                     mirage::kprintln!("supervisor initialization failed: {:?}", error);
                 }
                 None => {
-                    boot_status.supervisor = BootState::Ok;
+                    boot_phase_ok(BootPhase::Supervisor);
                     mirage::kprintln!(
                         "supervisor initialization succeeded: minimal registry entries={}",
                         minimal_report.len()
@@ -188,13 +183,13 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
 
-            render_persistent_boot_screen(&boot_status);
-            boot_status.set_stage(BootStage::Userspace);
-            boot_status.userspace = BootState::Stub;
+            boot_phase_stub(
+                BootPhase::Userspace,
+                "minimal boot milestone uses supervisor-only skeleton",
+            );
             mirage::kprintln!(
             "userspace init attempt skipped: minimal boot milestone uses supervisor-only skeleton"
         );
-            render_persistent_boot_screen(&boot_status);
 
             mirage::kprintln!("loading boot manifest");
             // Temporary compiled-in manifest fixture: replace this with Limine module
@@ -257,20 +252,17 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             }
         }
 
-        boot_status.set_stage(BootStage::Mtss);
+        boot_phase_start(BootPhase::Mtss);
         kernel.kernel_mtss_init();
-        boot_status.mtss = BootState::Ok;
+        boot_phase_ok(BootPhase::Mtss);
         mirage::kprintln!("MTSS initialized");
-        if boot_status.memory == BootState::Pending {
-            boot_status.set_stage(BootStage::Memory);
-        } else {
-            boot_status.set_stage(BootStage::IdleLoop);
-        }
-        render_persistent_boot_screen(&boot_status);
+        boot_phase_start(BootPhase::BootScreen);
+        boot_phase_ok(BootPhase::BootScreen);
+        boot_phase_start(BootPhase::IdleLoop);
         let mut observed_timer_ticks = x86_64::timer_ticks();
         loop {
             if x86_64::poll_debug_shell_hotkey() {
-                debug_shell::enter_early_debug_shell(&mut kernel, &boot_status);
+                debug_shell::enter_early_debug_shell(&mut kernel);
             }
             if x86_64::timer_tick_pending(&mut observed_timer_ticks) {
                 kernel.tick();
