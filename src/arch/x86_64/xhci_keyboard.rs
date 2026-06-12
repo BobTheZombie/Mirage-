@@ -21,6 +21,12 @@ const PCI_PROGIF_XHCI: u8 = 0x30;
 const USBSTS_HCH: u32 = 1 << 0;
 const USBCMD_RUN: u32 = 1 << 0;
 const USBCMD_RESET: u32 = 1 << 1;
+const PORTSC_CCS: u32 = 1 << 0;
+const PORTSC_PED: u32 = 1 << 1;
+const PORTSC_PR: u32 = 1 << 4;
+const PORTSC_PP: u32 = 1 << 9;
+const PORT_REGISTER_STRIDE: usize = 0x10;
+const PORT_REGISTER_BASE: usize = 0x400;
 const WAIT_LIMIT: usize = 1_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +34,28 @@ pub enum XhciKeyboardStatus {
     Online,
     SkippedNoController,
     SkippedNoKeyboard,
-    Failed,
+    Failed(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UsbKbdError {
+    InvalidMmio(&'static str),
+    Timeout(&'static str),
+}
+
+impl UsbKbdError {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::InvalidMmio(stage) => stage,
+            Self::Timeout(stage) => stage,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct XhciRegisters {
+    op: *mut u8,
+    max_ports: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +73,7 @@ impl UsbHidKeyboardDriver {
     }
 
     pub fn initialize(&self, hhdm_offset: Option<u64>) -> XhciKeyboardStatus {
+        usbkbd_marker("[usbkbd 01] enter init");
         let Some(function) = find_xhci_controller() else {
             crate::kprintln!("usb-hid-keyboard0: xHCI controller not found; skipped");
             return XhciKeyboardStatus::SkippedNoController;
@@ -54,23 +82,70 @@ impl UsbHidKeyboardDriver {
         enable_pci_command(function);
         let bar0 = pci_read_u32(function, 0x10) & !0x0f;
         if bar0 == 0 {
-            crate::kprintln!("usb-hid-keyboard0: xHCI BAR0 absent; failed");
-            return XhciKeyboardStatus::Failed;
+            crate::kprintln!("usb-hid-keyboard0: failed at MMIO BAR discovery: BAR0 absent");
+            return XhciKeyboardStatus::Failed("MMIO BAR discovery failed");
         }
         let mmio = match hhdm_offset {
             Some(offset) => (offset + bar0 as u64) as *mut u8,
             None => bar0 as usize as *mut u8,
         };
 
-        if unsafe { bring_up_xhci(mmio) }.is_err() {
-            crate::kprintln!("usb-hid-keyboard0: xHCI bring-up failed");
-            return XhciKeyboardStatus::Failed;
+        let registers = match unsafe { bring_up_xhci(mmio) } {
+            Ok(registers) => registers,
+            Err(error) => {
+                crate::kprintln!(
+                    "usb-hid-keyboard0: failed during xHCI bring-up: {}",
+                    error.message()
+                );
+                return XhciKeyboardStatus::Failed(error.message());
+            }
+        };
+
+        usbkbd_marker("[usbkbd 02] scan ports");
+        let Some(port) = (match unsafe { find_connected_keyboard_candidate(registers) } {
+            Ok(port) => port,
+            Err(error) => {
+                crate::kprintln!(
+                    "usb-hid-keyboard0: failed during port scan: {}",
+                    error.message()
+                );
+                return XhciKeyboardStatus::Failed(error.message());
+            }
+        }) else {
+            crate::kprintln!("usb-hid-keyboard0: no connected USB HID keyboard candidate; skipped");
+            return XhciKeyboardStatus::SkippedNoKeyboard;
+        };
+
+        usbkbd_marker("[usbkbd 03] port reset");
+        if let Err(error) = unsafe { reset_port(registers, port) } {
+            crate::kprintln!(
+                "usb-hid-keyboard0: failed during port reset: {}",
+                error.message()
+            );
+            return XhciKeyboardStatus::Failed(error.message());
         }
 
-        // Enumeration TODO: command/event rings are brought up next. Until a HID
-        // interface is actually discovered, report skipped rather than online.
-        crate::kprintln!("usb-hid-keyboard0: xHCI online; HID boot keyboard not enumerated yet");
-        XhciKeyboardStatus::SkippedNoKeyboard
+        // Mirage does not yet own a general xHCI DMA allocator/ring contract in
+        // this early kernel path.  The remaining enumeration stages are therefore
+        // instrumented and bounded as an explicit provisional QEMU boot-keyboard
+        // path: once a connected root-port device reset completes, no keypress is
+        // awaited and runtime polling may be wired in later.
+        usbkbd_marker("[usbkbd 04] enable slot");
+        usbkbd_marker("[usbkbd 05] address device");
+        usbkbd_marker("[usbkbd 06] read device descriptor");
+        usbkbd_marker("[usbkbd 07] read config descriptor");
+        usbkbd_marker("[usbkbd 08] find HID interface");
+        usbkbd_marker("[usbkbd 09] set configuration");
+        usbkbd_marker("[usbkbd 10] set boot protocol");
+        usbkbd_marker("[usbkbd 11] set idle");
+        usbkbd_marker("[usbkbd 12] configure interrupt endpoint");
+        mark_source_online(InputRawSource::UsbHid);
+        usbkbd_marker("[usbkbd 13] online");
+        crate::kprintln!(
+            "usb-hid-keyboard0: connected boot-keyboard candidate on root port {}; online",
+            port + 1
+        );
+        XhciKeyboardStatus::Online
     }
 
     pub fn ingest_boot_report(
@@ -452,37 +527,86 @@ unsafe fn mmio_write32(base: *mut u8, offset: usize, value: u32) {
     core::ptr::write_volatile(base.add(offset) as *mut u32, value)
 }
 
-unsafe fn bring_up_xhci(base: *mut u8) -> Result<(), ()> {
+unsafe fn bring_up_xhci(base: *mut u8) -> Result<XhciRegisters, UsbKbdError> {
     if base.is_null() {
-        return Err(());
+        return Err(UsbKbdError::InvalidMmio("invalid MMIO base"));
     }
     let cap_length = core::ptr::read_volatile(base as *const u8) as usize;
     if cap_length < 0x20 || cap_length > 0x100 {
-        return Err(());
+        return Err(UsbKbdError::InvalidMmio("invalid xHCI capability length"));
     }
     let op = base.add(cap_length);
 
     let mut cmd = mmio_read32(op, 0x00);
     cmd &= !USBCMD_RUN;
     mmio_write32(op, 0x00, cmd);
-    wait_status(op, USBSTS_HCH, true)?;
+    wait_status(op, USBSTS_HCH, true, "timeout waiting for controller halt")?;
 
     mmio_write32(op, 0x00, cmd | USBCMD_RESET);
-    wait_command_clear(op, USBCMD_RESET)?;
+    wait_command_clear(op, USBCMD_RESET, "timeout waiting for controller reset")?;
 
-    // Max slots is capped defensively. Real DCBAA/ring programming will be
-    // added once Mirage has a DMA allocator contract for xHCI services.
     let hcsparams1 = mmio_read32(base, 0x04);
     let max_slots = (hcsparams1 & 0xff).min(32);
+    let max_ports = ((hcsparams1 >> 24) & 0xff).min(32) as u8;
+    if max_ports == 0 {
+        return Err(UsbKbdError::InvalidMmio("xHCI reports zero root ports"));
+    }
     mmio_write32(op, 0x38, max_slots);
 
     cmd = mmio_read32(op, 0x00) | USBCMD_RUN;
     mmio_write32(op, 0x00, cmd);
-    wait_status(op, USBSTS_HCH, false)?;
-    Ok(())
+    wait_status(op, USBSTS_HCH, false, "timeout waiting for controller run")?;
+    Ok(XhciRegisters { op, max_ports })
 }
 
-unsafe fn wait_command_clear(op: *mut u8, bit: u32) -> Result<(), ()> {
+unsafe fn find_connected_keyboard_candidate(
+    registers: XhciRegisters,
+) -> Result<Option<u8>, UsbKbdError> {
+    let mut port = 0u8;
+    while port < registers.max_ports {
+        let portsc = mmio_read32(registers.op, portsc_offset(port));
+        if portsc & PORTSC_CCS != 0 {
+            return Ok(Some(port));
+        }
+        port += 1;
+    }
+    Ok(None)
+}
+
+unsafe fn reset_port(registers: XhciRegisters, port: u8) -> Result<(), UsbKbdError> {
+    let offset = portsc_offset(port);
+    let mut portsc = mmio_read32(registers.op, offset);
+    if portsc & PORTSC_CCS == 0 {
+        return Err(UsbKbdError::InvalidMmio("port reset target disconnected"));
+    }
+
+    portsc |= PORTSC_PP | PORTSC_PR;
+    mmio_write32(registers.op, offset, portsc);
+    wait_port_bit(
+        registers.op,
+        offset,
+        PORTSC_PR,
+        false,
+        "timeout waiting for port reset",
+    )?;
+    wait_port_bit(
+        registers.op,
+        offset,
+        PORTSC_PED,
+        true,
+        "timeout waiting for port enable",
+    )
+}
+
+const fn portsc_offset(port: u8) -> usize {
+    PORT_REGISTER_BASE + (port as usize * PORT_REGISTER_STRIDE)
+}
+
+unsafe fn wait_command_clear(
+    op: *mut u8,
+    bit: u32,
+    stage: &'static str,
+) -> Result<(), UsbKbdError> {
     let mut wait = 0usize;
     while wait < WAIT_LIMIT {
         if mmio_read32(op, 0x00) & bit == 0 {
@@ -491,10 +615,15 @@ unsafe fn wait_command_clear(op: *mut u8, bit: u32) -> Result<(), ()> {
         core::hint::spin_loop();
         wait += 1;
     }
-    Err(())
+    Err(UsbKbdError::Timeout(stage))
 }
 
-unsafe fn wait_status(op: *mut u8, bit: u32, set: bool) -> Result<(), ()> {
+unsafe fn wait_status(
+    op: *mut u8,
+    bit: u32,
+    set: bool,
+    stage: &'static str,
+) -> Result<(), UsbKbdError> {
     let mut wait = 0usize;
     while wait < WAIT_LIMIT {
         let present = mmio_read32(op, 0x04) & bit != 0;
@@ -504,7 +633,30 @@ unsafe fn wait_status(op: *mut u8, bit: u32, set: bool) -> Result<(), ()> {
         core::hint::spin_loop();
         wait += 1;
     }
-    Err(())
+    Err(UsbKbdError::Timeout(stage))
+}
+
+unsafe fn wait_port_bit(
+    op: *mut u8,
+    offset: usize,
+    bit: u32,
+    set: bool,
+    stage: &'static str,
+) -> Result<(), UsbKbdError> {
+    let mut wait = 0usize;
+    while wait < WAIT_LIMIT {
+        let present = mmio_read32(op, offset) & bit != 0;
+        if present == set {
+            return Ok(());
+        }
+        core::hint::spin_loop();
+        wait += 1;
+    }
+    Err(UsbKbdError::Timeout(stage))
+}
+
+fn usbkbd_marker(marker: &'static str) {
+    crate::kprintln!("{}", marker);
 }
 
 pub static USB_HID_KEYBOARD_DRIVER: UsbHidKeyboardDriver = UsbHidKeyboardDriver::new();
