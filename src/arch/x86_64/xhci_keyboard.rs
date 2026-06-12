@@ -59,12 +59,20 @@ pub enum DriverStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleInitStatus {
+    Online,
+    Ok,
+    Skipped(&'static str),
+    Failed(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DriverModuleDescriptor {
     pub name: &'static str,
     pub category: DriverCategory,
-    pub dependencies: &'static [&'static str],
     pub phase: crate::kernel::boot_phase::BootPhase,
     pub required: bool,
+    pub dependencies: &'static [crate::kernel::boot_phase::BootPhase],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,10 +262,13 @@ struct UsbCoreModule;
 struct UsbHidModule;
 struct UsbKeyboardModule;
 
-const XHCI_DEPS: &[&str] = &[];
-const USB_CORE_DEPS: &[&str] = &["xhci-host0"];
-const USB_HID_DEPS: &[&str] = &["usb-core0"];
-const USB_KBD_DEPS: &[&str] = &["usb-hid0"];
+const XHCI_DEPS: &[crate::kernel::boot_phase::BootPhase] = &[];
+const USB_CORE_DEPS: &[crate::kernel::boot_phase::BootPhase] =
+    &[crate::kernel::boot_phase::BootPhase::Xhci];
+const USB_HID_DEPS: &[crate::kernel::boot_phase::BootPhase] =
+    &[crate::kernel::boot_phase::BootPhase::UsbCore];
+const USB_KBD_DEPS: &[crate::kernel::boot_phase::BootPhase] =
+    &[crate::kernel::boot_phase::BootPhase::UsbHid];
 
 static XHCI_HOST_MODULE_INSTANCE: XhciHostModule = XhciHostModule;
 static USB_CORE_MODULE_INSTANCE: UsbCoreModule = UsbCoreModule;
@@ -651,10 +662,10 @@ pub fn initialize_usb_driver_stack(hhdm_offset: Option<u64>) -> UsbStackBootStat
             .register(USB_KBD_MODULE, USB_KEYBOARD_MODULE_INSTANCE.descriptor());
     }
 
-    run_optional_module(&XHCI_HOST_MODULE_INSTANCE, XHCI_MODULE);
-    run_optional_module(&USB_CORE_MODULE_INSTANCE, USB_CORE_MODULE);
-    run_optional_module(&USB_HID_MODULE_INSTANCE, USB_HID_MODULE);
-    run_optional_module(&USB_KEYBOARD_MODULE_INSTANCE, USB_KBD_MODULE);
+    run_dependency_gated_module(&XHCI_HOST_MODULE_INSTANCE, XHCI_MODULE);
+    run_dependency_gated_module(&USB_CORE_MODULE_INSTANCE, USB_CORE_MODULE);
+    run_dependency_gated_module(&USB_HID_MODULE_INSTANCE, USB_HID_MODULE);
+    run_dependency_gated_module(&USB_KEYBOARD_MODULE_INSTANCE, USB_KBD_MODULE);
 
     let stack = USB_DRIVER_STACK.lock();
     let keyboard = match stack.registry.status(USB_KBD_MODULE) {
@@ -677,11 +688,65 @@ pub fn initialize_usb_driver_stack(hhdm_offset: Option<u64>) -> UsbStackBootStat
     }
 }
 
-fn run_optional_module(module: &dyn DriverModule, slot: usize) {
-    match module.init().and_then(|_| module.start()) {
-        Ok(()) => {}
+fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> ModuleInitStatus {
+    use crate::kernel::boot_phase::{
+        boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_skipped, boot_phase_start,
+        PhaseState,
+    };
+
+    let descriptor = module.descriptor();
+    let mut dep_index = 0usize;
+    while dep_index < descriptor.dependencies.len() {
+        let dependency = descriptor.dependencies[dep_index];
+        let dependency_state = crate::kernel::boot_phase::boot_phase_state(dependency);
+        match dependency_state {
+            PhaseState::Ok | PhaseState::Online | PhaseState::Enabled => {}
+            PhaseState::Failed => {
+                let reason = "required dependency failed";
+                let mut stack = USB_DRIVER_STACK.lock();
+                stack.registry.set_status(slot, DriverStatus::Skipped);
+                drop(stack);
+                boot_phase_skipped(descriptor.phase, reason);
+                crate::kprintln!(
+                    "[usbdrv] {} skipped: dependency {} failed",
+                    descriptor.name,
+                    dependency.name()
+                );
+                return ModuleInitStatus::Skipped(reason);
+            }
+            PhaseState::Skipped
+            | PhaseState::Stub
+            | PhaseState::Unregistered
+            | PhaseState::Registered
+            | PhaseState::Pending
+            | PhaseState::Started
+            | PhaseState::Detected => {
+                let reason = "required dependency unavailable";
+                let mut stack = USB_DRIVER_STACK.lock();
+                stack.registry.set_status(slot, DriverStatus::Skipped);
+                drop(stack);
+                boot_phase_skipped(descriptor.phase, reason);
+                crate::kprintln!(
+                    "[usbdrv] {} skipped: dependency {} not online",
+                    descriptor.name,
+                    dependency.name()
+                );
+                return ModuleInitStatus::Skipped(reason);
+            }
+        }
+        dep_index += 1;
+    }
+
+    boot_phase_start(descriptor.phase);
+    let status = match module.init().and_then(|_| module.start()) {
+        Ok(()) => match module.status() {
+            DriverStatus::Online => ModuleInitStatus::Online,
+            DriverStatus::Initialized => ModuleInitStatus::Ok,
+            DriverStatus::Skipped => ModuleInitStatus::Skipped("module skipped"),
+            DriverStatus::Failed => ModuleInitStatus::Failed("driver module failed"),
+            DriverStatus::Registered => ModuleInitStatus::Skipped("driver module did not start"),
+        },
         Err(error) => {
-            let mut stack = USB_DRIVER_STACK.lock();
             let skipped = matches!(
                 error,
                 DriverError::DependencySkipped(_)
@@ -690,6 +755,7 @@ fn run_optional_module(module: &dyn DriverModule, slot: usize) {
                     | DriverError::NoHid
                     | DriverError::NoKeyboard
             );
+            let mut stack = USB_DRIVER_STACK.lock();
             stack.registry.set_status(
                 slot,
                 if skipped {
@@ -698,9 +764,23 @@ fn run_optional_module(module: &dyn DriverModule, slot: usize) {
                     DriverStatus::Failed
                 },
             );
-            crate::kprintln!("[usbdrv] {}: {}", module.descriptor().name, error.message());
+            drop(stack);
+            crate::kprintln!("[usbdrv] {}: {}", descriptor.name, error.message());
+            if skipped {
+                ModuleInitStatus::Skipped(error.message())
+            } else {
+                ModuleInitStatus::Failed(error.message())
+            }
         }
+    };
+
+    match status {
+        ModuleInitStatus::Online => boot_phase_online(descriptor.phase),
+        ModuleInitStatus::Ok => boot_phase_ok(descriptor.phase),
+        ModuleInitStatus::Skipped(message) => boot_phase_skipped(descriptor.phase, message),
+        ModuleInitStatus::Failed(message) => boot_phase_failed(descriptor.phase, message),
     }
+    status
 }
 
 static CURRENT_HHDM_OFFSET: core::sync::atomic::AtomicU64 =
