@@ -11,6 +11,7 @@ pub mod elf;
 pub mod exec;
 pub mod fs;
 pub mod futex;
+pub mod input;
 pub mod ipc;
 pub mod memory;
 pub mod process;

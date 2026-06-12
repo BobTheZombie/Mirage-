@@ -165,6 +165,79 @@ visible_if = ["CONFIG_MIRAGE_HW_PCI"]
 type = "bool"
 cargo_feature = "hw-xhci"
 
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_KEYBOARD"
+prompt = "Hardware keyboard input subsystem"
+category = "Hardware"
+default = false
+help = "Enable the common early hardware keyboard input subsystem."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = []
+visible_if = []
+type = "bool"
+cargo_feature = "hw-keyboard"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_I8042"
+prompt = "i8042 PS/2 controller"
+category = "Hardware"
+default = false
+help = "Enable the hardware-backed i8042 PS/2 controller path."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = []
+visible_if = []
+type = "bool"
+cargo_feature = "hw-i8042"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_PS2_KEYBOARD"
+prompt = "PS/2 keyboard"
+category = "Hardware"
+default = false
+help = "Enable the built-in PS/2 keyboard driver and select i8042 support."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = ["CONFIG_MIRAGE_HW_KEYBOARD", "CONFIG_MIRAGE_HW_I8042"]
+visible_if = []
+type = "bool"
+cargo_feature = "hw-ps2-keyboard"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_USB_HID_KEYBOARD"
+prompt = "USB HID boot keyboard"
+category = "Hardware"
+default = false
+help = "Enable USB HID boot keyboard support through the xHCI hardware path."
+depends_on = ["CONFIG_MIRAGE_HW_XHCI"]
+selects = ["CONFIG_MIRAGE_HW_KEYBOARD"]
+visible_if = ["CONFIG_MIRAGE_HW_XHCI"]
+type = "bool"
+cargo_feature = "hw-usb-hid"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_ACPI_EC"
+prompt = "ACPI Embedded Controller"
+category = "Hardware"
+default = false
+help = "Enable generic ACPI Embedded Controller hardware probing."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = []
+visible_if = []
+type = "bool"
+cargo_feature = "hw-acpi-ec"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_LAPTOP_HOTKEYS"
+prompt = "Laptop ACPI EC hotkeys"
+category = "Hardware"
+default = false
+help = "Enable laptop hotkey events through the ACPI EC query path."
+depends_on = ["CONFIG_MIRAGE_HW_ACPI_EC"]
+selects = ["CONFIG_MIRAGE_HW_KEYBOARD"]
+visible_if = ["CONFIG_MIRAGE_HW_ACPI_EC"]
+type = "bool"
+cargo_feature = "hw-laptop-hotkeys"
+
 [[options]]
 symbol = "CONFIG_MIRAGE_IPC"
 prompt = "Kernel-enforced IPC transport"
