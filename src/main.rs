@@ -3,51 +3,31 @@
 
 extern crate mirage;
 
-#[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
+#[cfg(not(feature = "emergency-boot"))]
 use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
-#[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
+#[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
     boot_phase_failed, boot_phase_ok, boot_phase_start, boot_phase_stub, BootPhase,
 };
-#[cfg(all(
-    not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")),
-    not(feature = "full-boot")
-))]
+#[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
-#[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
+#[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::{cpu, debug_shell, Kernel, MAX_PROCESSES, MESSAGE_DEPTH};
-#[cfg(all(
-    not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")),
-    not(feature = "full-boot")
-))]
+#[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::subkernel::{Credentials, SecurityClass};
-#[cfg(all(
-    not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")),
-    not(feature = "full-boot")
-))]
+#[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::supervisor::mock_service::{
     MockManifestCapability, MockManifestService, ECHO_IPC_ENDPOINT, ECHO_SERVICE_IMAGE,
     ECHO_SERVICE_MODULE_ID, IPC_ENDPOINT_CAPABILITY_OBJECT,
 };
-#[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
+#[cfg(not(feature = "emergency-boot"))]
 use mirage::supervisor::Supervisor;
 
 #[no_mangle]
 pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
-    #[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
+    #[cfg(not(feature = "emergency-boot"))]
     boot_phase_start(BootPhase::KernelMain);
-
-    #[cfg(feature = "seed-rs-qemu-emergency")]
-    {
-        let _ = &boot_info;
-        unsafe {
-            mirage::arch::x86_64::seed_rs::seed_com1_write_str(
-                "Mirage seed-rs QEMU emergency boot reached idle loop\r\n",
-            );
-        }
-        mirage::arch::x86_64::panic_halt();
-    }
 
     #[cfg(feature = "emergency-boot")]
     {
@@ -60,7 +40,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         mirage::arch::x86_64::panic_halt();
     }
 
-    #[cfg(not(any(feature = "emergency-boot", feature = "seed-rs-qemu-emergency")))]
+    #[cfg(not(feature = "emergency-boot"))]
     {
         mirage::kprintln!("Mirage kernel booting...");
         if !boot_info.limine_base_revision_supported() {

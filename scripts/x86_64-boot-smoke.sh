@@ -269,7 +269,7 @@ fi
 
 for symbol in \
     _start \
-    __mirage_x86_64_bootstrap \
+    __mirage_x86_64_seed_entry \
     kernel_main \
     __limine_requests_start \
     __limine_requests_end \

@@ -22,9 +22,12 @@ Checks performed:
   * prints symbol addresses for `_start`, `__mirage_x86_64_seed_entry`,
     optional `__mirage_x86_64_bootstrap`, and `kernel_main` using `nm -n`
   * reports whether Limine request sections are present via `readelf -S`
+  * verifies `_start` calls `__mirage_x86_64_seed_entry` instead of the old
+    direct bootstrap path
   * prints SHA256 hashes for the built kernel and staged kernel copy
-  * exits nonzero if `_start` or `kernel_main` is missing, the ELF entry point
-    differs from `_start`, any Limine request section is missing, or the built
+  * exits nonzero if `_start`, `__mirage_x86_64_seed_entry`, or `kernel_main`
+    is missing, the ELF entry point differs from `_start`, `_start` does not
+    dispatch to seed-rs, any Limine request section is missing, or the built
     and staged kernel hashes differ
 USAGE
 }
@@ -112,6 +115,7 @@ esac
 require_cmd readelf
 require_cmd nm
 require_cmd sha256sum
+require_cmd objdump
 
 [ -f "$built_kernel" ] || { error "built kernel not found: $built_kernel"; exit 1; }
 [ -f "$iso_kernel" ] || { error "staged kernel copy not found: $iso_kernel"; exit 1; }
@@ -173,6 +177,28 @@ if [ -n "$start_addr" ]; then
     else
         error "ELF entry point ($entry_line) does not equal _start (0x$start_addr)"
         failures=$((failures + 1))
+    fi
+fi
+
+
+printf '\n_start dispatch:\n'
+start_disassembly=$(objdump -d --disassemble=_start "$built_kernel" 2>/dev/null || true)
+if printf '%s\n' "$start_disassembly" | grep -q '__mirage_x86_64_seed_entry'; then
+    info "_start dispatches to __mirage_x86_64_seed_entry"
+elif printf '%s\n' "$start_disassembly" | grep -q '__mirage_x86_64_bootstrap'; then
+    error "_start still dispatches to __mirage_x86_64_bootstrap instead of seed-rs"
+    failures=$((failures + 1))
+else
+    error "could not prove _start dispatches to __mirage_x86_64_seed_entry"
+    failures=$((failures + 1))
+fi
+
+if [ -n "$bootstrap_addr" ]; then
+    if printf '%s\n' "$start_disassembly" | grep -q '__mirage_x86_64_bootstrap'; then
+        error "compatibility bootstrap symbol is still used by _start"
+        failures=$((failures + 1))
+    else
+        warn "__mirage_x86_64_bootstrap still exists as an unused compatibility symbol"
     fi
 fi
 

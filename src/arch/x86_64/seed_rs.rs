@@ -4,6 +4,10 @@
 //! handoff boundary after the minimal assembly stub.  This module deliberately
 //! uses only raw COM1 port I/O and stack locals so it can report progress before
 //! the normal console, allocator, framebuffer, supervisor, or MTSS paths exist.
+//!
+//! TODO: Gate the temporary `[seed-rs NN]` serial markers behind
+//! CONFIG_MIRAGE_VERBOSE_BOOT or a `verbose-boot` feature once mirageconfig is
+//! complete enough to drive that boot-time policy.
 
 use core::arch::asm;
 

@@ -1,10 +1,11 @@
 # Emergency Boot Debugging
 
-This guide documents the narrow emergency boot path used to verify the Limine to
-Mirage handoff before the normal kernel, supervisor, memory, QFS, or service
-policy paths are involved. The emergency path is intentionally small: it prints
-stable COM1 markers, proves that `kernel_main` was entered, then halts in the
-architecture panic loop after a final idle-loop diagnostic.
+This guide documents the narrow emergency boot behavior used to verify the
+Limine -> `_start` -> seed-rs -> `BootInfo` -> `kernel_main` handoff before the
+normal kernel, supervisor, memory, QFS, or service policy paths are involved.
+seed-rs is the default x86_64 handoff path for both normal and emergency boots;
+emergency mode only changes `kernel_main` so it exits early to the architecture
+panic loop after a final idle-loop diagnostic.
 
 ## Run the emergency boot target
 
@@ -14,9 +15,9 @@ From the repository root, run:
 make qemu-emergency
 ```
 
-The target builds the QEMU ISO with only the `emergency-boot` feature enabled,
-starts QEMU with serial output connected to the terminal, and enables QEMU
-interrupt/reset tracing in `build/qemu.log`.
+The target builds the normal seed-rs QEMU ISO with the `emergency-boot` feature
+enabled, starts QEMU with serial output connected to the terminal, and enables
+QEMU interrupt/reset tracing in `build/qemu.log`.
 
 Equivalent pieces supplied by the Makefile target are:
 
@@ -33,39 +34,38 @@ stream should contain boot markers in increasing order. A successful emergency
 boot should include output like:
 
 ```text
-[MIRAGE BOOT 01]
-[MIRAGE BOOT 02]
-[MIRAGE BOOT 03]
-[MIRAGE BOOT 04]
-[MIRAGE BOOT 05]
-[MIRAGE BOOT 06]
-[MIRAGE BOOT 07]
+[seed-rs 01] entered seed entry
+[seed-rs 02] bss cleared
+[seed-rs 03] linker sections captured
+[seed-rs 04] limine snapshot captured
+[seed-rs 05] bootinfo constructed
+[seed-rs 06] calling kernel_main
 Mirage emergency boot reached idle loop
 ```
 
 Limine may print its own bootloader diagnostics before the Mirage markers. Treat
-`[MIRAGE BOOT 01]` as the first line emitted by Mirage itself.
+`[seed-rs 01] entered seed entry` as the first line emitted by Mirage itself.
 
 ## Interpreting the last printed marker
 
 When the VM stops, resets, triple-faults, or appears to hang, find the last
-`[MIRAGE BOOT NN]` line printed on the serial console. The next stage after that
+`[seed-rs NN]` line printed on the serial console. The next stage after that
 line is the most likely failing boundary. For example:
 
-- Last line is `[MIRAGE BOOT 01]`: Limine reached Mirage `_start`, but execution
-  failed before or while entering the Rust bootstrap routine.
-- Last line is `[MIRAGE BOOT 02]`: Mirage entered the bootstrap routine, but
-  failed while clearing `.bss` or before the post-`.bss` marker could print.
-- Last line is `[MIRAGE BOOT 03]`: `.bss` was cleared, but the kernel section
+- Last line is `[seed-rs 01]`: Limine reached Mirage `_start` and `_start`
+  called `__mirage_x86_64_seed_entry`, but execution failed before or while
+  clearing `.bss`.
+- Last line is `[seed-rs 02]`: seed-rs cleared `.bss`, but failed while reading
+  linker section boundaries or before the next marker could print.
+- Last line is `[seed-rs 03]`: `.bss` was cleared, but the kernel section
   snapshot or Limine request snapshot did not complete.
-- Last line is `[MIRAGE BOOT 04]`: Limine request state was snapshotted, but the
+- Last line is `[seed-rs 04]`: Limine request state was snapshotted, but the
   typed `BootInfo` handoff was not constructed successfully.
-- Last line is `[MIRAGE BOOT 05]`: `BootInfo` was constructed, but the final
+- Last line is `[seed-rs 05]`: `BootInfo` was constructed, but the final
   pre-`kernel_main` handoff marker or call boundary was not reached.
-- Last line is `[MIRAGE BOOT 06]`: the bootstrap code reached the call to
-  `kernel_main`, but Rust kernel entry did not emit its entry marker.
-- Last line is `[MIRAGE BOOT 07]`: `kernel_main` was entered. In the emergency
-  target, the next expected line is `Mirage emergency boot reached idle loop`.
+- Last line is `[seed-rs 06]`: seed-rs reached the call to `kernel_main`. In the
+  emergency target, the next expected line is
+  `Mirage emergency boot reached idle loop`.
 - Last line is `[MIRAGE BOOT 08]` or `[MIRAGE BOOT 09]`: these are normal-boot
   architecture-initialization boundaries. They are not expected from
   `make qemu-emergency`, because the emergency target deliberately halts before
@@ -79,13 +79,12 @@ the last printed marker.
 
 | Marker | Boundary completed | Meaning |
 | --- | --- | --- |
-| `[MIRAGE BOOT 01]` | `_start` | Limine transferred control to the Mirage ELF entry point. The assembly stub installed the bootstrap stack, aligned it, cleared `rbp`, and proved the raw COM1 writer can emit a line before calling `__mirage_x86_64_bootstrap`. |
-| `[MIRAGE BOOT 02]` | Bootstrap entry | `__mirage_x86_64_bootstrap` was entered from `_start`. The next operation is clearing the kernel `.bss` range. |
-| `[MIRAGE BOOT 03]` | `.bss` clear | The linker-provided `.bss` range was zeroed. The next operations read linker section bounds and snapshot Limine request state. |
-| `[MIRAGE BOOT 04]` | Limine snapshot | Mirage captured the raw Limine handoff state, including base-revision, memory-map, framebuffer, module, and RSDP request data where present. The next operation converts that snapshot into typed boot data. |
-| `[MIRAGE BOOT 05]` | `BootInfo` construction | The typed `BootInfo` structure was built from the Limine snapshot and kernel section metadata. |
-| `[MIRAGE BOOT 06]` | `kernel_main` handoff boundary | Bootstrap is about to call `kernel_main(boot_info)`. If this marker prints but marker 07 does not, suspect the Rust ABI handoff, stack state, calling convention, or `kernel_main` prologue. |
-| `[MIRAGE BOOT 07]` | `kernel_main` entry | The Rust kernel entry point was reached. In `make qemu-emergency`, this should be followed by `Mirage emergency boot reached idle loop`. |
+| `[seed-rs 01] entered seed entry` | seed-rs entry | `_start` transferred control to `__mirage_x86_64_seed_entry`; seed-rs initialized raw COM1 diagnostics. |
+| `[seed-rs 02] bss cleared` | `.bss` clear | The linker-provided `.bss` range was zeroed. |
+| `[seed-rs 03] linker sections captured` | Linker metadata | Kernel section ranges were captured from linker symbols. |
+| `[seed-rs 04] limine snapshot captured` | Limine snapshot | Mirage captured raw Limine response pointers. |
+| `[seed-rs 05] bootinfo constructed` | `BootInfo` construction | The typed `BootInfo` structure was built from the Limine snapshot and kernel section metadata. |
+| `[seed-rs 06] calling kernel_main` | `kernel_main` handoff boundary | seed-rs is about to call `kernel_main(boot_info)`. In `make qemu-emergency`, this should be followed by `Mirage emergency boot reached idle loop`. |
 | `[MIRAGE BOOT 08]` | Architecture init start boundary | Normal, non-emergency boots print this immediately before calling `init_architecture(&boot_info)`. It marks the boundary from top-level kernel entry into x86_64 architecture setup. |
 | `[MIRAGE BOOT 09]` | Architecture init complete boundary | Normal, non-emergency boots print this after `init_architecture(&boot_info)` returns. It means descriptor tables, early serial, memory layout, framebuffer, and interrupt-controller setup completed for the enabled feature set. |
 

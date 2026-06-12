@@ -5,6 +5,40 @@ kernel ELF. Limine remains the boot protocol and loader: it discovers the Mirage
 ELF, satisfies the Limine request sections, loads the kernel, and jumps to the
 ELF entry point `_start`.
 
+## seed-rs is the default x86_64 handoff path
+
+`seed-rs` is now the permanent default Mirage x86_64 entry/handoff layer, not
+an emergency-only or debug-only route. Limine loads the Mirage ELF and transfers
+control to `_start`; `_start` installs the initial stack contract and calls
+`__mirage_x86_64_seed_entry`; seed-rs then performs the single authoritative
+Limine snapshot and `BootInfo::from_limine()` construction before calling
+`kernel_main(boot_info)`.
+
+Default normal flow:
+
+```text
+Limine
+  -> ELF entry _start
+  -> seed-rs x86_64 entry
+  -> seed_rs::x86_64_handoff()
+  -> limine::snapshot()
+  -> BootInfo::from_limine()
+  -> kernel_main(boot_info)
+  -> normal Mirage boot
+```
+
+Emergency mode remains available, but it is now only an early-exit behavior
+inside `kernel_main` after the same seed-rs handoff and the same `BootInfo`
+construction path. Normal `make build`, `make image`, `make qemu`,
+`make qemu-headless`, and `make qemu-debug` builds all use seed-rs by default.
+Use `make qemu-emergency` or `QEMU_FEATURES=emergency-boot make qemu` when the
+post-`BootInfo` emergency idle loop is desired.
+
+The `[seed-rs 01]` through `[seed-rs 06]` serial markers intentionally remain
+enabled in normal builds while the default path settles. They should later be
+gated behind `CONFIG_MIRAGE_VERBOSE_BOOT` or a `verbose-boot` feature once
+mirageconfig owns that policy.
+
 ## What seed-rs is
 
 `seed-rs` is a minimal Rust `no_std` handoff boundary for the current hardware
@@ -51,8 +85,9 @@ Seed markers identify the last completed handoff stage:
 
 ## BootInfo construction safety
 
-`BootInfo::from_limine()` is shared by normal x86_64 boot and the
-`seed-rs-qemu-emergency` path. It must therefore treat every Limine response as
+`BootInfo::from_limine()` is reached only through `seed_rs::x86_64_handoff()`
+for x86_64 Limine boots. Normal boot and emergency boot both use this same
+authoritative path, so the constructor must treat every Limine response as
 optional bootloader data and avoid depending on the allocator, framebuffer,
 interrupts, supervisor, MTSS, or formatted logging while it builds the kernel's
 first typed boot handoff.
@@ -109,10 +144,12 @@ normal and emergency boot can continue to `kernel_main()`.
 
 ## QEMU emergency mode
 
-The `seed-rs-qemu-emergency` Cargo feature proves the handoff without entering
-normal architecture initialization or heap-dependent work. In this mode,
-`kernel_main` immediately prints through seed-rs COM1 and enters the x86_64 halt
-loop.
+Emergency mode no longer selects a separate seed-rs route. The same default
+seed-rs handoff runs first, constructs `BootInfo`, and calls `kernel_main`. The
+`emergency-boot` feature then makes `kernel_main` print the emergency marker and
+enter the x86_64 halt loop before normal architecture initialization or
+heap-dependent work. The legacy `seed-rs-qemu-emergency` feature is retained as
+an alias for `emergency-boot`.
 
 Expected serial output after Limine output:
 
@@ -123,25 +160,22 @@ Expected serial output after Limine output:
 [seed-rs 04] limine snapshot captured
 [seed-rs 05] bootinfo constructed
 [seed-rs 06] calling kernel_main
-Mirage seed-rs QEMU emergency boot reached idle loop
+Mirage emergency boot reached idle loop
 ```
 
 ## Run
 
 ```sh
-make qemu-seed
+make qemu
 ```
 
-The target builds the kernel with:
+The normal QEMU target builds the default Mirage image through seed-rs. It no
+longer requires `QEMU_FEATURES=emergency-boot`. The image build stages the
+kernel, runs `tools/verify-seed-rs-elf.sh`, and launches QEMU using the generated
+mirageconfig QEMU arguments.
 
-```text
---no-default-features --features seed-rs-qemu-emergency
-```
-
-It then rebuilds the ISO staging tree, copies the built kernel into the image,
-runs `tools/verify-seed-rs-elf.sh`, and launches QEMU with serial output on the
-terminal. The target intentionally does **not** pass `-S`, so QEMU should not
-start paused.
+Compatibility seed targets such as `make qemu-seed` use the same normal seed-rs
+entry path; they are no longer the only way to exercise seed-rs.
 
 ## Debug
 
@@ -149,8 +183,8 @@ start paused.
 make qemu-seed-debug
 ```
 
-The debug target uses the same image and validation path as `make qemu-seed`, but
-adds QEMU's GDB stub flags:
+The debug targets use the same image and validation path as normal QEMU, but add
+QEMU's GDB stub flags:
 
 ```text
 -S -s
@@ -164,7 +198,7 @@ target remote :1234
 
 ## Inspect QEMU failures
 
-Both seed targets leave the QEMU diagnostic log at:
+The QEMU targets leave the diagnostic log at:
 
 ```text
 build/qemu.log
@@ -192,6 +226,9 @@ tools/verify-seed-rs-elf.sh
 The verifier prints the ELF entry point, symbol addresses for `_start`,
 `__mirage_x86_64_seed_entry`, optional `__mirage_x86_64_bootstrap`, and
 `kernel_main`, Limine request-section presence, and SHA256 hashes for the built
-kernel and staged kernel copy. It fails if required symbols are missing, the ELF
-entry point does not equal `_start`, any Limine request section is missing, or the
-staged kernel hash differs from the built kernel hash.
+kernel and staged kernel copy. It also verifies that `_start` dispatches to
+`__mirage_x86_64_seed_entry` and warns when the legacy
+`__mirage_x86_64_bootstrap` compatibility symbol is still present but unused. It
+fails if required symbols are missing, the ELF entry point does not equal
+`_start`, the seed-rs dispatch cannot be proven, any Limine request section is
+missing, or the staged kernel hash differs from the built kernel hash.

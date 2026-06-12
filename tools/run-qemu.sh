@@ -24,6 +24,9 @@ if [ "$manual_qemu_debug_args" = x ]; then
     MIRAGE_QEMU_DEBUG_ARGS=$manual_qemu_debug_value
 fi
 MIRAGE_QEMU_DISPLAY_ARGS=${MIRAGE_QEMU_DISPLAY_ARGS:-}
+if [ -z "$MIRAGE_QEMU_DISPLAY_ARGS" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    MIRAGE_QEMU_DISPLAY_ARGS="-display none"
+fi
 MIRAGE_QEMU_SERIAL_ARGS=${MIRAGE_QEMU_SERIAL_ARGS-"-serial stdio"}
 MIRAGE_QEMU_DEBUG_ARGS=${MIRAGE_QEMU_DEBUG_ARGS:-}
 

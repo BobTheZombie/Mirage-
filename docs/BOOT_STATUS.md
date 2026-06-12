@@ -57,10 +57,12 @@ readelf-compatible tool. The script may also inspect a prebuilt artifact via
 `KERNEL_ELF=/path/to/mirage-kernel scripts/x86_64-boot-smoke.sh`.
 
 The baseline checks that the artifact is an ELF64 x86_64 image, that the ELF
-entry address matches `_start`, and that the required low-level bootstrap and
-linker symbols remain present: `_start`, `__mirage_x86_64_bootstrap`,
+entry address matches `_start`, and that the required low-level seed-rs and
+linker symbols remain present: `_start`, `__mirage_x86_64_seed_entry`,
 `__limine_requests_start`, `__limine_requests_end`, `__stack_top`,
-`__bss_start`, and `__bss_end`. It also verifies that `.requests`,
+`__bss_start`, and `__bss_end`. If `__mirage_x86_64_bootstrap` is present, it is
+only a temporary compatibility wrapper and is not the default handoff. It also
+verifies that `.requests`,
 `.requests_start_marker`, and `.requests_end_marker` are retained in the linked
 artifact despite linker section garbage collection. This complements the QEMU
 smoke test by proving the static Limine handoff shape before boot media or an
