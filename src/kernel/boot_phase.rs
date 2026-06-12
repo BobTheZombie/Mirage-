@@ -290,6 +290,26 @@ impl BootPhaseManager {
         }
         false
     }
+
+    pub fn validate_no_unresolved(&mut self) {
+        let mut index = 0usize;
+        while index < BOOT_PHASE_CAPACITY {
+            let record = &mut self.records[index];
+            match record.state {
+                PhaseState::Registered | PhaseState::Pending => {
+                    if record.descriptor.required {
+                        record.state = PhaseState::Failed;
+                        record.message = "required phase not reached";
+                    } else {
+                        record.state = PhaseState::Skipped;
+                        record.message = "not present/not probed";
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
 }
 
 const fn unregistered_record() -> BootPhaseRecord {
@@ -699,6 +719,17 @@ pub fn boot_phase_state(phase: BootPhase) -> PhaseState {
     BOOT_PHASE_MANAGER.lock().state(phase)
 }
 
+pub fn boot_phase_validate_no_unresolved() {
+    {
+        let mut manager = BOOT_PHASE_MANAGER.lock();
+        manager.validate_no_unresolved();
+    }
+    write_validation_serial();
+    if framebuffer_ready() {
+        boot_phase_render_screen();
+    }
+}
+
 pub fn boot_phase_current() -> BootPhase {
     BOOT_PHASE_MANAGER.lock().current_phase
 }
@@ -772,6 +803,14 @@ fn write_auto_registration_warning_serial(phase: BootPhase) {
     }
 }
 
+fn write_validation_serial() {
+    unsafe {
+        crate::arch::x86_64::early_debug::com1_write_str(
+            "[phase] validation: unresolved registered/pending phases closed\r\n",
+        );
+    }
+}
+
 fn write_transition_serial(phase: BootPhase, state: PhaseState, message: &'static str) {
     unsafe {
         crate::arch::x86_64::early_debug::com1_write_str("[phase] ");
@@ -817,6 +856,19 @@ mod tests {
         manager.transition(BootPhase::SeedRs, PhaseState::Ok, "ok");
         manager.transition(BootPhase::BootInfo, PhaseState::Started, "started");
         assert_eq!(manager.progress_percent(), 80);
+    }
+
+    #[test]
+    fn validation_closes_unresolved_optional_and_required_phases() {
+        let mut manager = BootPhaseManager::new();
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[0]);
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[12]);
+        manager.mark_registered_pending();
+
+        manager.validate_no_unresolved();
+
+        assert_eq!(manager.state(BootPhase::SeedRs), PhaseState::Failed);
+        assert_eq!(manager.state(BootPhase::Framebuffer), PhaseState::Skipped);
     }
 
     #[test]

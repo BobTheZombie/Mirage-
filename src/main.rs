@@ -8,7 +8,8 @@ use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
-    boot_phase_failed, boot_phase_ok, boot_phase_start, boot_phase_stub, BootPhase,
+    boot_phase_failed, boot_phase_ok, boot_phase_start, boot_phase_stub,
+    boot_phase_validate_no_unresolved, BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
@@ -239,6 +240,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         boot_phase_start(BootPhase::BootScreen);
         boot_phase_ok(BootPhase::BootScreen);
         boot_phase_start(BootPhase::IdleLoop);
+        boot_phase_validate_no_unresolved();
         let mut observed_timer_ticks = x86_64::timer_ticks();
         loop {
             if x86_64::poll_debug_shell_hotkey() {
