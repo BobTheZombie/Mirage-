@@ -33,6 +33,249 @@ pub use mirage_ryzen::{
     AmdPstateInfo, AmdTelemetry, AmdTelemetryError, AmdThermalSensor,
 };
 
+/// Hardware kind recorded by platform discovery before any driver/service binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum PlatformDeviceKind {
+    Cpu,
+    Pci,
+    Acpi,
+    I8042,
+    Usb,
+    Storage,
+    Display,
+    Input,
+    Unknown,
+}
+
+/// Stable, policy-neutral location for a discovered hardware object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum PlatformLocation {
+    CpuId,
+    Pci { bus: u8, device: u8, function: u8 },
+    IoPort { base: u16 },
+    AcpiTable(&'static str),
+    Usb { bus: u8, port: u8 },
+    Unknown,
+}
+
+/// Hardware fact emitted by platform discovery.
+///
+/// This type intentionally records presence only. It does not mean a driver was
+/// registered, started, granted capabilities, or brought online.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlatformDevice {
+    pub name: &'static str,
+    pub kind: PlatformDeviceKind,
+    pub location: PlatformLocation,
+    pub vendor_id: Option<u16>,
+    pub device_id: Option<u16>,
+    pub class_code: Option<u8>,
+    pub subclass: Option<u8>,
+    pub prog_if: Option<u8>,
+}
+
+impl PlatformDevice {
+    pub const fn new(
+        name: &'static str,
+        kind: PlatformDeviceKind,
+        location: PlatformLocation,
+    ) -> Self {
+        Self {
+            name,
+            kind,
+            location,
+            vendor_id: None,
+            device_id: None,
+            class_code: None,
+            subclass: None,
+            prog_if: None,
+        }
+    }
+
+    pub const fn amd_cpu(name: &'static str, family: u8, model: u8, stepping: u8) -> Self {
+        Self {
+            name,
+            kind: PlatformDeviceKind::Cpu,
+            location: PlatformLocation::CpuId,
+            vendor_id: None,
+            device_id: None,
+            class_code: Some(family),
+            subclass: Some(model),
+            prog_if: Some(stepping),
+        }
+    }
+
+    pub const fn pci(
+        name: &'static str,
+        kind: PlatformDeviceKind,
+        bus: u8,
+        device: u8,
+        function: u8,
+        vendor_id: u16,
+        device_id: u16,
+        class_code: u8,
+        subclass: u8,
+        prog_if: u8,
+    ) -> Self {
+        Self {
+            name,
+            kind,
+            location: PlatformLocation::Pci {
+                bus,
+                device,
+                function,
+            },
+            vendor_id: Some(vendor_id),
+            device_id: Some(device_id),
+            class_code: Some(class_code),
+            subclass: Some(subclass),
+            prog_if: Some(prog_if),
+        }
+    }
+
+    pub const fn i8042() -> Self {
+        Self {
+            name: "PS/2 Controller",
+            kind: PlatformDeviceKind::I8042,
+            location: PlatformLocation::IoPort { base: 0x60 },
+            vendor_id: None,
+            device_id: None,
+            class_code: None,
+            subclass: None,
+            prog_if: None,
+        }
+    }
+
+    pub const fn acpi_table(name: &'static str) -> Self {
+        Self::new(
+            name,
+            PlatformDeviceKind::Acpi,
+            PlatformLocation::AcpiTable(name),
+        )
+    }
+
+    pub const fn is_pci_id(self, vendor_id: u16, device_id: u16) -> bool {
+        matches!((self.vendor_id, self.device_id), (Some(v), Some(d)) if v == vendor_id && d == device_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformRegistryError {
+    Full,
+    Duplicate,
+}
+
+/// Fixed-capacity, no-heap registry of platform-discovered hardware.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlatformRegistry<const CAPACITY: usize> {
+    devices: [Option<PlatformDevice>; CAPACITY],
+    len: usize,
+}
+
+impl<const CAPACITY: usize> PlatformRegistry<CAPACITY> {
+    pub const fn new() -> Self {
+        Self {
+            devices: [None; CAPACITY],
+            len: 0,
+        }
+    }
+
+    pub fn register(&mut self, device: PlatformDevice) -> Result<bool, PlatformRegistryError> {
+        if self.contains_location(device.location) || self.contains_exact(device) {
+            return Ok(false);
+        }
+        if self.len >= CAPACITY {
+            return Err(PlatformRegistryError::Full);
+        }
+        self.devices[self.len] = Some(device);
+        self.len += 1;
+        Ok(true)
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub const fn get(&self, index: usize) -> Option<PlatformDevice> {
+        if index < self.len {
+            self.devices[index]
+        } else {
+            None
+        }
+    }
+
+    pub fn contains_kind(&self, kind: PlatformDeviceKind) -> bool {
+        self.find_by_kind(kind).is_some()
+    }
+
+    pub fn find_by_kind(&self, kind: PlatformDeviceKind) -> Option<PlatformDevice> {
+        let mut index = 0usize;
+        while index < self.len {
+            if let Some(device) = self.devices[index] {
+                if device.kind == kind {
+                    return Some(device);
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
+    pub fn find_by_pci_id(&self, vendor_id: u16, device_id: u16) -> Option<PlatformDevice> {
+        let mut index = 0usize;
+        while index < self.len {
+            if let Some(device) = self.devices[index] {
+                if device.is_pci_id(vendor_id, device_id) {
+                    return Some(device);
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
+    pub fn contains_pci_id(&self, vendor_id: u16, device_id: u16) -> bool {
+        self.find_by_pci_id(vendor_id, device_id).is_some()
+    }
+
+    pub fn find_by_location(&self, location: PlatformLocation) -> Option<PlatformDevice> {
+        let mut index = 0usize;
+        while index < self.len {
+            if let Some(device) = self.devices[index] {
+                if device.location == location {
+                    return Some(device);
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
+    pub fn contains_location(&self, location: PlatformLocation) -> bool {
+        self.find_by_location(location).is_some()
+    }
+
+    fn contains_exact(&self, needle: PlatformDevice) -> bool {
+        let mut index = 0usize;
+        while index < self.len {
+            if self.devices[index] == Some(needle) {
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+}
+
+impl<const CAPACITY: usize> Default for PlatformRegistry<CAPACITY> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Stable upper bound for platform event arrays used by supervisor no-alloc paths.
 pub const MAX_PLATFORM_DEVICE_EVENTS: usize = 32;
 
@@ -261,6 +504,7 @@ impl DeviceDiscoveryEvent {
 /// Complete discovery snapshot consumed by supervisor policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlatformInfo {
+    pub registry: PlatformRegistry<MAX_PLATFORM_DEVICE_EVENTS>,
     pub cpu: CpuInfo,
     pub chipset: ChipsetInfo,
     pub timer: TimerInfo,
@@ -286,7 +530,15 @@ impl PlatformService {
         let timer = TimerInfo::select(cpu);
         let interrupts = InterruptInfo::from_features(cpu.features);
         let iommu = IommuInfo::from_cpu(cpu);
+        let mut registry = PlatformRegistry::new();
+        let _ = registry.register(PlatformDevice::amd_cpu(
+            "AMD64 CPU",
+            cpu.family as u8,
+            cpu.model as u8,
+            cpu.stepping,
+        ));
         let info = PlatformInfo {
+            registry,
             cpu,
             chipset: ChipsetInfo::default(),
             timer,
@@ -305,6 +557,10 @@ impl PlatformService {
 
     pub fn into_info(self) -> PlatformInfo {
         self.info
+    }
+
+    pub fn registry(&self) -> &PlatformRegistry<MAX_PLATFORM_DEVICE_EVENTS> {
+        &self.info.registry
     }
 
     pub fn device_discovery_events(&self) -> &[DeviceDiscoveryEvent] {
@@ -342,6 +598,8 @@ impl PlatformService {
 
         for device in pci_bus.devices() {
             let pci = pci_info(device);
+            let platform_device = platform_device_from_pci(device);
+            let _ = self.info.registry.register(platform_device);
             if device.is_ahci() {
                 self.info
                     .events
@@ -374,13 +632,14 @@ impl PlatformService {
         }
     }
 
-    fn discover_iommu_scaffolding(&mut self, pci_bus: &mirage_pci::PciBus) {
+    fn discover_iommu_scaffolding(&mut self, _pci_bus: &mirage_pci::PciBus) {
         #[cfg(feature = "hw-amd-iommu")]
         {
-            if let Ok(capabilities) = mirage_amd_iommu::discover_iommu_from_pci(pci_bus.devices()) {
+            if let Ok(capabilities) = mirage_amd_iommu::discover_iommu_from_pci(_pci_bus.devices())
+            {
                 self.info.iommu.pci_capabilities = capabilities.len();
                 for capability in capabilities {
-                    if let Some(device) = pci_bus.devices().iter().find(|device| {
+                    if let Some(device) = _pci_bus.devices().iter().find(|device| {
                         let address = device.address();
                         address.bus() == capability.device_id.bus()
                             && address.device() == capability.device_id.device()
@@ -406,6 +665,52 @@ impl PlatformService {
                 }
             }
         }
+    }
+}
+
+#[cfg(feature = "hw-pci")]
+fn platform_device_from_pci(device: &mirage_pci::PciDevice) -> PlatformDevice {
+    let pci = pci_info(device);
+    let name = pci_device_name(pci);
+    let kind = if device.is_nvme() || device.is_ahci() {
+        PlatformDeviceKind::Storage
+    } else if device.is_amdgpu() {
+        PlatformDeviceKind::Display
+    } else if device.is_xhci() {
+        PlatformDeviceKind::Usb
+    } else {
+        PlatformDeviceKind::Pci
+    };
+    PlatformDevice::pci(
+        name,
+        kind,
+        pci.bus,
+        pci.device,
+        pci.function,
+        pci.vendor_id,
+        pci.device_id,
+        pci.class,
+        pci.subclass,
+        pci.prog_if,
+    )
+}
+
+#[cfg(feature = "hw-pci")]
+const fn pci_device_name(pci: PciFunctionInfo) -> &'static str {
+    if pci.vendor_id == 0x1002 && (pci.device_id == 0x1636 || pci.device_id == 0x1638) {
+        "Renoir AMDGPU"
+    } else if pci.vendor_id == 0x1022
+        && pci.class == 0x0c
+        && pci.subclass == 0x03
+        && pci.prog_if == 0x30
+    {
+        "AMD xHCI Controller"
+    } else if pci.class == 0x01 && pci.subclass == 0x08 && pci.prog_if == 0x02 {
+        "NVMe Controller"
+    } else if pci.class == 0x01 && pci.subclass == 0x06 && pci.prog_if == 0x01 {
+        "AHCI Controller"
+    } else {
+        "PCI Device"
     }
 }
 
@@ -551,5 +856,42 @@ mod tests {
             InterruptControllerKind::X2ApicCandidate
         );
         assert_eq!(service.info().timer.selected, Some(TimerKind::PitFallback));
+    }
+
+    #[test]
+    fn platform_registry_is_fixed_capacity_and_queryable() {
+        let mut registry: PlatformRegistry<2> = PlatformRegistry::new();
+        let cpu = PlatformDevice::amd_cpu("AMD Ryzen 5 4500U", 0x17, 0x60, 0x01);
+        let gpu = PlatformDevice::pci(
+            "Renoir AMDGPU",
+            PlatformDeviceKind::Display,
+            3,
+            0,
+            0,
+            0x1002,
+            0x1636,
+            0x03,
+            0x00,
+            0x00,
+        );
+
+        assert_eq!(registry.register(cpu), Ok(true));
+        assert_eq!(registry.register(cpu), Ok(false));
+        assert_eq!(registry.register(gpu), Ok(true));
+        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.find_by_kind(PlatformDeviceKind::Cpu), Some(cpu));
+        assert_eq!(registry.find_by_pci_id(0x1002, 0x1636), Some(gpu));
+        assert_eq!(
+            registry.find_by_location(PlatformLocation::Pci {
+                bus: 3,
+                device: 0,
+                function: 0,
+            }),
+            Some(gpu)
+        );
+        assert_eq!(
+            registry.register(PlatformDevice::i8042()),
+            Err(PlatformRegistryError::Full)
+        );
     }
 }

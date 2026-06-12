@@ -323,7 +323,7 @@ fn write_dispatch_line(action: &'static str, name: &'static str, reason: &'stati
         return;
     }
     unsafe {
-        crate::arch::x86_64::early_debug::com1_write_str("[dispatch] ");
+        crate::arch::x86_64::early_debug::com1_write_str("[Dispatch] ");
         crate::arch::x86_64::early_debug::com1_write_str(action);
         crate::arch::x86_64::early_debug::com1_write_str(": ");
         crate::arch::x86_64::early_debug::com1_write_str(name);
