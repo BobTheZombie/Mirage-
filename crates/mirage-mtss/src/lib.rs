@@ -211,6 +211,7 @@ pub mod lifecycle {
 
 pub mod mtss;
 pub mod run_queue;
+pub mod task_core;
 
 pub mod scheduler {
     //! Small scheduler core building blocks.
@@ -867,6 +868,11 @@ pub use mtss::{
 pub use run_queue::{MtssThreadScheduleRecord, RunQueue};
 pub use scheduler::{ScheduleDecision, SchedulerCore};
 pub use stats::{MtssStats, SchedulerStats};
+pub use task_core::{
+    is_canonical_user, CoreMtss, CoreMtssError, CoreTask, CoreTaskId, CoreTaskState, CoreThread,
+    CoreThreadId, CpuContext as MtssCpuContext, SavedRegisters, StackRange, TaskKind,
+    UserProgramImage, DEFAULT_READY_QUEUE_SIZE, DEFAULT_TASK_TABLE_SIZE, DEFAULT_THREAD_TABLE_SIZE,
+};
 pub use types::{
     AddressSpaceId, CpuId, MtssError, Priority, RunQueueId, Task, TaskId, TaskState, Thread,
     ThreadDescriptor, ThreadId, ThreadState, TimeSlice, Timeslice, Timestamp,

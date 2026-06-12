@@ -169,3 +169,44 @@ Service supervision ABI:
 The current implementation is a buildable host-side/userspace-target scaffold. It parses units, resolves the dependency graph, prints a startup plan, and uses `StubSpawner` to mark service startup as stubbed. It does not claim to run inside Mirage yet.
 
 The kernel boot phase table includes a separate `Spider-rs` phase so boot screens can show `Spider-rs [ Stub ]` or `Spider-rs [ Pending ]` independently from general userspace. The kernel does not depend on Spider-rs during boot; it merely prefers `/sbin/spider-rs` as the first userspace init candidate once real userspace execution is available.
+
+
+## First PID 1 launch milestone
+
+The intended launch path is now explicit:
+
+```text
+Root FS mounted
+  -> Supervisor initialized
+  -> MTSS initialized
+  -> Userspace Loader online
+  -> Supervisor authorizes /sbin/spider-rs
+  -> MTSS creates initial userspace task
+  -> x86_64 userspace entry transfers to Spider-rs as PID 1
+```
+
+The kernel may mark Spider-rs `Started` when MTSS creates the task object. It may mark Spider-rs `Online` only after a real userspace entry marker, such as the first successful userspace `write(1, ...)`, confirms execution. Until then, Spider-rs remains `Stub` with the exact missing piece.
+
+Spider-rs includes a syscall shim for the minimal x86_64 userspace ABI:
+
+```text
+rax = syscall number
+rdi, rsi, rdx, r10, r8, r9 = arguments
+rax = return value, negative errno on failure
+
+SYS_EXIT  = 1
+SYS_WRITE = 2
+SYS_YIELD = 3
+SYS_GETPID = 4
+```
+
+The initial service-manager scaffold prints:
+
+```text
+Spider-rs PID 1 online
+Spider-rs: loading units
+Spider-rs: default.target reached
+Spider-rs: no real services started yet
+```
+
+In the current milestone, the host-buildable Spider-rs binary and no_std entry scaffolding coexist. The no_std `_start` path is gated for `target_os = "none"`; it is intended to become the installed `/sbin/spider-rs` static ELF once the Mirage userspace target and root filesystem install path are complete.

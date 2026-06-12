@@ -6,11 +6,9 @@ extern crate mirage;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
-#[cfg(all(not(feature = "emergency-boot"), feature = "full-boot"))]
-use mirage::kernel::boot_phase::boot_phase_online;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
-    boot_phase_failed, boot_phase_ok, boot_phase_start, boot_phase_stub,
+    boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_start, boot_phase_stub,
     boot_phase_validate_no_unresolved, BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
@@ -116,36 +114,17 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
 
-            boot_phase_start(BootPhase::Userspace);
-            match kernel.bootstrap_userspace_init() {
-                Ok((pid, init_path)) => {
-                    boot_phase_ok(BootPhase::Userspace);
-                    if init_path == "/sbin/spider-rs" {
-                        boot_phase_online(BootPhase::SpiderRs);
-                    } else {
-                        boot_phase_stub(BootPhase::SpiderRs, "Spider-rs image not selected");
-                    }
-                    mirage::kprintln!(
-                        "userspace init attempt succeeded: path={} pid={:?}",
-                        init_path,
-                        pid
-                    );
-                }
-                Err(error) => {
-                    boot_phase_stub(
-                        BootPhase::Userspace,
-                        "userspace init unavailable in milestone",
-                    );
-                    boot_phase_stub(
-                        BootPhase::SpiderRs,
-                        "Spider-rs waits for userspace exec ABI",
-                    );
-                    mirage::kprintln!(
-                        "userspace init attempt skipped/stubbed for minimal boot milestone: {:?}",
-                        error
-                    );
-                }
-            }
+            boot_phase_stub(
+                BootPhase::Userspace,
+                "userspace PID 1 launch deferred until MTSS is online",
+            );
+            boot_phase_stub(
+                BootPhase::SpiderRs,
+                "Spider-rs waits for MTSS/userspace loader handoff",
+            );
+            mirage::kprintln!(
+                "userspace init launch deferred: root FS and supervisor are online; MTSS handoff not reached yet"
+            );
         }
 
         #[cfg(not(feature = "full-boot"))]
@@ -256,6 +235,29 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         kernel.kernel_mtss_init();
         boot_phase_ok(BootPhase::Mtss);
         mirage::kprintln!("MTSS initialized");
+        boot_phase_start(BootPhase::UserspaceLoader);
+        boot_phase_online(BootPhase::UserspaceLoader);
+        mirage::kprintln!("userspace ELF loader initialized");
+        boot_phase_start(BootPhase::SpiderRs);
+        match kernel.bootstrap_spider_rs_pid1() {
+            Ok(pid) => {
+                boot_phase_start(BootPhase::Userspace);
+                boot_phase_ok(BootPhase::Userspace);
+                boot_phase_online(BootPhase::SpiderRs);
+                mirage::kprintln!("Spider-rs PID 1 task created: {:?}", pid);
+            }
+            Err(error) => {
+                boot_phase_stub(
+                    BootPhase::SpiderRs,
+                    "Spider-rs ELF/rootfs or ring-3 entry path unavailable",
+                );
+                boot_phase_stub(BootPhase::Userspace, "no userspace task entered ring 3");
+                mirage::kprintln!(
+                    "Spider-rs PID 1 not launched; userspace execution remains stubbed: {:?}",
+                    error
+                );
+            }
+        }
         boot_phase_start(BootPhase::BootScreen);
         boot_phase_ok(BootPhase::BootScreen);
         boot_phase_start(BootPhase::IdleLoop);

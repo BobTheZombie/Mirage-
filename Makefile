@@ -27,7 +27,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all build kernel spider-rs spider-rs-check spider-rs-host-test qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
+.PHONY: all build kernel spider-rs spider-rs-check spider-rs-host-test userspace-spider-rs install-spider-rs qemu-spider qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
 
 all: iso
 
@@ -44,6 +44,18 @@ spider-rs-check:
 
 spider-rs-host-test:
 	$(CARGO) test -p spider-rs
+
+userspace-spider-rs:
+	$(CARGO) build -p spider-rs
+
+install-spider-rs: userspace-spider-rs
+	mkdir -p $(BUILD_DIR)/rootfs/sbin $(BUILD_DIR)/rootfs/etc/spider/system
+	cp target/debug/spider-rs $(BUILD_DIR)/rootfs/sbin/spider-rs
+	cp userspace/spider-rs/units/* $(BUILD_DIR)/rootfs/etc/spider/system/
+
+qemu-spider: install-spider-rs image
+	@echo "QFS external file install is pending; Spider-rs is staged under $(BUILD_DIR)/rootfs and boot remains honest Stub until loader/rootfs handoff is wired."
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
 mirageconfig:
 	$(MIRAGECONFIG) --menu --config $(CONFIG_FILE) --generate

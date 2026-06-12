@@ -10,6 +10,8 @@ pub mod graph;
 pub mod manager;
 pub mod parser;
 pub mod process;
+pub mod start;
+pub mod syscall;
 pub mod units;
 
 pub use graph::{DependencyError, StartupPlan};
