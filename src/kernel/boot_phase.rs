@@ -34,6 +34,13 @@ pub enum BootPhase {
     Supervisor,
     Userspace,
     Mtss,
+    I8042,
+    Ps2Keyboard,
+    Xhci,
+    UsbHidKeyboard,
+    AcpiEc,
+    AcpiEcHotkeys,
+    InputSubsystem,
     BootScreen,
     IdleLoop,
 }
@@ -63,6 +70,13 @@ impl BootPhase {
             Self::Supervisor => "Supervisor",
             Self::Userspace => "Userspace",
             Self::Mtss => "MTSS",
+            Self::I8042 => "I8042",
+            Self::Ps2Keyboard => "PS/2 Kbd",
+            Self::Xhci => "xHCI",
+            Self::UsbHidKeyboard => "USB Kbd",
+            Self::AcpiEc => "ACPI EC",
+            Self::AcpiEcHotkeys => "EC Hotkeys",
+            Self::InputSubsystem => "Input",
             Self::BootScreen => "BootScreen",
             Self::IdleLoop => "IdleLoop",
         }
@@ -115,7 +129,7 @@ pub struct BootPhaseRecord {
 }
 
 /// Number of fixed entries in the boot phase table.
-pub const BOOT_PHASE_COUNT: usize = 24;
+pub const BOOT_PHASE_COUNT: usize = 31;
 
 /// No-heap boot phase manager with a fixed static phase table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,6 +164,13 @@ impl BootPhaseManager {
                 record(BootPhase::Supervisor, "SUP"),
                 record(BootPhase::Userspace, "USER"),
                 record(BootPhase::Mtss, "MTSS"),
+                record(BootPhase::I8042, "I8042"),
+                record(BootPhase::Ps2Keyboard, "PS2KBD"),
+                record(BootPhase::Xhci, "XHCI"),
+                record(BootPhase::UsbHidKeyboard, "USBKBD"),
+                record(BootPhase::AcpiEc, "ACPIEC"),
+                record(BootPhase::AcpiEcHotkeys, "ECHOTKEY"),
+                record(BootPhase::InputSubsystem, "INPUT"),
                 record(BootPhase::BootScreen, "SCREEN"),
                 record(BootPhase::IdleLoop, "IDLE"),
             ],

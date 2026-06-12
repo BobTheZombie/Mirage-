@@ -29,6 +29,7 @@ if [ -z "$MIRAGE_QEMU_DISPLAY_ARGS" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAN
 fi
 MIRAGE_QEMU_SERIAL_ARGS=${MIRAGE_QEMU_SERIAL_ARGS-"-serial stdio"}
 MIRAGE_QEMU_DEBUG_ARGS=${MIRAGE_QEMU_DEBUG_ARGS:-}
+MIRAGE_QEMU_EXTRA_ARGS=${MIRAGE_QEMU_EXTRA_ARGS:-}
 
 iso_image=${MIRAGE_ISO_IMAGE:-build/mirage.iso}
 reuse_image=${MIRAGE_REUSE_IMAGE:-0}
@@ -152,6 +153,7 @@ exec qemu-system-x86_64 \
     ${MIRAGE_QEMU_DISPLAY_ARGS:-} \
     ${MIRAGE_QEMU_SERIAL_ARGS:-} \
     ${MIRAGE_QEMU_DEBUG_ARGS:-} \
+    ${MIRAGE_QEMU_EXTRA_ARGS:-} \
     -no-reboot \
     -no-shutdown \
     "$@"

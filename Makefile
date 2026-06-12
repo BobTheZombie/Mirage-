@@ -248,6 +248,33 @@ milestone-boot-screen: config-generate image
 	MIRAGE_ISO_IMAGE=$(ISO_IMAGE) \
 	tools/run-qemu.sh
 
+
+qemu-keyboard-ps2: override QEMU_FEATURES := hw-ps2-keyboard
+qemu-keyboard-ps2: config-generate image
+	MIRAGE_QEMU_SERIAL_ARGS="-serial stdio" \
+	MIRAGE_QEMU_DEBUG_ARGS="-d int,cpu_reset -D build/qemu.log" \
+	MIRAGE_REUSE_IMAGE=1 \
+	MIRAGE_ISO_IMAGE=$(ISO_IMAGE) \
+	tools/run-qemu.sh
+
+qemu-keyboard-usb: override QEMU_FEATURES := hw-usb-hid
+qemu-keyboard-usb: config-generate image
+	MIRAGE_QEMU_EXTRA_ARGS="-device qemu-xhci -device usb-kbd" \
+	MIRAGE_QEMU_SERIAL_ARGS="-serial stdio" \
+	MIRAGE_QEMU_DEBUG_ARGS="-d int,cpu_reset -D build/qemu.log" \
+	MIRAGE_REUSE_IMAGE=1 \
+	MIRAGE_ISO_IMAGE=$(ISO_IMAGE) \
+	tools/run-qemu.sh
+
+qemu-keyboard-all: override QEMU_FEATURES := hw-ps2-keyboard,hw-usb-hid,hw-laptop-hotkeys
+qemu-keyboard-all: config-generate image
+	MIRAGE_QEMU_EXTRA_ARGS="-device qemu-xhci -device usb-kbd" \
+	MIRAGE_QEMU_SERIAL_ARGS="-serial stdio" \
+	MIRAGE_QEMU_DEBUG_ARGS="-d int,cpu_reset -D build/qemu.log" \
+	MIRAGE_REUSE_IMAGE=1 \
+	MIRAGE_ISO_IMAGE=$(ISO_IMAGE) \
+	tools/run-qemu.sh
+
 qemu-check: tools/check-qemu-image.sh
 	./tools/check-qemu-image.sh
 

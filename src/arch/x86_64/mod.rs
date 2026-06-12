@@ -5,12 +5,18 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+#[cfg(feature = "hw-laptop-hotkeys")]
+use crate::arch::x86_64::acpi_ec::{AcpiEcStatus, ACPI_EC_HOTKEY_DRIVER};
 use crate::arch::x86_64::boot::BootInfo;
+#[cfg(feature = "hw-ps2-keyboard")]
 use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
+#[cfg(feature = "hw-usb-hid")]
+use crate::arch::x86_64::xhci_keyboard::{XhciKeyboardStatus, USB_HID_KEYBOARD_DRIVER};
 #[cfg(not(feature = "emergency-boot"))]
+#[cfg(any(feature = "hw-ps2-keyboard", feature = "hw-usb-hid"))]
+use crate::kernel::boot_phase::boot_phase_failed;
 use crate::kernel::boot_phase::{boot_phase_ok, boot_phase_skipped, boot_phase_start, BootPhase};
 use crate::kernel::cpu::MAX_CORES;
-use crate::kernel::device::{DeviceDriver, MirageInputEvent};
 #[cfg(not(feature = "emergency-boot"))]
 use crate::kernel::memory;
 use crate::kernel::syscall::{SyscallFrame, SYSCALL_MAX_ARGS};
@@ -18,6 +24,8 @@ use crate::kernel::thread::{
     CpuContext, ThreadControlBlock, ThreadId, SYSCALL_TRAP_VECTOR, TIMER_INTERRUPT_VECTOR,
 };
 
+#[cfg(feature = "hw-laptop-hotkeys")]
+pub mod acpi_ec;
 pub mod boot;
 pub mod clock;
 pub mod device;
@@ -26,6 +34,8 @@ pub mod early_debug;
 #[cfg(feature = "hw-framebuffer")]
 pub mod framebuffer_console;
 pub mod gdt;
+#[cfg(feature = "hw-i8042")]
+pub mod i8042;
 pub mod idt;
 pub mod interrupts;
 pub mod io;
@@ -33,10 +43,13 @@ pub mod limine_block;
 pub mod msr;
 pub mod paging;
 pub mod pic;
+#[cfg(feature = "hw-ps2-keyboard")]
 pub mod ps2_keyboard;
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
 pub mod seed_rs;
 pub mod uart16550;
+#[cfg(feature = "hw-usb-hid")]
+pub mod xhci_keyboard;
 
 pub use clock::{HardwareClock, HARDWARE_CLOCK};
 
@@ -118,6 +131,7 @@ pub fn init_architecture(boot_info: &BootInfo) {
         setup_memory_layout(boot_info);
         initialize_framebuffer_console(boot_info);
         configure_interrupts();
+        initialize_input_hardware(boot_info);
     }
 }
 
@@ -301,47 +315,13 @@ pub fn timer_tick_pending(last_observed_tick: &mut u64) -> bool {
     }
 }
 
-/// Poll the early PS/2 keyboard path for the ESC debug-shell hotkey.
+/// Poll all registered early keyboard paths for the ESC debug-shell hotkey.
 pub fn poll_debug_shell_hotkey() -> bool {
-    const EVENT_CAPACITY: usize = 4;
-    let event_size = core::mem::size_of::<MirageInputEvent>();
-    let mut buffer = [0u8; core::mem::size_of::<MirageInputEvent>() * EVENT_CAPACITY];
-
-    let Ok(byte_count) = PS2_KEYBOARD_DRIVER.read(&mut buffer) else {
-        return false;
-    };
-    if byte_count == 0 || byte_count % event_size != 0 {
-        return false;
-    }
-
-    let mut offset = 0usize;
-    while offset < byte_count {
-        if let Some(event) = decode_input_event(&buffer[offset..offset + event_size]) {
-            if event.event_type == 1 && event.code == 0x01 && event.value == 1 {
-                return true;
-            }
-        } else {
-            return false;
-        }
-        offset += event_size;
-    }
-
-    false
-}
-
-fn decode_input_event(bytes: &[u8]) -> Option<MirageInputEvent> {
-    if bytes.len() != core::mem::size_of::<MirageInputEvent>() {
-        return None;
-    }
-
-    Some(MirageInputEvent {
-        event_type: u16::from_ne_bytes([bytes[0], bytes[1]]),
-        code: u16::from_ne_bytes([bytes[2], bytes[3]]),
-        value: i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-        timestamp_ns: u64::from_ne_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-        ]),
-    })
+    #[cfg(feature = "hw-ps2-keyboard")]
+    PS2_KEYBOARD_DRIVER.poll_hardware();
+    #[cfg(feature = "hw-laptop-hotkeys")]
+    ACPI_EC_HOTKEY_DRIVER.poll();
+    crate::kernel::input::poll_debug_escape()
 }
 
 /// Halt the CPU while the boot core is idle until the next interrupt arrives.
@@ -364,6 +344,92 @@ pub fn cpu_relax() {
 /// or watchdog would reset us.
 pub fn panic_halt() -> ! {
     interrupts::halt_forever()
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+#[allow(unused_mut, unused_variables)]
+fn initialize_input_hardware(boot_info: &BootInfo) {
+    let mut any_online = false;
+
+    boot_phase_start(BootPhase::I8042);
+    #[cfg(feature = "hw-i8042")]
+    boot_phase_ok(BootPhase::I8042);
+    #[cfg(not(feature = "hw-i8042"))]
+    boot_phase_skipped(BootPhase::I8042, "hw-i8042 feature disabled");
+
+    boot_phase_start(BootPhase::Ps2Keyboard);
+    #[cfg(feature = "hw-ps2-keyboard")]
+    match PS2_KEYBOARD_DRIVER.initialize(false) {
+        Ok(()) => {
+            boot_phase_ok(BootPhase::Ps2Keyboard);
+            any_online = true;
+        }
+        Err(error) => {
+            boot_phase_failed(
+                BootPhase::Ps2Keyboard,
+                "PS/2 keyboard initialization failed",
+            );
+            crate::kprintln!("PS/2 keyboard initialization failed: {:?}", error);
+        }
+    }
+    #[cfg(not(feature = "hw-ps2-keyboard"))]
+    boot_phase_skipped(BootPhase::Ps2Keyboard, "hw-ps2-keyboard feature disabled");
+
+    boot_phase_start(BootPhase::Xhci);
+    #[cfg(feature = "hw-xhci")]
+    boot_phase_ok(BootPhase::Xhci);
+    #[cfg(not(feature = "hw-xhci"))]
+    boot_phase_skipped(BootPhase::Xhci, "hw-xhci feature disabled");
+
+    boot_phase_start(BootPhase::UsbHidKeyboard);
+    #[cfg(feature = "hw-usb-hid")]
+    match USB_HID_KEYBOARD_DRIVER.initialize(boot_info.hhdm_offset) {
+        XhciKeyboardStatus::Online => {
+            boot_phase_ok(BootPhase::UsbHidKeyboard);
+            any_online = true;
+        }
+        XhciKeyboardStatus::SkippedNoController => {
+            boot_phase_skipped(BootPhase::UsbHidKeyboard, "xHCI controller not present")
+        }
+        XhciKeyboardStatus::SkippedNoKeyboard => {
+            boot_phase_skipped(BootPhase::UsbHidKeyboard, "USB HID keyboard not present")
+        }
+        XhciKeyboardStatus::Failed => boot_phase_failed(
+            BootPhase::UsbHidKeyboard,
+            "USB HID keyboard initialization failed",
+        ),
+    }
+    #[cfg(not(feature = "hw-usb-hid"))]
+    boot_phase_skipped(BootPhase::UsbHidKeyboard, "hw-usb-hid feature disabled");
+
+    boot_phase_start(BootPhase::AcpiEc);
+    #[cfg(feature = "hw-acpi-ec")]
+    boot_phase_ok(BootPhase::AcpiEc);
+    #[cfg(not(feature = "hw-acpi-ec"))]
+    boot_phase_skipped(BootPhase::AcpiEc, "hw-acpi-ec feature disabled");
+
+    boot_phase_start(BootPhase::AcpiEcHotkeys);
+    #[cfg(feature = "hw-laptop-hotkeys")]
+    match ACPI_EC_HOTKEY_DRIVER.initialize(boot_info) {
+        AcpiEcStatus::Online => {
+            boot_phase_ok(BootPhase::AcpiEcHotkeys);
+            any_online = true;
+        }
+        AcpiEcStatus::SkippedNoAcpi => boot_phase_skipped(BootPhase::AcpiEcHotkeys, "ACPI absent"),
+        AcpiEcStatus::SkippedNoEc => boot_phase_skipped(BootPhase::AcpiEcHotkeys, "EC absent"),
+    }
+    #[cfg(not(feature = "hw-laptop-hotkeys"))]
+    boot_phase_skipped(
+        BootPhase::AcpiEcHotkeys,
+        "hw-laptop-hotkeys feature disabled",
+    );
+
+    boot_phase_start(BootPhase::InputSubsystem);
+    if any_online || crate::kernel::input::any_keyboard_online() {
+        boot_phase_ok(BootPhase::InputSubsystem);
+    } else {
+        boot_phase_skipped(BootPhase::InputSubsystem, "no keyboard source online");
+    }
 }
 
 #[cfg(not(feature = "emergency-boot"))]

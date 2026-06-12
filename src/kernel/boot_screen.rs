@@ -77,6 +77,10 @@ fn render_framebuffer(manager: &BootPhaseManager) {
     fb_status(manager, "Root FS", BootPhase::RootFs, None);
     fb_status(manager, "Userspace", BootPhase::Userspace, None);
     fb_status(manager, "MTSS", BootPhase::Mtss, None);
+    fb_status(manager, "Input", BootPhase::InputSubsystem, None);
+    fb_status(manager, "PS/2 Kbd", BootPhase::Ps2Keyboard, None);
+    fb_status(manager, "USB Kbd", BootPhase::UsbHidKeyboard, None);
+    fb_status(manager, "EC Hotkeys", BootPhase::AcpiEcHotkeys, None);
 
     framebuffer_console::write_colored("\nBoot Progress\n", RgbColor::WHITE);
     fb_progress_bar(boot_phase_progress_percent(), manager.has_failed());
