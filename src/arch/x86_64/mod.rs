@@ -11,15 +11,13 @@ use crate::arch::x86_64::boot::BootInfo;
 #[cfg(feature = "hw-ps2-keyboard")]
 use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
 #[cfg(feature = "hw-usb-hid")]
-use crate::arch::x86_64::xhci_keyboard::{
-    DriverStatus, XhciKeyboardStatus, USB_HID_KEYBOARD_DRIVER,
-};
+use crate::arch::x86_64::xhci_keyboard::{XhciKeyboardStatus, USB_HID_KEYBOARD_DRIVER};
 #[cfg(not(feature = "emergency-boot"))]
 #[cfg(any(feature = "hw-ps2-keyboard", feature = "hw-usb-hid"))]
 use crate::kernel::boot_phase::boot_phase_failed;
 use crate::kernel::boot_phase::{
     boot_phase_enabled, boot_phase_ok, boot_phase_online, boot_phase_skipped, boot_phase_start,
-    BootPhase,
+    boot_phase_stub, BootPhase,
 };
 use crate::kernel::cpu::MAX_CORES;
 #[cfg(not(feature = "emergency-boot"))]
@@ -136,6 +134,8 @@ pub fn init_architecture(boot_info: &BootInfo) {
         setup_memory_layout(boot_info);
         initialize_framebuffer_console(boot_info);
         configure_interrupts();
+        initialize_platform_probes(boot_info);
+        initialize_storage_hardware();
         initialize_input_hardware(boot_info);
     }
 }
@@ -371,7 +371,205 @@ fn mark_driver_phase(phase: BootPhase, status: DriverStatus, skipped: &'static s
         DriverStatus::Skipped => boot_phase_skipped(phase, skipped),
         DriverStatus::Failed => boot_phase_failed(phase, "driver module failed"),
         DriverStatus::Registered => boot_phase_skipped(phase, "driver module did not start"),
+#[cfg(not(feature = "emergency-boot"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CpuProbe {
+    vendor_ebx: u32,
+    vendor_edx: u32,
+    vendor_ecx: u32,
+    family: u8,
+    model: u8,
+    max_leaf: u32,
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn cpuid_count(leaf: u32, subleaf: u32) -> core::arch::x86_64::CpuidResult {
+    unsafe { core::arch::x86_64::__cpuid_count(leaf, subleaf) }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn probe_cpu() -> CpuProbe {
+    let vendor = cpuid_count(0, 0);
+    let features = cpuid_count(1, 0);
+    let family_id = ((features.eax >> 8) & 0x0f) as u8;
+    let model_id = ((features.eax >> 4) & 0x0f) as u8;
+    let ext_family = ((features.eax >> 20) & 0xff) as u8;
+    let ext_model = ((features.eax >> 16) & 0x0f) as u8;
+    let family = if family_id == 0x0f {
+        family_id.wrapping_add(ext_family)
+    } else {
+        family_id
+    };
+    let model = if family_id == 0x06 || family_id == 0x0f {
+        (ext_model << 4) | model_id
+    } else {
+        model_id
+    };
+    CpuProbe {
+        vendor_ebx: vendor.ebx,
+        vendor_edx: vendor.edx,
+        vendor_ecx: vendor.ecx,
+        family,
+        model,
+        max_leaf: vendor.eax,
     }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn cpu_vendor_is_amd(cpu: CpuProbe) -> bool {
+    cpu.vendor_ebx == 0x6874_7541 && cpu.vendor_edx == 0x6974_6e65 && cpu.vendor_ecx == 0x444d_4163
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn cpu_is_supported_ryzen(cpu: CpuProbe) -> bool {
+    cpu_vendor_is_amd(cpu) && matches!(cpu.family, 0x17 | 0x19)
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+#[derive(Clone, Copy)]
+struct PciProbeFunction {
+    bus: u8,
+    device: u8,
+    function: u8,
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn pci_probe_read_u32(function: PciProbeFunction, offset: u8) -> u32 {
+    let address = 0x8000_0000u32
+        | ((function.bus as u32) << 16)
+        | ((function.device as u32) << 11)
+        | ((function.function as u32) << 8)
+        | ((offset as u32) & 0xfc);
+    unsafe {
+        crate::arch::x86_64::io::outb(0xcf8, address as u8);
+        crate::arch::x86_64::io::outb(0xcf9, (address >> 8) as u8);
+        crate::arch::x86_64::io::outb(0xcfa, (address >> 16) as u8);
+        crate::arch::x86_64::io::outb(0xcfb, (address >> 24) as u8);
+        let b0 = crate::arch::x86_64::io::inb(0xcfc) as u32;
+        let b1 = crate::arch::x86_64::io::inb(0xcfd) as u32;
+        let b2 = crate::arch::x86_64::io::inb(0xcfe) as u32;
+        let b3 = crate::arch::x86_64::io::inb(0xcff) as u32;
+        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn pci_any(mut predicate: impl FnMut(u16, u16, u8, u8, u8) -> bool) -> bool {
+    let mut bus = 0u16;
+    while bus <= 255 {
+        let mut device = 0u8;
+        while device < 32 {
+            let mut function = 0u8;
+            while function < 8 {
+                let f = PciProbeFunction {
+                    bus: bus as u8,
+                    device,
+                    function,
+                };
+                let id = pci_probe_read_u32(f, 0x00);
+                let vendor = (id & 0xffff) as u16;
+                if vendor != 0xffff {
+                    let device_id = (id >> 16) as u16;
+                    let class_reg = pci_probe_read_u32(f, 0x08);
+                    let class = (class_reg >> 24) as u8;
+                    let subclass = (class_reg >> 16) as u8;
+                    let prog_if = (class_reg >> 8) as u8;
+                    if predicate(vendor, device_id, class, subclass, prog_if) {
+                        return true;
+                    }
+                }
+                function += 1;
+            }
+            device += 1;
+        }
+        bus += 1;
+    }
+    false
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn initialize_platform_probes(boot_info: &BootInfo) {
+    let cpu = probe_cpu();
+
+    boot_phase_start(BootPhase::Amd64Cpu);
+    if cpu_vendor_is_amd(cpu) {
+        boot_phase_ok(BootPhase::Amd64Cpu);
+    } else {
+        boot_phase_skipped(BootPhase::Amd64Cpu, "CPUID vendor is not AuthenticAMD");
+    }
+
+    boot_phase_start(BootPhase::RyzenCpu);
+    if cpu_is_supported_ryzen(cpu) {
+        boot_phase_ok(BootPhase::RyzenCpu);
+    } else {
+        boot_phase_skipped(
+            BootPhase::RyzenCpu,
+            "supported Ryzen/Renoir CPU not detected",
+        );
+    }
+
+    boot_phase_start(BootPhase::RyzenTopology);
+    if cpu_is_supported_ryzen(cpu) && cpu.max_leaf >= 0x0b {
+        boot_phase_ok(BootPhase::RyzenTopology);
+    } else {
+        boot_phase_skipped(BootPhase::RyzenTopology, "CPUID topology unavailable");
+    }
+
+    let amd_soc = pci_any(|vendor, _, _, _, _| vendor == 0x1022);
+    boot_phase_start(BootPhase::AmdSoc);
+    if amd_soc {
+        boot_phase_ok(BootPhase::AmdSoc);
+    } else {
+        boot_phase_skipped(BootPhase::AmdSoc, "AMD SoC PCI devices not present");
+    }
+
+    boot_phase_start(BootPhase::AmdIommu);
+    if boot_info.rsdp.is_some() && amd_soc {
+        boot_phase_stub(BootPhase::AmdIommu, "IVRS parser not implemented");
+    } else {
+        boot_phase_skipped(BootPhase::AmdIommu, "AMD IVRS/IOMMU not detected");
+    }
+
+    boot_phase_start(BootPhase::AcpiTables);
+    if boot_info.rsdp.is_some() {
+        boot_phase_ok(BootPhase::AcpiTables);
+    } else {
+        boot_phase_skipped(BootPhase::AcpiTables, "RSDP not provided by bootloader");
+    }
+
+    boot_phase_start(BootPhase::Thermal);
+    boot_phase_skipped(BootPhase::Thermal, "thermal ACPI probe not implemented");
+
+    boot_phase_start(BootPhase::Battery);
+    boot_phase_skipped(BootPhase::Battery, "battery ACPI probe not implemented");
+
+    let renoir_gpu = pci_any(|vendor, device, class, _, _| {
+        vendor == 0x1002 && class == 0x03 && matches!(device, 0x1636 | 0x1638)
+    });
+    boot_phase_start(BootPhase::AmdGpuRenoir);
+    if renoir_gpu {
+        boot_phase_ok(BootPhase::AmdGpuRenoir);
+    } else {
+        boot_phase_skipped(BootPhase::AmdGpuRenoir, "Renoir GPU PCI device not present");
+    }
+
+    let amd_xhci = pci_any(|vendor, _, class, subclass, prog_if| {
+        vendor == 0x1022 && class == 0x0c && subclass == 0x03 && prog_if == 0x30
+    });
+    boot_phase_start(BootPhase::AmdXhci);
+    if amd_xhci {
+        boot_phase_ok(BootPhase::AmdXhci);
+    } else {
+        boot_phase_skipped(BootPhase::AmdXhci, "AMD xHCI controller not present");
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn initialize_storage_hardware() {
+    boot_phase_start(BootPhase::Nvme);
+    boot_phase_skipped(BootPhase::Nvme, "native NVMe probe not implemented");
+    boot_phase_start(BootPhase::Ahci);
+    boot_phase_skipped(BootPhase::Ahci, "native AHCI probe not implemented");
 }
 
 #[allow(unused_mut, unused_variables)]
@@ -440,6 +638,8 @@ fn initialize_input_hardware(boot_info: &BootInfo) {
                 boot_phase_failed(BootPhase::UsbKeyboard, message);
                 crate::kprintln!("USB HID keyboard initialization failed: {}", message);
             }
+        if usb_status.keyboard == XhciKeyboardStatus::Online {
+            any_online = true;
         }
     }
     #[cfg(not(feature = "hw-usb-hid"))]

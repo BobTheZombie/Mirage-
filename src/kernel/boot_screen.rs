@@ -50,11 +50,15 @@ fn render_framebuffer(manager: &BootPhaseManager) {
     framebuffer_console::write_colored(SUBTITLE, RgbColor::WHITE);
     framebuffer_console::write_colored("\n\n", RgbColor::WHITE);
 
-    render_group(manager, &CORE_SCREEN_PHASES);
+    render_named_group(manager, "Core", &CORE_SCREEN_PHASES);
     framebuffer_console::write_colored("\n", RgbColor::WHITE);
-    render_group(manager, &SERVICE_SCREEN_PHASES);
+    render_named_group(manager, "Storage", &STORAGE_SCREEN_PHASES);
     framebuffer_console::write_colored("\n", RgbColor::WHITE);
-    render_group(manager, &INPUT_SCREEN_PHASES);
+    render_named_group(manager, "Input", &INPUT_SCREEN_PHASES);
+    framebuffer_console::write_colored("\n", RgbColor::WHITE);
+    render_named_group(manager, "AMD/Ryzen", &AMD_RYZEN_SCREEN_PHASES);
+    framebuffer_console::write_colored("\n", RgbColor::WHITE);
+    render_named_group(manager, "Services", &SERVICE_SCREEN_PHASES);
 
     framebuffer_console::write_colored("\nBoot Progress\n", RgbColor::WHITE);
     fb_progress_bar(manager.progress_percent(), manager.has_failed());
@@ -82,23 +86,48 @@ const CORE_SCREEN_PHASES: [BootPhase; 12] = [
 ];
 
 #[cfg(feature = "hw-framebuffer")]
-const SERVICE_SCREEN_PHASES: [BootPhase; 4] = [
-    BootPhase::Supervisor,
-    BootPhase::RootFs,
-    BootPhase::Userspace,
-    BootPhase::Mtss,
-];
+const STORAGE_SCREEN_PHASES: [BootPhase; 3] = [BootPhase::Nvme, BootPhase::Ahci, BootPhase::RootFs];
 
 #[cfg(feature = "hw-framebuffer")]
-const INPUT_SCREEN_PHASES: [BootPhase; 7] = [
-    BootPhase::Input,
+const INPUT_SCREEN_PHASES: [BootPhase; 9] = [
+    BootPhase::I8042,
+    BootPhase::Ps2Keyboard,
     BootPhase::Xhci,
     BootPhase::UsbCore,
     BootPhase::UsbHid,
     BootPhase::UsbKeyboard,
-    BootPhase::Ps2Keyboard,
+    BootPhase::AcpiEc,
     BootPhase::EcHotkeys,
+    BootPhase::Input,
 ];
+
+#[cfg(feature = "hw-framebuffer")]
+const AMD_RYZEN_SCREEN_PHASES: [BootPhase; 7] = [
+    BootPhase::Amd64Cpu,
+    BootPhase::RyzenCpu,
+    BootPhase::RyzenTopology,
+    BootPhase::AmdSoc,
+    BootPhase::AmdIommu,
+    BootPhase::AmdGpuRenoir,
+    BootPhase::AmdXhci,
+];
+
+#[cfg(feature = "hw-framebuffer")]
+const SERVICE_SCREEN_PHASES: [BootPhase; 4] = [
+    BootPhase::Supervisor,
+    BootPhase::Userspace,
+    BootPhase::Mtss,
+    BootPhase::IdleLoop,
+];
+
+#[cfg(feature = "hw-framebuffer")]
+fn render_named_group(manager: &BootPhaseManager, name: &str, phases: &[BootPhase]) {
+    use crate::arch::x86_64::framebuffer_console::{self, RgbColor};
+
+    framebuffer_console::write_colored(name, RgbColor::WHITE);
+    framebuffer_console::write_colored(":\n", RgbColor::WHITE);
+    render_group(manager, phases);
+}
 
 #[cfg(feature = "hw-framebuffer")]
 fn render_group(manager: &BootPhaseManager, phases: &[BootPhase]) {
