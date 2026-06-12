@@ -27,11 +27,23 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all build kernel qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
+.PHONY: all build kernel spider-rs spider-rs-check spider-rs-host-test qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
 
 all: iso
 
 build: kernel
+
+spider-rs:
+	$(CARGO) build -p spider-rs
+	mkdir -p $(BUILD_DIR)/rootfs/sbin $(BUILD_DIR)/rootfs/etc/spider/system
+	cp target/debug/spider-rs $(BUILD_DIR)/rootfs/sbin/spider-rs
+	cp userspace/spider-rs/units/* $(BUILD_DIR)/rootfs/etc/spider/system/
+
+spider-rs-check:
+	$(CARGO) check -p spider-rs
+
+spider-rs-host-test:
+	$(CARGO) test -p spider-rs
 
 mirageconfig:
 	$(MIRAGECONFIG) --menu --config $(CONFIG_FILE) --generate

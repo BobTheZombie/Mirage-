@@ -1,0 +1,10 @@
+[Unit]
+Description=Mirage console getty stub
+After=basic.target
+
+[Service]
+ExecStart=/sbin/mirage-getty tty0
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

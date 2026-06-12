@@ -1,0 +1,8 @@
+[Unit]
+Description=Mirage multi-user userspace target
+Requires=basic.target
+Wants=getty.service shell.service
+After=basic.target getty.service shell.service
+
+[Install]
+WantedBy=default.target

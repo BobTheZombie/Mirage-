@@ -22,6 +22,7 @@ members = [
     "crates/mirage-ryzen",
     "crates/mirage-storage",
     "crates/mirage-usb",
+    "userspace/spider-rs",
 ]
 resolver = "2"
 

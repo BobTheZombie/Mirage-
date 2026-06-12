@@ -6,6 +6,8 @@ extern crate mirage;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
+#[cfg(all(not(feature = "emergency-boot"), feature = "full-boot"))]
+use mirage::kernel::boot_phase::boot_phase_online;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
     boot_phase_failed, boot_phase_ok, boot_phase_start, boot_phase_stub,
@@ -116,14 +118,27 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
             boot_phase_start(BootPhase::Userspace);
             match kernel.bootstrap_userspace_init() {
-                Ok(pid) => {
+                Ok((pid, init_path)) => {
                     boot_phase_ok(BootPhase::Userspace);
-                    mirage::kprintln!("userspace init attempt succeeded: pid={:?}", pid);
+                    if init_path == "/sbin/spider-rs" {
+                        boot_phase_online(BootPhase::SpiderRs);
+                    } else {
+                        boot_phase_stub(BootPhase::SpiderRs, "Spider-rs image not selected");
+                    }
+                    mirage::kprintln!(
+                        "userspace init attempt succeeded: path={} pid={:?}",
+                        init_path,
+                        pid
+                    );
                 }
                 Err(error) => {
                     boot_phase_stub(
                         BootPhase::Userspace,
                         "userspace init unavailable in milestone",
+                    );
+                    boot_phase_stub(
+                        BootPhase::SpiderRs,
+                        "Spider-rs waits for userspace exec ABI",
                     );
                     mirage::kprintln!(
                         "userspace init attempt skipped/stubbed for minimal boot milestone: {:?}",
@@ -167,6 +182,10 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             boot_phase_stub(
                 BootPhase::Userspace,
                 "minimal boot milestone uses supervisor-only skeleton",
+            );
+            boot_phase_stub(
+                BootPhase::SpiderRs,
+                "Spider-rs pending real userspace init launch",
             );
             mirage::kprintln!(
             "userspace init attempt skipped: minimal boot milestone uses supervisor-only skeleton"
