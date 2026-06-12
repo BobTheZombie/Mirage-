@@ -1,202 +1,195 @@
 # Mirage Boot Phase Manager
 
-Mirage now tracks early x86_64 boot through a formal, no-heap boot phase
-manager instead of relying on scattered numeric boot markers.
+The Boot Phase Manager is the canonical subsystem registration and boot-status
+system for Mirage Boot Milestone 1.1. No subsystem is allowed to come online
+silently: every boot subsystem must register a static descriptor before it
+initializes, then report state transitions through `src/kernel/boot_phase.rs`.
+The module is exposed through `src/kernel/mod.rs` as `kernel::boot_phase`.
 
-The manager lives in `src/kernel/boot_phase.rs` and is exposed by
-`src/kernel/mod.rs` as `kernel::boot_phase`.
+## Subsystem registration rule
 
-## Design goals
+Every boot subsystem registers a `SubsystemDescriptor` before initialization:
 
-The boot phase manager is intended for the earliest QEMU/seed-rs boot path:
+- `phase`: stable `BootPhase` identity.
+- `name`: short framebuffer/serial display label.
+- `category`: coarse ownership group.
+- `required`: whether failure blocks the intended milestone policy.
+- `weight`: progress contribution.
 
-- `no_std`
-- no heap allocation
-- no `Vec` or `String`
-- fixed-size static phase table
-- serial diagnostics before the normal kernel logger is safe
-- framebuffer rendering only after the framebuffer phase is online
-- queryable state for future debug-shell commands
+Milestone 1.1 registers all known core descriptors during the seed-rs handoff,
+after `.bss` is cleared and before `SeedRs` starts. Registration emits a serial
+line and stores the record in a fixed table. Duplicate registration is detected
+and reported as a warning instead of silently overwriting the existing record.
 
-Serial is authoritative. The framebuffer screen is optional and best-effort.
+If code starts a phase that was not registered, the manager auto-registers the
+phase with its static fallback descriptor, prints:
 
-## Boot phase list
+```text
+[phase] WARNING: <phase> started without registration
+```
 
-The fixed phase table is ordered as follows:
+and makes the phase visible to boot-screen/debug-shell readers.
 
-1. `SeedRs`
-2. `BootInfo`
-3. `KernelMain`
-4. `Architecture`
-5. `Serial`
-6. `Gdt`
-7. `PhysicalAllocator`
-8. `KernelMapper`
-9. `Heap`
-10. `MemoryMap`
-11. `Memory`
-12. `Framebuffer`
-13. `Idt`
-14. `Pic`
-15. `Interrupts`
-16. `KernelConstructed`
-17. `BootInfoApplied`
-18. `SupervisorCreated`
-19. `RootFs`
-20. `Supervisor`
-21. `Userspace`
-22. `Mtss`
-23. `BootScreen`
-24. `IdleLoop`
+## Categories
 
-These phases intentionally describe Mirage's mechanism/policy boundary: seed-rs
-and architecture setup report low-level mechanisms, while root filesystem,
-supervisor, userspace, MTSS, boot screen, and idle loop report later boot
-milestones.
+`SubsystemCategory` groups registered records for rendering and future queries:
 
-## Phase states
+- `Seed`
+- `Boot`
+- `Architecture`
+- `Memory`
+- `Device`
+- `Input`
+- `Storage`
+- `Supervisor`
+- `Userspace`
+- `Scheduler`
+- `Debug`
 
-Each phase has one of these states:
+The category is metadata only; policy decisions still belong to the supervisor
+or the architecture/kernel mechanism that owns the action.
+
+## States
+
+Each registered subsystem reports one of these states:
 
 | State | Meaning |
 | --- | --- |
-| `Pending` | The phase has not been reached. |
-| `Started` | The phase is currently being attempted. |
-| `Ok` | The phase completed successfully. |
-| `Failed` | The phase was attempted and failed. The message field contains a static failure summary. |
-| `Skipped` | The phase was deliberately skipped because the current build or boot environment does not provide it. |
-| `Stub` | The phase is intentionally represented by a milestone stub. |
+| `Unregistered` | No visible descriptor exists for this slot. This should not be seen for known Milestone 1.1 subsystems after default registration. |
+| `Registered` | A descriptor was registered and serially reported. |
+| `Pending` | The subsystem is known, visible, and not yet started. |
+| `Started` | Initialization is in progress. |
+| `Ok` | Initialization completed successfully. |
+| `Online` | The subsystem is available for live use. |
+| `Enabled` | The subsystem was enabled, such as interrupt delivery. |
+| `Failed` | Initialization failed. The record message contains a static diagnostic. |
+| `Skipped` | The subsystem is optional or unavailable in this build/environment. |
+| `Stub` | A deliberate milestone stub represents future functionality. |
 
-Every transition emits a concise raw COM1 diagnostic such as:
+Required failures are rendered red and serially diagnosed. Optional absent
+hardware must be marked `Skipped`, not `Failed` (for example, no USB keyboard or
+no ACPI EC hotkeys).
 
-```text
-[phase] Memory: started
-[phase] Memory: ok
-[phase] Supervisor: failed: full service manifest incomplete
-```
+## Required vs. optional
 
-## Progress calculation
+`required = true` means the subsystem is part of the intended boot milestone and
+its failure is a boot-policy concern. `required = false` means the subsystem is
+optional for this milestone; absence should be visible as `Skipped` or `Stub`.
+The manager records the fact, but it does not decide whether the system may
+continue. Continuing after a required failure remains boot/supervisor policy.
 
-Progress is computed from the fixed table without allocation:
+## Weight and progress policy
 
-- `Pending` = 0 units
-- `Started` = 1 unit
-- `Ok` = 2 units
-- `Skipped` = 2 units
-- `Stub` = 2 units
-- `Failed` = 0 units
+`boot_phase_progress_percent()` computes progress from registered records only:
+
+- `Ok`, `Online`, `Enabled`: full weight.
+- `Skipped`, `Stub`: full weight for optional subsystems, half weight for
+  required subsystems.
+- `Started`: half weight.
+- `Pending`, `Registered`, `Unregistered`: zero.
+- `Failed`: zero and the framebuffer progress bar warns in red.
 
 The percentage is:
 
 ```text
-sum(phase units) * 100 / (phase_count * 2)
+completed_registered_weight * 100 / total_registered_weight
 ```
 
-`Skipped` and `Stub` count as complete for milestone progress because they are
-explicit, known boot outcomes rather than unresolved work. Failed phases count
-as zero and cause the framebuffer progress bar to render in red.
+No heap allocation, `Vec`, or `String` is used.
 
-## Framebuffer integration
+## Framebuffer rendering
 
-`kernel::boot_screen` renders from `BootPhaseManager` snapshots. It no longer
-uses manually maintained boot-screen status fields.
+`src/kernel/boot_screen.rs` renders from `BootPhaseManager` snapshots. It does
+not maintain a separate hand-written status structure; labels and state strings
+come from registered subsystem records.
 
-The persistent screen displays:
+The persistent screen is ordered as:
+
+1. Core seed/boot/architecture/memory records.
+2. Supervisor, root filesystem, userspace, and scheduler records.
+3. Input status records.
+4. Progress and current phase.
+
+Current milestone-visible layout:
 
 ```text
 GNU/MIRAGE
 
-Mirage Boot Milestone 1.1
+               Mirage Boot Milestone 1.1
 
-Seed-rs        [ OK ]
-BootInfo       [ OK ]
-Architecture   [ OK ]
-Serial         [ OK ]
-GDT            [ OK ]
-Memory         [ OK ]
-Paging         [ OK ]
-Heap           [ ONLINE ]
-Framebuffer    [ ONLINE ]
-IDT            [ OK ]
-PIC            [ OK ]
-Interrupts     [ ENABLED ]
-Supervisor     [ OK/PENDING/FAILED ]
-Root FS        [ OK/PENDING/FAILED ]
-Userspace      [ STUB/PENDING ]
-MTSS           [ OK/PENDING ]
+Seed-rs      [ OK ]
+BootInfo     [ OK ]
+Architecture [ STARTED ]
+Serial       [ OK ]
+GDT          [ OK ]
+Memory       [ OK ]
+Paging       [ OK ]
+Heap         [ ONLINE ]
+Framebuffer  [ ONLINE ]
+IDT          [ OK ]
+PIC          [ OK ]
+Interrupts   [ ENABLED ]
+
+Supervisor   [ PENDING ]
+Root FS      [ PENDING ]
+Userspace    [ PENDING ]
+MTSS         [ PENDING ]
+
+Input        [ PENDING ]
+USB Kbd      [ STARTED ]
+PS/2 Kbd     [ OK ]
+EC Hotkeys   [ PENDING ]
 
 Boot Progress
-[###############-------------] 76%
+[##################------------] 58%
 
 Current Phase:
-<phase name>
+USB Keyboard
 
 Press ESC for debug shell
 ```
 
-Color policy:
+Framebuffer color rules:
 
-- `Ok`, `ONLINE`, and `ENABLED`: green
-- `Pending` and `Started`: yellow
-- `Stub` and `Skipped`: cyan
-- `Failed`: red
+- `OK`, `ONLINE`, `ENABLED`: green.
+- `STARTED`, `PENDING`: yellow.
+- `REGISTERED`: gray.
+- `SKIPPED`: gray/cyan.
+- `STUB`: cyan.
+- `FAILED`: red.
+- labels: white/gray.
+- `GNU/MIRAGE`: cyan.
+- background: black.
 
-Framebuffer rendering is attempted only after `Framebuffer` reaches `Ok`. If no
-framebuffer is provided, or if the build does not enable framebuffer support,
-the `Framebuffer` phase becomes `Skipped` and serial remains the only output.
+Framebuffer redraws are attempted only after `Framebuffer` is `Online`, `Ok`, or
+`Enabled`. If the framebuffer is skipped, serial remains the authoritative boot
+status path.
 
-## Serial fallback
+## Serial transition logs
 
-The manager writes transition diagnostics with raw x86_64 COM1 routines instead
-of `kprintln!`. This keeps seed-rs and early boot diagnostics independent of the
-normal kernel console, framebuffer mirroring, allocator state, supervisor state,
-or MTSS.
-
-The older seed-rs textual markers remain useful compatibility aliases, but the
-canonical failure locator is the last `[phase] ...` transition printed on COM1.
-
-## Identifying a failure point
-
-When boot hangs or halts:
-
-1. Read the final `[phase]` line on the serial console.
-2. If the final state is `Started`, that phase is the active suspect.
-3. If the final state is `Ok`, the next pending phase in the fixed table is the
-   next likely code path.
-4. If the final state is `Failed`, the static message after `failed:` is the
-   formal failure summary.
-5. If the framebuffer is online, check `Current Phase:` and the red/yellow/green
-   table for the same information.
-
-For example, if QEMU stops immediately after:
+Every registration and transition writes a plain COM1 line. Examples:
 
 ```text
-[phase] Interrupts: ok
+[phase] Seed-rs: registered
+[phase] Memory: STARTED
+[phase] Memory: OK
+[phase] Supervisor: FAILED: minimal supervisor bootstrap failed
+[phase] EC Hotkeys: SKIPPED: EC absent
 ```
 
-then interrupt enabling completed and the next visible phase should be
-`Architecture: ok` or `KernelConstructed: ok`, depending on where execution
-stops after returning from `x86_64::init_architecture`.
+Serial logs intentionally avoid heap formatting and ANSI color requirements.
 
-## Current integration points
+## Future debug shell query path
 
-- seed-rs marks `SeedRs` and `BootInfo`.
-- `kernel_main` marks `KernelMain`, `Architecture`, `KernelConstructed`,
-  `BootInfoApplied`, `SupervisorCreated`, `RootFs`, `Supervisor`, `Userspace`,
-  `Mtss`, `BootScreen`, and `IdleLoop`.
-- x86_64 architecture setup marks `Serial`, `Gdt`, `MemoryMap`,
-  `KernelMapper`, `PhysicalAllocator`, `Heap`, `Memory`, `Framebuffer`, `Idt`,
-  `Pic`, and `Interrupts`.
-
-## Future debug-shell integration
-
-The debug shell can later expose read-only commands that call:
+The future debug shell should query this same table rather than duplicating boot
+state. Read-only commands can use:
 
 - `boot_phase_current()`
 - `boot_phase_state(phase)`
 - `boot_phase_progress_percent()`
-- a snapshot/table rendering helper based on `boot_phase_snapshot()`
+- `boot_phase_records(callback)`
+- `boot_phase_snapshot()` for fixed-table rendering
 
-Those commands should remain read-only. Policy decisions such as retrying a
-service, remounting root, or launching userspace belong to the supervisor, not
-the boot phase manager.
+State mutation remains reserved for boot code and subsystem initialization paths;
+policy actions such as restarting services or remounting root belong above this
+mechanism layer.

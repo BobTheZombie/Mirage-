@@ -3,9 +3,9 @@
 #[cfg(feature = "hw-framebuffer")]
 use core::fmt::{self, Write};
 
-#[cfg(feature = "hw-framebuffer")]
-use crate::kernel::boot_phase::{boot_phase_progress_percent, BootPhase, PhaseState};
 use crate::kernel::boot_phase::{boot_phase_snapshot, BootPhaseManager};
+#[cfg(feature = "hw-framebuffer")]
+use crate::kernel::boot_phase::{BootPhase, BootPhaseRecord, PhaseState};
 use crate::kernel::sync::SpinLock;
 
 #[cfg(feature = "hw-framebuffer")]
@@ -44,66 +44,76 @@ fn render_framebuffer(manager: &BootPhaseManager) {
     use crate::arch::x86_64::framebuffer_console::{self, RgbColor};
 
     framebuffer_console::clear_screen();
-    framebuffer_console::write_colored("                    ", RgbColor::WHITE);
     framebuffer_console::write_colored(TITLE, RgbColor::CYAN);
     framebuffer_console::write_colored("\n\n", RgbColor::WHITE);
-    framebuffer_console::write_colored("                ", RgbColor::WHITE);
+    framebuffer_console::write_colored("               ", RgbColor::WHITE);
     framebuffer_console::write_colored(SUBTITLE, RgbColor::WHITE);
     framebuffer_console::write_colored("\n\n", RgbColor::WHITE);
 
-    fb_status(manager, "Seed-rs", BootPhase::SeedRs, None);
-    fb_status(manager, "BootInfo", BootPhase::BootInfo, None);
-    fb_status(manager, "Architecture", BootPhase::Architecture, None);
-    fb_status(manager, "Serial", BootPhase::Serial, None);
-    fb_status(manager, "GDT", BootPhase::Gdt, None);
-    fb_status(manager, "Memory", BootPhase::Memory, None);
-    fb_status(manager, "Paging", BootPhase::KernelMapper, None);
-    fb_status(manager, "Heap", BootPhase::Heap, Some("ONLINE"));
-    fb_status(
-        manager,
-        "Framebuffer",
-        BootPhase::Framebuffer,
-        Some("ONLINE"),
-    );
-    fb_status(manager, "IDT", BootPhase::Idt, None);
-    fb_status(manager, "PIC", BootPhase::Pic, None);
-    fb_status(
-        manager,
-        "Interrupts",
-        BootPhase::Interrupts,
-        Some("ENABLED"),
-    );
-    fb_status(manager, "Supervisor", BootPhase::Supervisor, None);
-    fb_status(manager, "Root FS", BootPhase::RootFs, None);
-    fb_status(manager, "Userspace", BootPhase::Userspace, None);
-    fb_status(manager, "MTSS", BootPhase::Mtss, None);
-    fb_status(manager, "Input", BootPhase::InputSubsystem, None);
-    fb_status(manager, "PS/2 Kbd", BootPhase::Ps2Keyboard, None);
-    fb_status(manager, "USB Kbd", BootPhase::UsbHidKeyboard, None);
-    fb_status(manager, "EC Hotkeys", BootPhase::AcpiEcHotkeys, None);
+    render_group(manager, &CORE_SCREEN_PHASES);
+    framebuffer_console::write_colored("\n", RgbColor::WHITE);
+    render_group(manager, &SERVICE_SCREEN_PHASES);
+    framebuffer_console::write_colored("\n", RgbColor::WHITE);
+    render_group(manager, &INPUT_SCREEN_PHASES);
 
     framebuffer_console::write_colored("\nBoot Progress\n", RgbColor::WHITE);
-    fb_progress_bar(boot_phase_progress_percent(), manager.has_failed());
+    fb_progress_bar(manager.progress_percent(), manager.has_failed());
     framebuffer_console::write_colored("\n\nCurrent Phase:\n", RgbColor::WHITE);
-    framebuffer_console::write_colored(manager.current_phase.name(), RgbColor::YELLOW);
+    framebuffer_console::write_colored(manager.current_phase.friendly_name(), RgbColor::YELLOW);
     framebuffer_console::write_colored("\n\n", RgbColor::WHITE);
     framebuffer_console::write_colored(PROMPT, RgbColor::GRAY);
     framebuffer_console::write_colored("\n", RgbColor::WHITE);
 }
 
 #[cfg(feature = "hw-framebuffer")]
-fn fb_status(
-    manager: &BootPhaseManager,
-    label: &str,
-    phase: BootPhase,
-    ok_alias: Option<&'static str>,
-) {
+const CORE_SCREEN_PHASES: [BootPhase; 12] = [
+    BootPhase::SeedRs,
+    BootPhase::BootInfo,
+    BootPhase::Architecture,
+    BootPhase::Serial,
+    BootPhase::Gdt,
+    BootPhase::Memory,
+    BootPhase::Paging,
+    BootPhase::Heap,
+    BootPhase::Framebuffer,
+    BootPhase::Idt,
+    BootPhase::Pic,
+    BootPhase::Interrupts,
+];
+
+#[cfg(feature = "hw-framebuffer")]
+const SERVICE_SCREEN_PHASES: [BootPhase; 4] = [
+    BootPhase::Supervisor,
+    BootPhase::RootFs,
+    BootPhase::Userspace,
+    BootPhase::Mtss,
+];
+
+#[cfg(feature = "hw-framebuffer")]
+const INPUT_SCREEN_PHASES: [BootPhase; 4] = [
+    BootPhase::Input,
+    BootPhase::UsbKeyboard,
+    BootPhase::Ps2Keyboard,
+    BootPhase::EcHotkeys,
+];
+
+#[cfg(feature = "hw-framebuffer")]
+fn render_group(manager: &BootPhaseManager, phases: &[BootPhase]) {
+    let mut index = 0usize;
+    while index < phases.len() {
+        if let Some(record) = manager.record(phases[index]) {
+            fb_status(record);
+        }
+        index += 1;
+    }
+}
+
+#[cfg(feature = "hw-framebuffer")]
+fn fb_status(record: &BootPhaseRecord) {
     use crate::arch::x86_64::framebuffer_console::{self, RgbColor};
 
-    let state = manager.state(phase);
-    let value = display_value(state, ok_alias);
-    write_label(label);
-    framebuffer_console::write_colored(value, status_color(state));
+    write_label(record.descriptor.name);
+    framebuffer_console::write_colored(record.state.as_str(), status_color(record.state));
     framebuffer_console::write_colored(" ]\n", RgbColor::GRAY);
 }
 
@@ -147,22 +157,16 @@ fn write_label(label: &str) {
 }
 
 #[cfg(feature = "hw-framebuffer")]
-fn display_value(state: PhaseState, ok_alias: Option<&'static str>) -> &'static str {
-    match (state, ok_alias) {
-        (PhaseState::Ok, Some(alias)) => alias,
-        _ => state.as_str(),
-    }
-}
-
-#[cfg(feature = "hw-framebuffer")]
 fn status_color(state: PhaseState) -> crate::arch::x86_64::framebuffer_console::RgbColor {
     use crate::arch::x86_64::framebuffer_console::RgbColor;
 
     match state {
-        PhaseState::Ok => RgbColor::GREEN,
-        PhaseState::Pending | PhaseState::Started => RgbColor::YELLOW,
-        PhaseState::Stub | PhaseState::Skipped => RgbColor::CYAN,
+        PhaseState::Ok | PhaseState::Online | PhaseState::Enabled => RgbColor::GREEN,
+        PhaseState::Started | PhaseState::Pending => RgbColor::YELLOW,
+        PhaseState::Registered | PhaseState::Skipped => RgbColor::GRAY,
+        PhaseState::Stub => RgbColor::CYAN,
         PhaseState::Failed => RgbColor::RED,
+        PhaseState::Unregistered => RgbColor::GRAY,
     }
 }
 

@@ -13,7 +13,9 @@ use core::arch::asm;
 
 use crate::arch::x86_64::boot::{self, BootInfo, KernelSections};
 use crate::boot as limine;
-use crate::kernel::boot_phase::{boot_phase_ok, boot_phase_start, BootPhase};
+use crate::kernel::boot_phase::{
+    boot_phase_ok, boot_phase_start, boot_register_default_subsystems, BootPhase,
+};
 
 const COM1: u16 = 0x3f8;
 const COM1_INTERRUPT_ENABLE: u16 = COM1 + 1;
@@ -35,6 +37,8 @@ pub unsafe fn x86_64_handoff() -> ! {
 
     boot::clear_bss();
     seed_com1_write_str("[seed-rs 02] bss cleared\r\n");
+
+    boot_register_default_subsystems();
 
     let sections = KernelSections::from_linker();
     seed_com1_write_str("[seed-rs 03] linker sections captured\r\n");

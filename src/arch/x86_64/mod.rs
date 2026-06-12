@@ -15,7 +15,10 @@ use crate::arch::x86_64::xhci_keyboard::{XhciKeyboardStatus, USB_HID_KEYBOARD_DR
 #[cfg(not(feature = "emergency-boot"))]
 #[cfg(any(feature = "hw-ps2-keyboard", feature = "hw-usb-hid"))]
 use crate::kernel::boot_phase::boot_phase_failed;
-use crate::kernel::boot_phase::{boot_phase_ok, boot_phase_skipped, boot_phase_start, BootPhase};
+use crate::kernel::boot_phase::{
+    boot_phase_enabled, boot_phase_ok, boot_phase_online, boot_phase_skipped, boot_phase_start,
+    BootPhase,
+};
 use crate::kernel::cpu::MAX_CORES;
 #[cfg(not(feature = "emergency-boot"))]
 use crate::kernel::memory;
@@ -140,7 +143,7 @@ fn initialize_framebuffer_console(boot_info: &BootInfo) {
     boot_phase_start(BootPhase::Framebuffer);
     match framebuffer_console::init_from_boot_info(boot_info) {
         Ok(Some(framebuffer)) => {
-            boot_phase_ok(BootPhase::Framebuffer);
+            boot_phase_online(BootPhase::Framebuffer);
             crate::kprintln!("Mirage framebuffer online");
             crate::kprintln!("  resolution: {}x{}", framebuffer.width, framebuffer.height);
             crate::kprintln!("  pitch: {}", framebuffer.pitch);
@@ -381,26 +384,26 @@ fn initialize_input_hardware(boot_info: &BootInfo) {
     #[cfg(not(feature = "hw-xhci"))]
     boot_phase_skipped(BootPhase::Xhci, "hw-xhci feature disabled");
 
-    boot_phase_start(BootPhase::UsbHidKeyboard);
+    boot_phase_start(BootPhase::UsbKeyboard);
     #[cfg(feature = "hw-usb-hid")]
     match USB_HID_KEYBOARD_DRIVER.initialize(boot_info.hhdm_offset) {
         XhciKeyboardStatus::Online => {
-            boot_phase_ok(BootPhase::UsbHidKeyboard);
+            boot_phase_ok(BootPhase::UsbKeyboard);
             any_online = true;
         }
         XhciKeyboardStatus::SkippedNoController => {
-            boot_phase_skipped(BootPhase::UsbHidKeyboard, "xHCI controller not present")
+            boot_phase_skipped(BootPhase::UsbKeyboard, "xHCI controller not present")
         }
         XhciKeyboardStatus::SkippedNoKeyboard => {
-            boot_phase_skipped(BootPhase::UsbHidKeyboard, "USB HID keyboard not present")
+            boot_phase_skipped(BootPhase::UsbKeyboard, "USB HID keyboard not present")
         }
         XhciKeyboardStatus::Failed => boot_phase_failed(
-            BootPhase::UsbHidKeyboard,
+            BootPhase::UsbKeyboard,
             "USB HID keyboard initialization failed",
         ),
     }
     #[cfg(not(feature = "hw-usb-hid"))]
-    boot_phase_skipped(BootPhase::UsbHidKeyboard, "hw-usb-hid feature disabled");
+    boot_phase_skipped(BootPhase::UsbKeyboard, "hw-usb-hid feature disabled");
 
     boot_phase_start(BootPhase::AcpiEc);
     #[cfg(feature = "hw-acpi-ec")]
@@ -408,27 +411,24 @@ fn initialize_input_hardware(boot_info: &BootInfo) {
     #[cfg(not(feature = "hw-acpi-ec"))]
     boot_phase_skipped(BootPhase::AcpiEc, "hw-acpi-ec feature disabled");
 
-    boot_phase_start(BootPhase::AcpiEcHotkeys);
+    boot_phase_start(BootPhase::EcHotkeys);
     #[cfg(feature = "hw-laptop-hotkeys")]
     match ACPI_EC_HOTKEY_DRIVER.initialize(boot_info) {
         AcpiEcStatus::Online => {
-            boot_phase_ok(BootPhase::AcpiEcHotkeys);
+            boot_phase_ok(BootPhase::EcHotkeys);
             any_online = true;
         }
-        AcpiEcStatus::SkippedNoAcpi => boot_phase_skipped(BootPhase::AcpiEcHotkeys, "ACPI absent"),
-        AcpiEcStatus::SkippedNoEc => boot_phase_skipped(BootPhase::AcpiEcHotkeys, "EC absent"),
+        AcpiEcStatus::SkippedNoAcpi => boot_phase_skipped(BootPhase::EcHotkeys, "ACPI absent"),
+        AcpiEcStatus::SkippedNoEc => boot_phase_skipped(BootPhase::EcHotkeys, "EC absent"),
     }
     #[cfg(not(feature = "hw-laptop-hotkeys"))]
-    boot_phase_skipped(
-        BootPhase::AcpiEcHotkeys,
-        "hw-laptop-hotkeys feature disabled",
-    );
+    boot_phase_skipped(BootPhase::EcHotkeys, "hw-laptop-hotkeys feature disabled");
 
-    boot_phase_start(BootPhase::InputSubsystem);
+    boot_phase_start(BootPhase::Input);
     if any_online || crate::kernel::input::any_keyboard_online() {
-        boot_phase_ok(BootPhase::InputSubsystem);
+        boot_phase_ok(BootPhase::Input);
     } else {
-        boot_phase_skipped(BootPhase::InputSubsystem, "no keyboard source online");
+        boot_phase_skipped(BootPhase::Input, "no keyboard source online");
     }
 }
 
@@ -450,12 +450,14 @@ fn setup_memory_layout(boot_info: &BootInfo) {
     boot_phase_start(BootPhase::KernelMapper);
     paging::initialize(boot_info);
     boot_phase_ok(BootPhase::KernelMapper);
+    boot_phase_start(BootPhase::Paging);
+    boot_phase_ok(BootPhase::Paging);
 
     boot_phase_start(BootPhase::PhysicalAllocator);
     memory::initialize_from_boot_info(boot_info);
     boot_phase_ok(BootPhase::PhysicalAllocator);
     boot_phase_start(BootPhase::Heap);
-    boot_phase_ok(BootPhase::Heap);
+    boot_phase_online(BootPhase::Heap);
     boot_phase_start(BootPhase::Memory);
     boot_phase_ok(BootPhase::Memory);
     crate::kprintln!("memory map parsed");
@@ -574,6 +576,6 @@ fn configure_interrupts() {
     crate::kprintln!("PIC initialized");
     boot_phase_start(BootPhase::Interrupts);
     interrupts::enable();
-    boot_phase_ok(BootPhase::Interrupts);
+    boot_phase_enabled(BootPhase::Interrupts);
     crate::kprintln!("interrupts enabled");
 }
