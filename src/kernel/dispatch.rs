@@ -2,7 +2,7 @@
 //!
 //! The dispatcher is intentionally small and `no_std`: compiled services register
 //! static service objects, the dispatcher validates feature gates and dependencies,
-//! probes runtime presence, and only then emits `STARTED` before calling `start()`.
+//! probes runtime presence, and only then emits `Started` before calling `start()`.
 //! The Boot Phase Manager remains the state-reporting sink; services do not mutate
 //! phase state directly when they are run through this orchestrator.
 

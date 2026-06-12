@@ -24,10 +24,14 @@ pub struct RgbColor {
 impl RgbColor {
     pub const WHITE: Self = Self::new(0xff, 0xff, 0xff);
     pub const GRAY: Self = Self::new(0xb0, 0xb0, 0xb0);
+    pub const DARK_GRAY: Self = Self::new(0x60, 0x60, 0x60);
     pub const GREEN: Self = Self::new(0x40, 0xff, 0x40);
+    pub const BRIGHT_GREEN: Self = Self::new(0x80, 0xff, 0x80);
     pub const YELLOW: Self = Self::new(0xff, 0xd7, 0x40);
     pub const RED: Self = Self::new(0xff, 0x40, 0x40);
     pub const CYAN: Self = Self::new(0x40, 0xff, 0xff);
+    pub const BLUE: Self = Self::new(0x40, 0x80, 0xff);
+    pub const MAGENTA: Self = Self::new(0xff, 0x40, 0xff);
 
     pub const fn new(red: u8, green: u8, blue: u8) -> Self {
         Self { red, green, blue }
@@ -94,13 +98,16 @@ pub fn write_colored(text: &str, foreground: RgbColor) {
 /// Write an aligned status line with a color selected from a boot state.
 pub fn write_status(label: &str, value: &str, state: crate::kernel::boot_status::BootState) {
     let color = match state {
-        crate::kernel::boot_status::BootState::Ok
-        | crate::kernel::boot_status::BootState::Online
-        | crate::kernel::boot_status::BootState::Enabled => RgbColor::GREEN,
+        crate::kernel::boot_status::BootState::Ok => RgbColor::GREEN,
+        crate::kernel::boot_status::BootState::Online => RgbColor::BRIGHT_GREEN,
+        crate::kernel::boot_status::BootState::Enabled => RgbColor::CYAN,
+        crate::kernel::boot_status::BootState::Detected => RgbColor::BLUE,
+        crate::kernel::boot_status::BootState::Started => RgbColor::WHITE,
         crate::kernel::boot_status::BootState::Pending => RgbColor::YELLOW,
-        crate::kernel::boot_status::BootState::Skipped
-        | crate::kernel::boot_status::BootState::Stub => RgbColor::CYAN,
+        crate::kernel::boot_status::BootState::Stub => RgbColor::MAGENTA,
+        crate::kernel::boot_status::BootState::Skipped => RgbColor::DARK_GRAY,
         crate::kernel::boot_status::BootState::Failed => RgbColor::RED,
+        crate::kernel::boot_status::BootState::Registered => RgbColor::GRAY,
     };
 
     if let Some(console) = CONSOLE.lock().as_mut() {

@@ -7,26 +7,32 @@
 /// Early boot state displayed by the persistent boot status screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootState {
+    Registered,
     Pending,
+    Started,
+    Detected,
     Ok,
     Online,
     Enabled,
-    Failed,
-    Skipped,
     Stub,
+    Skipped,
+    Failed,
 }
 
 impl BootState {
     /// Stable text used by both framebuffer and serial renderers.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Pending => "PENDING",
-            Self::Ok => "OK",
-            Self::Online => "ONLINE",
-            Self::Enabled => "ENABLED",
-            Self::Failed => "FAILED",
-            Self::Skipped => "SKIPPED",
-            Self::Stub => "STUB",
+            Self::Registered => "Registered",
+            Self::Pending => "Pending",
+            Self::Started => "Started",
+            Self::Detected => "Detected",
+            Self::Ok => "Ok",
+            Self::Online => "Online",
+            Self::Enabled => "Enabled",
+            Self::Stub => "Stub",
+            Self::Skipped => "Skipped",
+            Self::Failed => "Failed",
         }
     }
 
@@ -39,8 +45,9 @@ impl BootState {
     pub const fn progress_units(self, weight: u16) -> u16 {
         match self {
             Self::Ok | Self::Online | Self::Enabled | Self::Skipped => weight,
-            Self::Stub => weight / 2,
-            Self::Pending | Self::Failed => 0,
+            Self::Detected | Self::Stub => weight / 2,
+            Self::Started => (weight + 1) / 2,
+            Self::Registered | Self::Pending | Self::Failed => 0,
         }
     }
 }
@@ -258,13 +265,16 @@ mod tests {
 
     #[test]
     fn state_labels_are_stable() {
-        assert_eq!(BootState::Ok.as_str(), "OK");
-        assert_eq!(BootState::Online.as_str(), "ONLINE");
-        assert_eq!(BootState::Enabled.as_str(), "ENABLED");
-        assert_eq!(BootState::Pending.as_str(), "PENDING");
-        assert_eq!(BootState::Failed.as_str(), "FAILED");
-        assert_eq!(BootState::Skipped.as_str(), "SKIPPED");
-        assert_eq!(BootState::Stub.as_str(), "STUB");
+        assert_eq!(BootState::Registered.as_str(), "Registered");
+        assert_eq!(BootState::Started.as_str(), "Started");
+        assert_eq!(BootState::Detected.as_str(), "Detected");
+        assert_eq!(BootState::Ok.as_str(), "Ok");
+        assert_eq!(BootState::Online.as_str(), "Online");
+        assert_eq!(BootState::Enabled.as_str(), "Enabled");
+        assert_eq!(BootState::Pending.as_str(), "Pending");
+        assert_eq!(BootState::Failed.as_str(), "Failed");
+        assert_eq!(BootState::Skipped.as_str(), "Skipped");
+        assert_eq!(BootState::Stub.as_str(), "Stub");
     }
 
     #[test]

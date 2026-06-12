@@ -104,7 +104,7 @@ impl BootPhase {
             Self::UsbHid => "USB HID",
             Self::UsbKeyboard => "USB Keyboard",
             Self::KernelMapper => "Kernel Mapper",
-            Self::RootFs => "Root Filesystem",
+            Self::RootFs => "Root FS",
             Self::Mtss => "MTSS",
             _ => self.name(),
         }
@@ -122,29 +122,29 @@ pub enum PhaseState {
     Registered,
     Pending,
     Started,
+    Detected,
     Ok,
     Online,
     Enabled,
-    Failed,
-    Skipped,
-    Detected,
     Stub,
+    Skipped,
+    Failed,
 }
 
 impl PhaseState {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Unregistered => "UNREGISTERED",
-            Self::Registered => "REGISTERED",
-            Self::Pending => "PENDING",
-            Self::Started => "STARTED",
-            Self::Ok => "OK",
-            Self::Online => "ONLINE",
-            Self::Enabled => "ENABLED",
-            Self::Failed => "FAILED",
-            Self::Skipped => "SKIPPED",
-            Self::Detected => "DETECTED",
-            Self::Stub => "STUB",
+            Self::Unregistered => "Unregistered",
+            Self::Registered => "Registered",
+            Self::Pending => "Pending",
+            Self::Started => "Started",
+            Self::Detected => "Detected",
+            Self::Ok => "Ok",
+            Self::Online => "Online",
+            Self::Enabled => "Enabled",
+            Self::Stub => "Stub",
+            Self::Skipped => "Skipped",
+            Self::Failed => "Failed",
         }
     }
 
@@ -528,12 +528,18 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
     ),
     descriptor(
         BootPhase::Ps2Keyboard,
-        "PS/2 Kbd",
+        "PS/2 Keyboard",
         SubsystemCategory::Input,
         false,
         3,
     ),
-    descriptor(BootPhase::Xhci, "xHCI", SubsystemCategory::Device, false, 4),
+    descriptor(
+        BootPhase::Xhci,
+        "AMD xHCI",
+        SubsystemCategory::Device,
+        false,
+        4,
+    ),
     descriptor(
         BootPhase::UsbCore,
         "USB Core",
@@ -550,7 +556,7 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
     ),
     descriptor(
         BootPhase::UsbKeyboard,
-        "USB Kbd",
+        "USB Keyboard",
         SubsystemCategory::Input,
         false,
         3,
@@ -860,9 +866,9 @@ fn write_registration_serial(phase: BootPhase) {
         return;
     }
     unsafe {
-        crate::arch::x86_64::early_debug::com1_write_str("[phase] ");
+        crate::arch::x86_64::early_debug::com1_write_str("[Phase] ");
         crate::arch::x86_64::early_debug::com1_write_str(phase.name());
-        crate::arch::x86_64::early_debug::com1_write_str(": registered\r\n");
+        crate::arch::x86_64::early_debug::com1_write_str(": Registered\r\n");
     }
 }
 
@@ -875,7 +881,7 @@ fn write_duplicate_registration_serial(phase: BootPhase) {
     }
     unsafe {
         crate::arch::x86_64::early_debug::com1_write_str(
-            "[phase] WARNING: duplicate registration for ",
+            "[Phase] Warning: duplicate registration for ",
         );
         crate::arch::x86_64::early_debug::com1_write_str(phase.name());
         crate::arch::x86_64::early_debug::com1_write_str("\r\n");
@@ -890,7 +896,7 @@ fn write_unregistered_transition_serial(phase: BootPhase, state: PhaseState) {
         return;
     }
     unsafe {
-        crate::arch::x86_64::early_debug::com1_write_str("[phase] WARNING: ignored ");
+        crate::arch::x86_64::early_debug::com1_write_str("[Phase] Warning: ignored ");
         crate::arch::x86_64::early_debug::com1_write_str(state.as_str());
         crate::arch::x86_64::early_debug::com1_write_str(" for unregistered ");
         crate::arch::x86_64::early_debug::com1_write_str(phase.name());
@@ -902,14 +908,14 @@ fn write_unregistered_transition_serial(phase: BootPhase, state: PhaseState) {
 fn write_validation_serial() {
     unsafe {
         crate::arch::x86_64::early_debug::com1_write_str(
-            "[phase] validation: unresolved registered/pending phases closed\r\n",
+            "[Phase] Validation: unresolved registered/pending phases closed\r\n",
         );
     }
 }
 
 fn write_transition_serial(phase: BootPhase, state: PhaseState, message: &'static str) {
     unsafe {
-        crate::arch::x86_64::early_debug::com1_write_str("[phase] ");
+        crate::arch::x86_64::early_debug::com1_write_str("[Phase] ");
         crate::arch::x86_64::early_debug::com1_write_str(phase.name());
         crate::arch::x86_64::early_debug::com1_write_str(": ");
         crate::arch::x86_64::early_debug::com1_write_str(state.as_str());
@@ -953,6 +959,20 @@ mod tests {
             PhaseState::Unregistered
         );
         assert!(manager.record(BootPhase::UsbKeyboard).is_none());
+    }
+
+    #[test]
+    fn phase_state_labels_are_title_case() {
+        assert_eq!(PhaseState::Registered.as_str(), "Registered");
+        assert_eq!(PhaseState::Pending.as_str(), "Pending");
+        assert_eq!(PhaseState::Started.as_str(), "Started");
+        assert_eq!(PhaseState::Detected.as_str(), "Detected");
+        assert_eq!(PhaseState::Ok.as_str(), "Ok");
+        assert_eq!(PhaseState::Online.as_str(), "Online");
+        assert_eq!(PhaseState::Enabled.as_str(), "Enabled");
+        assert_eq!(PhaseState::Stub.as_str(), "Stub");
+        assert_eq!(PhaseState::Skipped.as_str(), "Skipped");
+        assert_eq!(PhaseState::Failed.as_str(), "Failed");
     }
 
     #[test]
