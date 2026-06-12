@@ -11,13 +11,12 @@ use crate::arch::x86_64::boot::BootInfo;
 #[cfg(feature = "hw-ps2-keyboard")]
 use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
 #[cfg(feature = "hw-usb-hid")]
-use crate::arch::x86_64::xhci_keyboard::{XhciKeyboardStatus, USB_HID_KEYBOARD_DRIVER};
-#[cfg(not(feature = "emergency-boot"))]
-#[cfg(any(feature = "hw-ps2-keyboard", feature = "hw-usb-hid"))]
-use crate::kernel::boot_phase::boot_phase_failed;
+use crate::arch::x86_64::xhci_keyboard::{
+    DriverStatus, XhciKeyboardStatus, USB_HID_KEYBOARD_DRIVER,
+};
 use crate::kernel::boot_phase::{
-    boot_phase_enabled, boot_phase_ok, boot_phase_online, boot_phase_skipped, boot_phase_start,
-    boot_phase_stub, BootPhase,
+    boot_phase_enabled, boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_skipped,
+    boot_phase_start, boot_phase_stub, BootPhase,
 };
 use crate::kernel::cpu::MAX_CORES;
 #[cfg(not(feature = "emergency-boot"))]
@@ -134,9 +133,9 @@ pub fn init_architecture(boot_info: &BootInfo) {
         setup_memory_layout(boot_info);
         initialize_framebuffer_console(boot_info);
         configure_interrupts();
-        initialize_platform_probes(boot_info);
-        initialize_storage_hardware();
-        initialize_input_hardware(boot_info);
+        let mut platform_registry = initialize_platform_probes(boot_info);
+        initialize_storage_hardware(&platform_registry);
+        initialize_input_hardware(boot_info, &mut platform_registry);
     }
 }
 
@@ -371,6 +370,9 @@ fn mark_driver_phase(phase: BootPhase, status: DriverStatus, skipped: &'static s
         DriverStatus::Skipped => boot_phase_skipped(phase, skipped),
         DriverStatus::Failed => boot_phase_failed(phase, "driver module failed"),
         DriverStatus::Registered => boot_phase_skipped(phase, "driver module did not start"),
+    }
+}
+
 #[cfg(not(feature = "emergency-boot"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CpuProbe {
@@ -379,6 +381,7 @@ struct CpuProbe {
     vendor_ecx: u32,
     family: u8,
     model: u8,
+    stepping: u8,
     max_leaf: u32,
 }
 
@@ -411,6 +414,7 @@ fn probe_cpu() -> CpuProbe {
         vendor_ecx: vendor.ecx,
         family,
         model,
+        stepping: (features.eax & 0x0f) as u8,
         max_leaf: vendor.eax,
     }
 }
@@ -426,7 +430,69 @@ fn cpu_is_supported_ryzen(cpu: CpuProbe) -> bool {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PciProbeDevice {
+    bus: u8,
+    device: u8,
+    function: u8,
+    vendor_id: u16,
+    device_id: u16,
+    class: u8,
+    subclass: u8,
+    prog_if: u8,
+}
+
+impl PciProbeDevice {
+    const fn platform_name(self) -> &'static str {
+        if self.vendor_id == 0x1002 && (self.device_id == 0x1636 || self.device_id == 0x1638) {
+            "Renoir AMDGPU"
+        } else if self.vendor_id == 0x1022
+            && self.class == 0x0c
+            && self.subclass == 0x03
+            && self.prog_if == 0x30
+        {
+            "AMD xHCI Controller"
+        } else if self.class == 0x01 && self.subclass == 0x08 && self.prog_if == 0x02 {
+            "NVMe Controller"
+        } else if self.class == 0x01 && self.subclass == 0x06 && self.prog_if == 0x01 {
+            "AHCI Controller"
+        } else if self.vendor_id == 0x1022 {
+            "AMD SoC Device"
+        } else {
+            "PCI Device"
+        }
+    }
+
+    const fn platform_kind(self) -> mirage_platform::PlatformDeviceKind {
+        if self.class == 0x01 {
+            mirage_platform::PlatformDeviceKind::Storage
+        } else if self.class == 0x03 {
+            mirage_platform::PlatformDeviceKind::Display
+        } else if self.class == 0x0c && self.subclass == 0x03 {
+            mirage_platform::PlatformDeviceKind::Usb
+        } else {
+            mirage_platform::PlatformDeviceKind::Pci
+        }
+    }
+
+    const fn platform_device(self) -> mirage_platform::PlatformDevice {
+        mirage_platform::PlatformDevice::pci(
+            self.platform_name(),
+            self.platform_kind(),
+            self.bus,
+            self.device,
+            self.function,
+            self.vendor_id,
+            self.device_id,
+            self.class,
+            self.subclass,
+            self.prog_if,
+        )
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PciProbeFunction {
     bus: u8,
     device: u8,
@@ -450,6 +516,43 @@ fn pci_probe_read_u32(function: PciProbeFunction, offset: u8) -> u32 {
         let b2 = crate::arch::x86_64::io::inb(0xcfe) as u32;
         let b3 = crate::arch::x86_64::io::inb(0xcff) as u32;
         b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn scan_pci_devices(mut visitor: impl FnMut(PciProbeDevice)) {
+    let mut bus = 0u16;
+    while bus <= 255 {
+        let mut device = 0u8;
+        while device < 32 {
+            let mut function = 0u8;
+            while function < 8 {
+                let f = PciProbeFunction {
+                    bus: bus as u8,
+                    device,
+                    function,
+                };
+                let id = pci_probe_read_u32(f, 0x00);
+                let vendor_id = (id & 0xffff) as u16;
+                if vendor_id != 0xffff {
+                    let device_id = (id >> 16) as u16;
+                    let class_reg = pci_probe_read_u32(f, 0x08);
+                    visitor(PciProbeDevice {
+                        bus: bus as u8,
+                        device,
+                        function,
+                        vendor_id,
+                        device_id,
+                        class: (class_reg >> 24) as u8,
+                        subclass: (class_reg >> 16) as u8,
+                        prog_if: (class_reg >> 8) as u8,
+                    });
+                }
+                function += 1;
+            }
+            device += 1;
+        }
+        bus += 1;
     }
 }
 
@@ -488,8 +591,31 @@ fn pci_any(mut predicate: impl FnMut(u16, u16, u8, u8, u8) -> bool) -> bool {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
-fn initialize_platform_probes(boot_info: &BootInfo) {
+fn initialize_platform_probes(
+    boot_info: &BootInfo,
+) -> mirage_platform::PlatformRegistry<{ mirage_platform::MAX_PLATFORM_DEVICE_EVENTS }> {
     let cpu = probe_cpu();
+    let mut registry = mirage_platform::PlatformRegistry::new();
+    crate::kernel::platform::register_platform_device(
+        &mut registry,
+        mirage_platform::PlatformDevice::amd_cpu(
+            cpu_platform_name(cpu),
+            cpu.family,
+            cpu.model,
+            cpu.stepping,
+        ),
+    );
+
+    scan_pci_devices(|device| {
+        crate::kernel::platform::register_platform_device(&mut registry, device.platform_device());
+    });
+
+    if boot_info.rsdp.is_some() {
+        crate::kernel::platform::register_platform_device(
+            &mut registry,
+            mirage_platform::PlatformDevice::acpi_table("RSDP"),
+        );
+    }
 
     boot_phase_start(BootPhase::Amd64Cpu);
     if cpu_vendor_is_amd(cpu) {
@@ -562,22 +688,75 @@ fn initialize_platform_probes(boot_info: &BootInfo) {
     } else {
         boot_phase_skipped(BootPhase::AmdXhci, "AMD xHCI controller not present");
     }
+
+    registry
 }
 
 #[cfg(not(feature = "emergency-boot"))]
-fn initialize_storage_hardware() {
+fn cpu_platform_name(cpu: CpuProbe) -> &'static str {
+    if cpu_vendor_is_amd(cpu) && cpu.family == 0x17 && cpu.model == 0x60 {
+        "AMD Ryzen 5 4500U"
+    } else if cpu_vendor_is_amd(cpu) && matches!(cpu.family, 0x17 | 0x19) {
+        "AMD Ryzen CPU"
+    } else if cpu_vendor_is_amd(cpu) {
+        "AMD64 CPU"
+    } else {
+        "x86_64 CPU"
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn initialize_storage_hardware(
+    platform: &mirage_platform::PlatformRegistry<{ mirage_platform::MAX_PLATFORM_DEVICE_EVENTS }>,
+) {
     boot_phase_start(BootPhase::Nvme);
-    boot_phase_skipped(BootPhase::Nvme, "native NVMe probe not implemented");
+    if platform.contains_kind(mirage_platform::PlatformDeviceKind::Storage) {
+        if platform
+            .find_by_location(mirage_platform::PlatformLocation::Unknown)
+            .is_some()
+        {
+            boot_phase_skipped(BootPhase::Nvme, "native NVMe probe not implemented");
+        } else if platform
+            .find_by_pci_id(0x144d, 0xa808)
+            .or_else(|| platform.find_by_pci_id(0x8086, 0xf1a5))
+            .is_some()
+        {
+            boot_phase_stub(
+                BootPhase::Nvme,
+                "NVMe driver compiled in but probe/start not implemented",
+            );
+        } else {
+            boot_phase_skipped(BootPhase::Nvme, "NVMe controller not present");
+        }
+    } else {
+        boot_phase_skipped(BootPhase::Nvme, "NVMe controller not present");
+    }
     boot_phase_start(BootPhase::Ahci);
-    boot_phase_skipped(BootPhase::Ahci, "native AHCI probe not implemented");
+    if platform.contains_kind(mirage_platform::PlatformDeviceKind::Storage) {
+        boot_phase_stub(
+            BootPhase::Ahci,
+            "AHCI driver compiled in but probe/start not implemented",
+        );
+    } else {
+        boot_phase_skipped(BootPhase::Ahci, "AHCI controller not present");
+    }
 }
 
 #[allow(unused_mut, unused_variables)]
-fn initialize_input_hardware(boot_info: &BootInfo) {
+fn initialize_input_hardware(
+    boot_info: &BootInfo,
+    platform: &mut mirage_platform::PlatformRegistry<
+        { mirage_platform::MAX_PLATFORM_DEVICE_EVENTS },
+    >,
+) {
     let mut any_online = false;
 
     #[cfg(feature = "hw-i8042")]
     {
+        crate::kernel::platform::register_platform_device(
+            platform,
+            mirage_platform::PlatformDevice::i8042(),
+        );
         boot_phase_start(BootPhase::I8042);
         boot_phase_ok(BootPhase::I8042);
     }
@@ -638,6 +817,7 @@ fn initialize_input_hardware(boot_info: &BootInfo) {
                 boot_phase_failed(BootPhase::UsbKeyboard, message);
                 crate::kprintln!("USB HID keyboard initialization failed: {}", message);
             }
+        }
         if usb_status.keyboard == XhciKeyboardStatus::Online {
             any_online = true;
         }
