@@ -37,3 +37,7 @@ The existing MTSS scheduler facade remains available for current kernel integrat
 ## Current limitation
 
 The kernel boot path marks Spider-rs as `Stub` unless a real ELF/rootfs byte path and architecture userspace entry path are available. This avoids falsely claiming that userspace entered ring 3.
+
+## Userspace init bring-up note (2026-06-12)
+
+This pass keeps MTSS honest for QEMU userspace-init bring-up: the kernel can mark MTSS `Online` once the scheduler skeleton is initialized, but Spider-rs remains blocked on the missing user address-space and ring-3 entry backend. Persistent loops such as `IdleLoop` should transition to `Running` after they enter their loop.

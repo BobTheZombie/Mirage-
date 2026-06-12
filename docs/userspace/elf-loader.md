@@ -43,3 +43,7 @@ This is not a complete System V ABI stack yet, but it is stable and tested.
 ## Honest boot status
 
 `load_elf_from_file("/sbin/spider-rs")` currently returns `RootFsReadUnavailable` because the root filesystem byte-read API for this loader is not wired. The boot path therefore marks Spider-rs `Stub` with an exact reason instead of claiming userspace execution.
+
+## Bring-up status note (2026-06-12)
+
+The loader remains a validator/stub. It validates static x86_64 ELF64 `ET_EXEC` images and PT_LOAD entry containment, but it does not yet read `/sbin/spider-rs` from the mounted root FS, allocate/copy user pages, zero BSS in a user CR3, or enter ring 3. Boot must therefore report Userspace Loader as `Stub` with that exact reason instead of `Online`.

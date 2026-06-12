@@ -247,6 +247,60 @@ impl<const CAPACITY: usize> PlatformRegistry<CAPACITY> {
         self.find_by_pci_id(vendor_id, device_id).is_some()
     }
 
+    pub fn find_pci_by_class(
+        &self,
+        class_code: u8,
+        subclass: u8,
+        prog_if: u8,
+    ) -> Option<PlatformDevice> {
+        let mut index = 0usize;
+        while index < self.len {
+            if let Some(device) = self.devices[index] {
+                if matches!(device.location, PlatformLocation::Pci { .. })
+                    && device.class_code == Some(class_code)
+                    && device.subclass == Some(subclass)
+                    && device.prog_if == Some(prog_if)
+                {
+                    return Some(device);
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
+    pub fn find_ahci(&self) -> Option<PlatformDevice> {
+        self.find_pci_by_class(0x01, 0x06, 0x01)
+    }
+
+    pub fn find_nvme(&self) -> Option<PlatformDevice> {
+        self.find_pci_by_class(0x01, 0x08, 0x02)
+    }
+
+    pub fn find_xhci(&self) -> Option<PlatformDevice> {
+        self.find_pci_by_class(0x0c, 0x03, 0x30)
+    }
+
+    pub fn find_amdgpu_renoir(&self) -> Option<PlatformDevice> {
+        self.find_by_pci_id(0x1002, 0x1636)
+            .or_else(|| self.find_by_pci_id(0x1002, 0x1638))
+    }
+
+    pub fn find_amd_soc_device(&self) -> Option<PlatformDevice> {
+        let mut index = 0usize;
+        while index < self.len {
+            if let Some(device) = self.devices[index] {
+                if matches!(device.location, PlatformLocation::Pci { .. })
+                    && device.vendor_id == Some(0x1022)
+                {
+                    return Some(device);
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
     pub fn find_by_location(&self, location: PlatformLocation) -> Option<PlatformDevice> {
         let mut index = 0usize;
         while index < self.len {
@@ -713,10 +767,20 @@ const fn pci_device_name(pci: PciFunctionInfo) -> &'static str {
         && pci.prog_if == 0x30
     {
         "AMD xHCI Controller"
+    } else if pci.class == 0x0c && pci.subclass == 0x03 && pci.prog_if == 0x30 {
+        "xHCI Controller"
     } else if pci.class == 0x01 && pci.subclass == 0x08 && pci.prog_if == 0x02 {
         "NVMe Controller"
+    } else if pci.vendor_id == 0x8086 && pci.class == 0x01 && pci.subclass == 0x06 {
+        "Intel AHCI Controller"
     } else if pci.class == 0x01 && pci.subclass == 0x06 && pci.prog_if == 0x01 {
         "AHCI Controller"
+    } else if pci.vendor_id == 0x8086 && pci.class == 0x06 && pci.subclass == 0x00 {
+        "Intel Host Bridge"
+    } else if pci.vendor_id == 0x1234 && pci.class == 0x03 {
+        "QEMU VGA Display Controller"
+    } else if pci.vendor_id == 0x8086 && pci.class == 0x02 {
+        "Intel Ethernet Controller"
     } else {
         "PCI Device"
     }
@@ -903,5 +967,87 @@ mod tests {
             registry.register(PlatformDevice::i8042()),
             Err(PlatformRegistryError::Full)
         );
+    }
+}
+
+#[cfg(test)]
+mod registry_query_tests {
+    use super::*;
+
+    #[test]
+    fn registry_finds_storage_and_usb_by_class_helpers() {
+        let mut registry: PlatformRegistry<4> = PlatformRegistry::new();
+        registry
+            .register(PlatformDevice::pci(
+                "Intel AHCI Controller",
+                PlatformDeviceKind::Storage,
+                0,
+                31,
+                2,
+                0x8086,
+                0x2922,
+                0x01,
+                0x06,
+                0x01,
+                0,
+            ))
+            .unwrap();
+        registry
+            .register(PlatformDevice::pci(
+                "xHCI Controller",
+                PlatformDeviceKind::Usb,
+                0,
+                20,
+                0,
+                0x1b36,
+                0x000d,
+                0x0c,
+                0x03,
+                0x30,
+                0,
+            ))
+            .unwrap();
+
+        assert!(registry.find_ahci().is_some());
+        assert!(registry.find_xhci().is_some());
+        assert!(registry.find_nvme().is_none());
+    }
+
+    #[test]
+    fn registry_finds_amd_specific_devices_without_rescanning_pci() {
+        let mut registry: PlatformRegistry<4> = PlatformRegistry::new();
+        registry
+            .register(PlatformDevice::pci(
+                "AMDGPU Renoir",
+                PlatformDeviceKind::Display,
+                3,
+                0,
+                0,
+                0x1002,
+                0x1636,
+                0x03,
+                0x00,
+                0x00,
+                0,
+            ))
+            .unwrap();
+        registry
+            .register(PlatformDevice::pci(
+                "AMD SoC Device",
+                PlatformDeviceKind::Pci,
+                0,
+                8,
+                1,
+                0x1022,
+                0x1639,
+                0x06,
+                0x04,
+                0x00,
+                0,
+            ))
+            .unwrap();
+
+        assert!(registry.find_amdgpu_renoir().is_some());
+        assert!(registry.find_amd_soc_device().is_some());
     }
 }

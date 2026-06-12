@@ -18,6 +18,7 @@ TARGET_JSON = $(BUILD_DIR)/targets/x86_64-mirage.json
 CARGO_JSON_TARGET_SPEC_FLAG := $(shell RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) -Z help 2>/dev/null | sed -n "s/.*-Z json-target-spec.*/-Z json-target-spec/p")
 UNSTABLE_OPTIONS_FLAG := -Z unstable-options
 KERNEL_ELF := target/x86_64-mirage/release/mirage-kernel
+SPIDER_PID1_ELF := target/x86_64-mirage/release/spider-rs-pid1
 # Backward-compatible manual feature variables. Leave empty to use mirage.conf.
 KERNEL_FEATURES ?=
 QEMU_FEATURES ?=
@@ -45,16 +46,21 @@ spider-rs-check:
 spider-rs-host-test:
 	$(CARGO) test -p spider-rs
 
-userspace-spider-rs:
-	$(CARGO) build -p spider-rs
+userspace-spider-rs: rust-src check-rust-src $(TARGET_JSON)
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release -p spider-pid1 --bin spider-rs-pid1 \
+		--target $(TARGET_JSON) \
+		$(CARGO_JSON_TARGET_SPEC_FLAG) \
+		$(UNSTABLE_OPTIONS_FLAG) \
+		-Z build-std=core,compiler_builtins \
+		-Z build-std-features=compiler-builtins-mem
 
 install-spider-rs: userspace-spider-rs
 	mkdir -p $(BUILD_DIR)/rootfs/sbin $(BUILD_DIR)/rootfs/etc/spider/system
-	cp target/debug/spider-rs $(BUILD_DIR)/rootfs/sbin/spider-rs
+	cp $(SPIDER_PID1_ELF) $(BUILD_DIR)/rootfs/sbin/spider-rs
 	cp userspace/spider-rs/units/* $(BUILD_DIR)/rootfs/etc/spider/system/
 
 qemu-spider: install-spider-rs image
-	@echo "QFS external file install is pending; Spider-rs is staged under $(BUILD_DIR)/rootfs and boot remains honest Stub until loader/rootfs handoff is wired."
+	@echo "Spider-rs PID 1 ELF staged at $(BUILD_DIR)/rootfs/sbin/spider-rs; boot remains honest Stub until QFS/rootfs byte-read and ring-3 entry are wired."
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
 mirageconfig:
@@ -207,6 +213,10 @@ iso: config-generate qemu-kernel limine
 	cp $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
 	./tools/verify-seed-rs-elf.sh $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
 	cp boot/limine/limine.conf $(ISO_ROOT)/boot/limine/limine.conf
+	if [ -f $(BUILD_DIR)/rootfs/sbin/spider-rs ]; then \
+		mkdir -p $(ISO_ROOT)/sbin; \
+		cp $(BUILD_DIR)/rootfs/sbin/spider-rs $(ISO_ROOT)/sbin/spider-rs; \
+	fi
 	cp $(LIMINE_DIR)/limine-bios.sys $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/limine-bios-cd.bin $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/

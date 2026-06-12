@@ -113,3 +113,9 @@ Mirage-dispatch-rs should not rediscover hardware. Driver/service probes should 
 - NVMe/AHCI: consult storage PCI identities or class-derived platform records before registering hardware resources.
 
 A dispatch probe that finds no matching platform record should return `NotPresent`, and Boot Phase Manager should report the service as `SKIPPED` rather than `FAILED`.
+
+## Authoritative registry update (2026-06-12)
+
+The Platform Registry is the authoritative handoff from early discovery to driver/service probing. PCI is enumerated into the registry once in the x86_64 bring-up path, and later AHCI, NVMe, xHCI, Renoir GPU, and AMD SoC decisions query registry helpers instead of rescanning PCI.
+
+Registry helpers now include `find_pci_by_class`, `find_by_pci_id`, `find_ahci`, `find_nvme`, `find_xhci`, `find_amdgpu_renoir`, and `find_amd_soc_device`.

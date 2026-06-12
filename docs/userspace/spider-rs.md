@@ -210,3 +210,7 @@ Spider-rs: no real services started yet
 ```
 
 In the current milestone, the host-buildable Spider-rs binary and no_std entry scaffolding coexist. The no_std `_start` path is gated for `target_os = "none"`; it is intended to become the installed `/sbin/spider-rs` static ELF once the Mirage userspace target and root filesystem install path are complete.
+
+## PID 1 ELF staging note (2026-06-12)
+
+A separate no_std `spider-pid1` package now builds the future `/sbin/spider-rs` PID 1 ELF. The ELF checks `getpid`, writes `Spider-rs PID 1 online` only when the kernel reports PID 1, and then yields forever. The kernel still must not mark Spider-rs `Online` until that ELF is actually loaded, scheduled by MTSS, entered in userspace, and its write syscall succeeds.

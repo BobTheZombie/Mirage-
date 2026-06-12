@@ -133,6 +133,7 @@ pub enum PhaseState {
     Stub,
     Skipped,
     Failed,
+    Running,
 }
 
 impl PhaseState {
@@ -149,13 +150,14 @@ impl PhaseState {
             Self::Stub => "Stub",
             Self::Skipped => "Skipped",
             Self::Failed => "Failed",
+            Self::Running => "Running",
         }
     }
 
     const fn weighted_progress(self, required: bool, weight: u8) -> u16 {
         let weight = weight as u16;
         match self {
-            Self::Ok | Self::Online | Self::Enabled => weight,
+            Self::Ok | Self::Online | Self::Enabled | Self::Running => weight,
             Self::Skipped | Self::Detected | Self::Stub => {
                 if required {
                     weight / 2
@@ -817,6 +819,10 @@ pub fn boot_phase_stub(phase: BootPhase, message: &'static str) {
     transition(phase, PhaseState::Stub, message);
 }
 
+pub fn boot_phase_running(phase: BootPhase) {
+    transition(phase, PhaseState::Running, "running");
+}
+
 pub fn boot_phase_state(phase: BootPhase) -> PhaseState {
     BOOT_PHASE_MANAGER.lock().state(phase)
 }
@@ -993,6 +999,7 @@ mod tests {
         assert_eq!(PhaseState::Stub.as_str(), "Stub");
         assert_eq!(PhaseState::Skipped.as_str(), "Skipped");
         assert_eq!(PhaseState::Failed.as_str(), "Failed");
+        assert_eq!(PhaseState::Running.as_str(), "Running");
     }
 
     #[test]
