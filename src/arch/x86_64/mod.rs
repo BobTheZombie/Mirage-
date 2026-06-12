@@ -11,7 +11,9 @@ use crate::arch::x86_64::boot::BootInfo;
 #[cfg(feature = "hw-ps2-keyboard")]
 use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
 #[cfg(feature = "hw-usb-hid")]
-use crate::arch::x86_64::xhci_keyboard::{XhciKeyboardStatus, USB_HID_KEYBOARD_DRIVER};
+use crate::arch::x86_64::xhci_keyboard::{
+    DriverStatus, XhciKeyboardStatus, USB_HID_KEYBOARD_DRIVER,
+};
 #[cfg(not(feature = "emergency-boot"))]
 #[cfg(any(feature = "hw-ps2-keyboard", feature = "hw-usb-hid"))]
 use crate::kernel::boot_phase::boot_phase_failed;
@@ -349,7 +351,17 @@ pub fn panic_halt() -> ! {
     interrupts::halt_forever()
 }
 
-#[cfg(not(feature = "emergency-boot"))]
+#[cfg(all(not(feature = "emergency-boot"), feature = "hw-usb-hid"))]
+fn mark_driver_phase(phase: BootPhase, status: DriverStatus, skipped: &'static str) {
+    match status {
+        DriverStatus::Online => boot_phase_online(phase),
+        DriverStatus::Initialized => boot_phase_ok(phase),
+        DriverStatus::Skipped => boot_phase_skipped(phase, skipped),
+        DriverStatus::Failed => boot_phase_failed(phase, "driver module failed"),
+        DriverStatus::Registered => boot_phase_skipped(phase, "driver module did not start"),
+    }
+}
+
 #[allow(unused_mut, unused_variables)]
 fn initialize_input_hardware(boot_info: &BootInfo) {
     let mut any_online = false;
@@ -379,31 +391,51 @@ fn initialize_input_hardware(boot_info: &BootInfo) {
     boot_phase_skipped(BootPhase::Ps2Keyboard, "hw-ps2-keyboard feature disabled");
 
     boot_phase_start(BootPhase::Xhci);
-    #[cfg(feature = "hw-xhci")]
-    boot_phase_ok(BootPhase::Xhci);
-    #[cfg(not(feature = "hw-xhci"))]
-    boot_phase_skipped(BootPhase::Xhci, "hw-xhci feature disabled");
-
+    boot_phase_start(BootPhase::UsbCore);
+    boot_phase_start(BootPhase::UsbHid);
     boot_phase_start(BootPhase::UsbKeyboard);
     #[cfg(feature = "hw-usb-hid")]
-    match USB_HID_KEYBOARD_DRIVER.initialize(boot_info.hhdm_offset) {
-        XhciKeyboardStatus::Online => {
-            boot_phase_ok(BootPhase::UsbKeyboard);
-            any_online = true;
-        }
-        XhciKeyboardStatus::SkippedNoController => {
-            boot_phase_skipped(BootPhase::UsbKeyboard, "xHCI controller not present")
-        }
-        XhciKeyboardStatus::SkippedNoKeyboard => {
-            boot_phase_skipped(BootPhase::UsbKeyboard, "USB HID keyboard not present")
-        }
-        XhciKeyboardStatus::Failed(message) => {
-            boot_phase_failed(BootPhase::UsbKeyboard, message);
-            crate::kprintln!("USB HID keyboard initialization failed: {}", message);
+    {
+        let usb_status = USB_HID_KEYBOARD_DRIVER.initialize_stack(boot_info.hhdm_offset);
+        mark_driver_phase(
+            BootPhase::Xhci,
+            usb_status.xhci,
+            "xHCI controller not present",
+        );
+        mark_driver_phase(
+            BootPhase::UsbCore,
+            usb_status.core,
+            "usb-core0 dependency skipped",
+        );
+        mark_driver_phase(
+            BootPhase::UsbHid,
+            usb_status.hid,
+            "USB HID device not present",
+        );
+        match usb_status.keyboard {
+            XhciKeyboardStatus::Online => {
+                boot_phase_online(BootPhase::UsbKeyboard);
+                any_online = true;
+            }
+            XhciKeyboardStatus::SkippedNoController => {
+                boot_phase_skipped(BootPhase::UsbKeyboard, "xHCI controller not present")
+            }
+            XhciKeyboardStatus::SkippedNoKeyboard => {
+                boot_phase_skipped(BootPhase::UsbKeyboard, "USB HID keyboard not present")
+            }
+            XhciKeyboardStatus::Failed(message) => {
+                boot_phase_failed(BootPhase::UsbKeyboard, message);
+                crate::kprintln!("USB HID keyboard initialization failed: {}", message);
+            }
         }
     }
     #[cfg(not(feature = "hw-usb-hid"))]
-    boot_phase_skipped(BootPhase::UsbKeyboard, "hw-usb-hid feature disabled");
+    {
+        boot_phase_skipped(BootPhase::Xhci, "hw-usb-hid feature disabled");
+        boot_phase_skipped(BootPhase::UsbCore, "hw-usb-hid feature disabled");
+        boot_phase_skipped(BootPhase::UsbHid, "hw-usb-hid feature disabled");
+        boot_phase_skipped(BootPhase::UsbKeyboard, "hw-usb-hid feature disabled");
+    }
 
     boot_phase_start(BootPhase::AcpiEc);
     #[cfg(feature = "hw-acpi-ec")]

@@ -56,39 +56,55 @@ The PS/2 decoder supports translated set 1 and native set 2 streams, extended
 scancodes, press/release events, modifiers, caps lock, printable US ASCII,
 enter/backspace/tab/escape, arrows, and F1-F12.
 
-## USB HID boot keyboard through xHCI
+## USB HID boot keyboard through modular xHCI stack
 
 File:
 
 - `src/arch/x86_64/xhci_keyboard.rs`
 
-The current xHCI path performs real hardware discovery and controller bring-up:
+USB input is no longer a single inline boot-time HID initializer.  It is split
+into four early kernel-registered driver modules that mirror the future
+supervised service model:
+
+```text
+xhci-host0 -> usb-core0 -> usb-hid0 -> usb-kbd0
+```
+
+Each module has a static descriptor, dependency list, `init()`, `start()`,
+`stop()`, `poll()`, fixed-capacity state, and status.  Dependency skips
+propagate downward so optional USB failure cannot freeze boot.
+
+`xhci-host0` performs real hardware discovery and controller bring-up:
 
 1. scans PCI config space for class `0x0c`, subclass `0x03`, prog-if `0x30`
 2. enables memory space and bus mastering
 3. maps BAR0 through the boot HHDM when available
-4. reads xHCI capability registers
+4. reads xHCI capability registers, `HCSPARAMS1`, `HCCPARAMS1`, `DBOFF`, and `RTSOFF`
 5. halts the controller
 6. resets the controller with bounded waits
-7. programs a conservative max-slot count
-8. starts the controller
+7. prepares static DCBAA, command-ring, event-ring, and ERST backing
+8. programs a conservative max-slot count
+9. starts the controller
+
+`usb-core0` scans and resets root ports through bounded waits and records
+fixed-capacity device records. `usb-hid0` owns HID class records. `usb-kbd0`
+binds boot keyboard records, configures the interrupt-IN endpoint record, marks
+`InputRawSource::UsbHid` online, and uses the common `KeyboardEvent` queue.
 
 USB HID boot report decoding is implemented independently from enumeration:
 8-byte reports are diffed against the previous report and converted to the same
 `KeyboardEvent` queue as PS/2. This covers modifiers, printable US ASCII, ESC,
 arrows, F keys, enter, backspace, tab, ctrl, alt, and shift.
 
-The initialization path is fail-closed and stage-instrumented. It prints
-`[usbkbd 01]` through `[usbkbd 13]` milestones, uses bounded waits for
-controller halt/reset/run and root-port reset/enable, reports `Skipped` when no
-connected USB keyboard candidate exists, and reports `Failed` with the stage
-message on timeout. It never waits for a keypress before declaring the keyboard
-online.
+The initialization path is fail-closed. It uses bounded waits for controller
+halt/reset/run and root-port reset/enable, reports `Skipped` when dependencies
+or devices are absent, and reports `Failed` with the stage message on timeout.
+It never waits for a keypress before declaring the keyboard online.
 
-Known limitation: Mirage still needs a DMA allocator contract and complete xHCI
-command/event/transfer ring ownership before descriptor-driven enumeration can
-replace the provisional early-boot root-port candidate path used for QEMU
-`usb-kbd`. Runtime interrupt endpoint polling remains future work.
+Known limitation: Mirage still needs a production xHCI command/event/transfer
+ring owner before descriptor-driven enumeration and runtime interrupt endpoint
+polling are complete. Do not reintroduce one-shot inline HID initialization to
+work around that missing service boundary.
 
 ## ACPI EC hotkey events
 
@@ -119,6 +135,8 @@ The Boot Phase Manager now tracks:
 - `I8042`
 - `PS/2 Kbd`
 - `xHCI`
+- `USB Core`
+- `USB HID`
 - `USB Kbd`
 - `ACPI EC`
 - `EC Hotkeys`
@@ -129,7 +147,9 @@ The framebuffer boot screen shows:
 ```text
 Input        [ OK/SKIPPED/FAILED ]
 PS/2 Kbd     [ OK/SKIPPED/FAILED ]
-USB Kbd      [ OK/SKIPPED/FAILED ]
+USB Core     [ ONLINE/SKIPPED/FAILED ]
+USB HID      [ ONLINE/SKIPPED/FAILED ]
+USB Kbd      [ ONLINE/SKIPPED/FAILED ]
 EC Hotkeys   [ OK/SKIPPED/FAILED ]
 ```
 
@@ -168,12 +188,13 @@ make qemu-keyboard-ps2
 USB keyboard with QEMU xHCI:
 
 ```sh
-make qemu-keyboard-usb
+make qemu-usb-kbd
 ```
 
 All keyboard paths:
 
 ```sh
+make qemu-usb-none
 make qemu-keyboard-all
 ```
 

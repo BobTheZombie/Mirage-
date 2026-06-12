@@ -9,7 +9,7 @@
 use crate::kernel::sync::SpinLock;
 
 /// Maximum number of boot subsystem records tracked without allocation.
-pub const BOOT_PHASE_CAPACITY: usize = 32;
+pub const BOOT_PHASE_CAPACITY: usize = 34;
 /// Current number of canonical Mirage boot phases.
 pub const BOOT_PHASE_COUNT: usize = BOOT_PHASE_CAPACITY;
 
@@ -52,6 +52,8 @@ pub enum BootPhase {
     I8042,
     Ps2Keyboard,
     Xhci,
+    UsbCore,
+    UsbHid,
     UsbKeyboard,
     AcpiEc,
     EcHotkeys,
@@ -76,6 +78,8 @@ impl BootPhase {
     /// Friendly current-phase message for the persistent boot screen.
     pub const fn friendly_name(self) -> &'static str {
         match self {
+            Self::UsbCore => "USB Core",
+            Self::UsbHid => "USB HID",
             Self::UsbKeyboard => "USB Keyboard",
             Self::KernelMapper => "Kernel Mapper",
             Self::RootFs => "Root Filesystem",
@@ -400,6 +404,20 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         3,
     ),
     descriptor(BootPhase::Xhci, "xHCI", SubsystemCategory::Device, false, 4),
+    descriptor(
+        BootPhase::UsbCore,
+        "USB Core",
+        SubsystemCategory::Device,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::UsbHid,
+        "USB HID",
+        SubsystemCategory::Input,
+        false,
+        3,
+    ),
     descriptor(
         BootPhase::UsbKeyboard,
         "USB Kbd",
