@@ -9,6 +9,7 @@ use core::arch::asm;
 
 use crate::arch::x86_64::boot::{self, BootInfo, KernelSections};
 use crate::boot as limine;
+use crate::kernel::boot_phase::{boot_phase_ok, boot_phase_start, BootPhase};
 
 const COM1: u16 = 0x3f8;
 const COM1_INTERRUPT_ENABLE: u16 = COM1 + 1;
@@ -25,6 +26,7 @@ extern "Rust" {
 /// Mirage-owned x86_64 handoff after Limine enters the kernel ELF.
 pub unsafe fn x86_64_handoff() -> ! {
     seed_com1_init();
+    boot_phase_start(BootPhase::SeedRs);
     seed_com1_write_str("[seed-rs 01] entered seed entry\r\n");
 
     boot::clear_bss();
@@ -36,9 +38,12 @@ pub unsafe fn x86_64_handoff() -> ! {
     let raw_boot = limine::snapshot();
     seed_com1_write_str("[seed-rs 04] limine snapshot captured\r\n");
 
+    boot_phase_start(BootPhase::BootInfo);
     let boot_info = BootInfo::from_limine(raw_boot, sections);
+    boot_phase_ok(BootPhase::BootInfo);
     seed_com1_write_str("[seed-rs 05] bootinfo constructed\r\n");
 
+    boot_phase_ok(BootPhase::SeedRs);
     seed_com1_write_str("[seed-rs 06] calling kernel_main\r\n");
     kernel_main(boot_info)
 }
