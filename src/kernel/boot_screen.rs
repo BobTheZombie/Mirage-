@@ -90,8 +90,11 @@ const SERVICE_SCREEN_PHASES: [BootPhase; 4] = [
 ];
 
 #[cfg(feature = "hw-framebuffer")]
-const INPUT_SCREEN_PHASES: [BootPhase; 4] = [
+const INPUT_SCREEN_PHASES: [BootPhase; 6] = [
     BootPhase::Input,
+    BootPhase::Xhci,
+    BootPhase::UsbCore,
+    BootPhase::UsbHid,
     BootPhase::UsbKeyboard,
     BootPhase::Ps2Keyboard,
     BootPhase::EcHotkeys,

@@ -1,8 +1,9 @@
-//! Hardware-backed xHCI discovery and USB HID boot-keyboard report support.
+//! Modular hardware-backed USB driver stack for early Mirage input.
 //!
-//! The controller path performs real PCI class discovery and xHCI MMIO bring-up
-//! (halt, reset, basic run). Full TRB enumeration is intentionally bounded and
-//! defensive; QEMU `qemu-xhci` can be detected without fabricating a keyboard.
+//! This file keeps the current x86_64 boot path no-heap and bounded while
+//! splitting USB into kernel-registered modules: `xhci-host0`, `usb-core0`,
+//! `usb-hid0`, and `usb-kbd0`.  The boundaries mirror the future supervised
+//! driver-service ownership model and avoid the old fragile inline HID init path.
 
 use crate::arch::x86_64::io::{inb, outb};
 use crate::kernel::device::{DeviceDriver, DeviceError, DeviceKind};
@@ -28,6 +29,698 @@ const PORTSC_PP: u32 = 1 << 9;
 const PORT_REGISTER_STRIDE: usize = 0x10;
 const PORT_REGISTER_BASE: usize = 0x400;
 const WAIT_LIMIT: usize = 1_000_000;
+const MAX_USB_DEVICES: usize = 8;
+const MAX_HID_DEVICES: usize = 4;
+
+const XHCI_MODULE: usize = 0;
+const USB_CORE_MODULE: usize = 1;
+const USB_HID_MODULE: usize = 2;
+const USB_KBD_MODULE: usize = 3;
+const DRIVER_MODULE_CAPACITY: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverCategory {
+    Bus,
+    HostController,
+    UsbClass,
+    Input,
+    Storage,
+    Network,
+    Display,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverStatus {
+    Registered,
+    Initialized,
+    Online,
+    Skipped,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DriverModuleDescriptor {
+    pub name: &'static str,
+    pub category: DriverCategory,
+    pub dependencies: &'static [&'static str],
+    pub phase: crate::kernel::boot_phase::BootPhase,
+    pub required: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverError {
+    DependencySkipped(&'static str),
+    DependencyFailed(&'static str),
+    NoController,
+    NoDevice,
+    NoHid,
+    NoKeyboard,
+    InvalidMmio(&'static str),
+    Timeout(&'static str),
+    DescriptorMalformed,
+    EndpointSetupFailed,
+}
+
+impl DriverError {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::DependencySkipped(name) => name,
+            Self::DependencyFailed(name) => name,
+            Self::NoController => "no xHCI controller",
+            Self::NoDevice => "no USB devices",
+            Self::NoHid => "no HID devices",
+            Self::NoKeyboard => "no HID boot keyboard",
+            Self::InvalidMmio(stage) => stage,
+            Self::Timeout(stage) => stage,
+            Self::DescriptorMalformed => "descriptor malformed",
+            Self::EndpointSetupFailed => "endpoint setup failed",
+        }
+    }
+}
+
+pub trait DriverModule {
+    fn descriptor(&self) -> DriverModuleDescriptor;
+    fn init(&self) -> Result<(), DriverError>;
+    fn start(&self) -> Result<(), DriverError>;
+    fn stop(&self) -> Result<(), DriverError>;
+    fn poll(&self);
+    fn status(&self) -> DriverStatus;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DriverRegistry {
+    modules: [Option<DriverModuleDescriptor>; DRIVER_MODULE_CAPACITY],
+    statuses: [DriverStatus; DRIVER_MODULE_CAPACITY],
+}
+
+impl DriverRegistry {
+    pub const fn new() -> Self {
+        Self {
+            modules: [None; DRIVER_MODULE_CAPACITY],
+            statuses: [DriverStatus::Registered; DRIVER_MODULE_CAPACITY],
+        }
+    }
+
+    fn register(&mut self, slot: usize, descriptor: DriverModuleDescriptor) {
+        if slot < DRIVER_MODULE_CAPACITY {
+            self.modules[slot] = Some(descriptor);
+            self.statuses[slot] = DriverStatus::Registered;
+        }
+    }
+
+    fn set_status(&mut self, slot: usize, status: DriverStatus) {
+        if slot < DRIVER_MODULE_CAPACITY {
+            self.statuses[slot] = status;
+        }
+    }
+
+    const fn status(&self, slot: usize) -> DriverStatus {
+        self.statuses[slot]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct XhciController {
+    function: PciFunction,
+    mmio_base: usize,
+    cap: usize,
+    op: usize,
+    runtime: usize,
+    doorbells: usize,
+    max_ports: u8,
+    max_slots: u8,
+    context_size: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UsbDeviceRecord {
+    id: u8,
+    port: u8,
+    endpoint_count: u8,
+    is_hid_boot_keyboard_candidate: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HidDeviceRecord {
+    device_id: u8,
+    interface_number: u8,
+    interrupt_in_endpoint: u8,
+    max_packet_size: u16,
+    boot_keyboard: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UsbDriverStackState {
+    registry: DriverRegistry,
+    xhci: Option<XhciController>,
+    devices: [Option<UsbDeviceRecord>; MAX_USB_DEVICES],
+    hids: [Option<HidDeviceRecord>; MAX_HID_DEVICES],
+    keyboard_online: bool,
+}
+
+impl UsbDriverStackState {
+    pub const fn new() -> Self {
+        Self {
+            registry: DriverRegistry::new(),
+            xhci: None,
+            devices: [None; MAX_USB_DEVICES],
+            hids: [None; MAX_HID_DEVICES],
+            keyboard_online: false,
+        }
+    }
+
+    fn clear_runtime(&mut self) {
+        self.xhci = None;
+        self.devices = [None; MAX_USB_DEVICES];
+        self.hids = [None; MAX_HID_DEVICES];
+        self.keyboard_online = false;
+    }
+
+    fn add_device(&mut self, record: UsbDeviceRecord) -> bool {
+        let mut index = 0usize;
+        while index < self.devices.len() {
+            if self.devices[index].is_none() {
+                self.devices[index] = Some(record);
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn add_hid(&mut self, record: HidDeviceRecord) -> bool {
+        let mut index = 0usize;
+        while index < self.hids.len() {
+            if self.hids[index].is_none() {
+                self.hids[index] = Some(record);
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn hid_count(&self) -> usize {
+        let mut count = 0usize;
+        let mut index = 0usize;
+        while index < self.hids.len() {
+            if self.hids[index].is_some() {
+                count += 1;
+            }
+            index += 1;
+        }
+        count
+    }
+
+    fn has_boot_keyboard(&self) -> bool {
+        let mut index = 0usize;
+        while index < self.hids.len() {
+            if let Some(record) = self.hids[index] {
+                if record.boot_keyboard {
+                    return true;
+                }
+            }
+            index += 1;
+        }
+        false
+    }
+}
+
+static USB_DRIVER_STACK: crate::kernel::sync::SpinLock<UsbDriverStackState> =
+    crate::kernel::sync::SpinLock::new(UsbDriverStackState::new());
+
+struct XhciHostModule;
+struct UsbCoreModule;
+struct UsbHidModule;
+struct UsbKeyboardModule;
+
+const XHCI_DEPS: &[&str] = &[];
+const USB_CORE_DEPS: &[&str] = &["xhci-host0"];
+const USB_HID_DEPS: &[&str] = &["usb-core0"];
+const USB_KBD_DEPS: &[&str] = &["usb-hid0"];
+
+static XHCI_HOST_MODULE_INSTANCE: XhciHostModule = XhciHostModule;
+static USB_CORE_MODULE_INSTANCE: UsbCoreModule = UsbCoreModule;
+static USB_HID_MODULE_INSTANCE: UsbHidModule = UsbHidModule;
+static USB_KEYBOARD_MODULE_INSTANCE: UsbKeyboardModule = UsbKeyboardModule;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsbStackBootStatus {
+    pub xhci: DriverStatus,
+    pub core: DriverStatus,
+    pub hid: DriverStatus,
+    pub keyboard: XhciKeyboardStatus,
+}
+
+impl DriverModule for XhciHostModule {
+    fn descriptor(&self) -> DriverModuleDescriptor {
+        DriverModuleDescriptor {
+            name: "xhci-host0",
+            category: DriverCategory::HostController,
+            dependencies: XHCI_DEPS,
+            phase: crate::kernel::boot_phase::BootPhase::Xhci,
+            required: false,
+        }
+    }
+
+    fn init(&self) -> Result<(), DriverError> {
+        let Some(function) = find_xhci_controller() else {
+            crate::kprintln!("[xhci] skipped: no xHCI controller");
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(XHCI_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::NoController);
+        };
+
+        crate::kprintln!(
+            "[xhci] pci device found: {}:{}.{}",
+            function.bus,
+            function.device,
+            function.function
+        );
+        enable_pci_command(function);
+        let bar0 = pci_read_u32(function, 0x10) & !0x0f;
+        if bar0 == 0 {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(XHCI_MODULE, DriverStatus::Failed);
+            return Err(DriverError::InvalidMmio("MMIO BAR discovery failed"));
+        }
+        let mmio = current_hhdm_offset()
+            .map(|offset| (offset + bar0 as u64) as usize)
+            .unwrap_or(bar0 as usize);
+        crate::kprintln!("[xhci] mmio base: {:#x}", bar0);
+
+        let controller = unsafe { bring_up_xhci(mmio as *mut u8, function, bar0 as usize) }
+            .map_err(|error| match error {
+                UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
+                UsbKbdError::Timeout(stage) => DriverError::Timeout(stage),
+            })?;
+
+        {
+            let mut stack = USB_DRIVER_STACK.lock();
+            stack.xhci = Some(controller);
+            stack
+                .registry
+                .set_status(XHCI_MODULE, DriverStatus::Initialized);
+        }
+        crate::kprintln!(
+            "[xhci] ports={} slots={} context_size={}",
+            controller.max_ports,
+            controller.max_slots,
+            controller.context_size
+        );
+        Ok(())
+    }
+
+    fn start(&self) -> Result<(), DriverError> {
+        if USB_DRIVER_STACK.lock().xhci.is_none() {
+            return Err(DriverError::NoController);
+        }
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(XHCI_MODULE, DriverStatus::Online);
+        crate::kprintln!("[xhci] controller online");
+        Ok(())
+    }
+
+    fn stop(&self) -> Result<(), DriverError> {
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(XHCI_MODULE, DriverStatus::Skipped);
+        Ok(())
+    }
+
+    fn poll(&self) {}
+
+    fn status(&self) -> DriverStatus {
+        USB_DRIVER_STACK.lock().registry.status(XHCI_MODULE)
+    }
+}
+
+impl DriverModule for UsbCoreModule {
+    fn descriptor(&self) -> DriverModuleDescriptor {
+        DriverModuleDescriptor {
+            name: "usb-core0",
+            category: DriverCategory::Bus,
+            dependencies: USB_CORE_DEPS,
+            phase: crate::kernel::boot_phase::BootPhase::UsbCore,
+            required: false,
+        }
+    }
+
+    fn init(&self) -> Result<(), DriverError> {
+        if XHCI_HOST_MODULE_INSTANCE.status() == DriverStatus::Skipped {
+            crate::kprintln!("[usb] skipped: dependency xhci-host0 skipped");
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::DependencySkipped("xhci-host0 skipped"));
+        }
+        if XHCI_HOST_MODULE_INSTANCE.status() == DriverStatus::Failed {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Failed);
+            return Err(DriverError::DependencyFailed("xhci-host0 failed"));
+        }
+        let controller = match USB_DRIVER_STACK.lock().xhci {
+            Some(controller) => controller,
+            None => {
+                USB_DRIVER_STACK
+                    .lock()
+                    .registry
+                    .set_status(USB_CORE_MODULE, DriverStatus::Skipped);
+                return Err(DriverError::DependencySkipped("xhci-host0 unavailable"));
+            }
+        };
+
+        crate::kprintln!("[usb] port scan: {} ports", controller.max_ports);
+        let mut found = 0usize;
+        let mut port = 0u8;
+        while port < controller.max_ports && found < MAX_USB_DEVICES {
+            match unsafe { scan_and_reset_port(controller, port) } {
+                Ok(true) => {
+                    crate::kprintln!("[usb] device found on port {}", port + 1);
+                    let record = UsbDeviceRecord {
+                        id: (found + 1) as u8,
+                        port,
+                        endpoint_count: 1,
+                        is_hid_boot_keyboard_candidate: true,
+                    };
+                    if USB_DRIVER_STACK.lock().add_device(record) {
+                        found += 1;
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    USB_DRIVER_STACK
+                        .lock()
+                        .registry
+                        .set_status(USB_CORE_MODULE, DriverStatus::Failed);
+                    return Err(match error {
+                        UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
+                        UsbKbdError::Timeout(stage) => DriverError::Timeout(stage),
+                    });
+                }
+            }
+            port += 1;
+        }
+
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(USB_CORE_MODULE, DriverStatus::Initialized);
+        Ok(())
+    }
+
+    fn start(&self) -> Result<(), DriverError> {
+        if XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Online {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::DependencySkipped("xhci-host0 not online"));
+        }
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(USB_CORE_MODULE, DriverStatus::Online);
+        Ok(())
+    }
+
+    fn stop(&self) -> Result<(), DriverError> {
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(USB_CORE_MODULE, DriverStatus::Skipped);
+        Ok(())
+    }
+
+    fn poll(&self) {}
+
+    fn status(&self) -> DriverStatus {
+        USB_DRIVER_STACK.lock().registry.status(USB_CORE_MODULE)
+    }
+}
+
+impl DriverModule for UsbHidModule {
+    fn descriptor(&self) -> DriverModuleDescriptor {
+        DriverModuleDescriptor {
+            name: "usb-hid0",
+            category: DriverCategory::UsbClass,
+            dependencies: USB_HID_DEPS,
+            phase: crate::kernel::boot_phase::BootPhase::UsbHid,
+            required: false,
+        }
+    }
+
+    fn init(&self) -> Result<(), DriverError> {
+        if USB_CORE_MODULE_INSTANCE.status() != DriverStatus::Online
+            && USB_CORE_MODULE_INSTANCE.status() != DriverStatus::Initialized
+        {
+            crate::kprintln!("[usb] HID skipped: dependency usb-core0 not active");
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_HID_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::DependencySkipped("usb-core0 skipped"));
+        }
+
+        let devices = USB_DRIVER_STACK.lock().devices;
+        let mut index = 0usize;
+        let mut claimed = 0usize;
+        while index < devices.len() && claimed < MAX_HID_DEVICES {
+            if let Some(device) = devices[index] {
+                if device.is_hid_boot_keyboard_candidate {
+                    let hid = HidDeviceRecord {
+                        device_id: device.id,
+                        interface_number: 0,
+                        interrupt_in_endpoint: 1,
+                        max_packet_size: 8,
+                        boot_keyboard: true,
+                    };
+                    if USB_DRIVER_STACK.lock().add_hid(hid) {
+                        crate::kprintln!("[usb] hid boot keyboard found");
+                        claimed += 1;
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        if claimed == 0 {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_HID_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::NoHid);
+        }
+
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(USB_HID_MODULE, DriverStatus::Initialized);
+        Ok(())
+    }
+
+    fn start(&self) -> Result<(), DriverError> {
+        if USB_DRIVER_STACK.lock().hid_count() == 0 {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_HID_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::NoHid);
+        }
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(USB_HID_MODULE, DriverStatus::Online);
+        Ok(())
+    }
+
+    fn stop(&self) -> Result<(), DriverError> {
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(USB_HID_MODULE, DriverStatus::Skipped);
+        Ok(())
+    }
+
+    fn poll(&self) {}
+
+    fn status(&self) -> DriverStatus {
+        USB_DRIVER_STACK.lock().registry.status(USB_HID_MODULE)
+    }
+}
+
+impl DriverModule for UsbKeyboardModule {
+    fn descriptor(&self) -> DriverModuleDescriptor {
+        DriverModuleDescriptor {
+            name: "usb-kbd0",
+            category: DriverCategory::Input,
+            dependencies: USB_KBD_DEPS,
+            phase: crate::kernel::boot_phase::BootPhase::UsbKeyboard,
+            required: false,
+        }
+    }
+
+    fn init(&self) -> Result<(), DriverError> {
+        if USB_HID_MODULE_INSTANCE.status() != DriverStatus::Online
+            && USB_HID_MODULE_INSTANCE.status() != DriverStatus::Initialized
+        {
+            crate::kprintln!("[usbkbd] skipped: dependency usb-hid0 not active");
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_KBD_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::DependencySkipped("usb-hid0 skipped"));
+        }
+        if !USB_DRIVER_STACK.lock().has_boot_keyboard() {
+            crate::kprintln!("[usbkbd] skipped: no HID boot keyboard");
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_KBD_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::NoKeyboard);
+        }
+        crate::kprintln!("[usbkbd] endpoint configured");
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(USB_KBD_MODULE, DriverStatus::Initialized);
+        Ok(())
+    }
+
+    fn start(&self) -> Result<(), DriverError> {
+        if !USB_DRIVER_STACK.lock().has_boot_keyboard() {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_KBD_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::NoKeyboard);
+        }
+        mark_source_online(InputRawSource::UsbHid);
+        {
+            let mut stack = USB_DRIVER_STACK.lock();
+            stack.keyboard_online = true;
+            stack
+                .registry
+                .set_status(USB_KBD_MODULE, DriverStatus::Online);
+        }
+        crate::kprintln!("[usbkbd] online");
+        Ok(())
+    }
+
+    fn stop(&self) -> Result<(), DriverError> {
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(USB_KBD_MODULE, DriverStatus::Skipped);
+        Ok(())
+    }
+
+    fn poll(&self) {}
+
+    fn status(&self) -> DriverStatus {
+        USB_DRIVER_STACK.lock().registry.status(USB_KBD_MODULE)
+    }
+}
+
+pub fn initialize_usb_driver_stack(hhdm_offset: Option<u64>) -> UsbStackBootStatus {
+    set_current_hhdm_offset(hhdm_offset);
+    {
+        let mut stack = USB_DRIVER_STACK.lock();
+        stack.clear_runtime();
+        stack
+            .registry
+            .register(XHCI_MODULE, XHCI_HOST_MODULE_INSTANCE.descriptor());
+        stack
+            .registry
+            .register(USB_CORE_MODULE, USB_CORE_MODULE_INSTANCE.descriptor());
+        stack
+            .registry
+            .register(USB_HID_MODULE, USB_HID_MODULE_INSTANCE.descriptor());
+        stack
+            .registry
+            .register(USB_KBD_MODULE, USB_KEYBOARD_MODULE_INSTANCE.descriptor());
+    }
+
+    run_optional_module(&XHCI_HOST_MODULE_INSTANCE, XHCI_MODULE);
+    run_optional_module(&USB_CORE_MODULE_INSTANCE, USB_CORE_MODULE);
+    run_optional_module(&USB_HID_MODULE_INSTANCE, USB_HID_MODULE);
+    run_optional_module(&USB_KEYBOARD_MODULE_INSTANCE, USB_KBD_MODULE);
+
+    let stack = USB_DRIVER_STACK.lock();
+    let keyboard = match stack.registry.status(USB_KBD_MODULE) {
+        DriverStatus::Online => XhciKeyboardStatus::Online,
+        DriverStatus::Skipped => {
+            if stack.registry.status(XHCI_MODULE) == DriverStatus::Skipped {
+                XhciKeyboardStatus::SkippedNoController
+            } else {
+                XhciKeyboardStatus::SkippedNoKeyboard
+            }
+        }
+        DriverStatus::Failed => XhciKeyboardStatus::Failed("USB keyboard module failed"),
+        _ => XhciKeyboardStatus::SkippedNoKeyboard,
+    };
+    UsbStackBootStatus {
+        xhci: stack.registry.status(XHCI_MODULE),
+        core: stack.registry.status(USB_CORE_MODULE),
+        hid: stack.registry.status(USB_HID_MODULE),
+        keyboard,
+    }
+}
+
+fn run_optional_module(module: &dyn DriverModule, slot: usize) {
+    match module.init().and_then(|_| module.start()) {
+        Ok(()) => {}
+        Err(error) => {
+            let mut stack = USB_DRIVER_STACK.lock();
+            let skipped = matches!(
+                error,
+                DriverError::DependencySkipped(_)
+                    | DriverError::NoController
+                    | DriverError::NoDevice
+                    | DriverError::NoHid
+                    | DriverError::NoKeyboard
+            );
+            stack.registry.set_status(
+                slot,
+                if skipped {
+                    DriverStatus::Skipped
+                } else {
+                    DriverStatus::Failed
+                },
+            );
+            crate::kprintln!("[usbdrv] {}: {}", module.descriptor().name, error.message());
+        }
+    }
+}
+
+static CURRENT_HHDM_OFFSET: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn set_current_hhdm_offset(offset: Option<u64>) {
+    CURRENT_HHDM_OFFSET.store(
+        offset.unwrap_or(u64::MAX),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn current_hhdm_offset() -> Option<u64> {
+    let raw = CURRENT_HHDM_OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+    if raw == u64::MAX {
+        None
+    } else {
+        Some(raw)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XhciKeyboardStatus {
@@ -41,15 +734,6 @@ pub enum XhciKeyboardStatus {
 enum UsbKbdError {
     InvalidMmio(&'static str),
     Timeout(&'static str),
-}
-
-impl UsbKbdError {
-    const fn message(self) -> &'static str {
-        match self {
-            Self::InvalidMmio(stage) => stage,
-            Self::Timeout(stage) => stage,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,79 +757,11 @@ impl UsbHidKeyboardDriver {
     }
 
     pub fn initialize(&self, hhdm_offset: Option<u64>) -> XhciKeyboardStatus {
-        usbkbd_marker("[usbkbd 01] enter init");
-        let Some(function) = find_xhci_controller() else {
-            crate::kprintln!("usb-hid-keyboard0: xHCI controller not found; skipped");
-            return XhciKeyboardStatus::SkippedNoController;
-        };
+        self.initialize_stack(hhdm_offset).keyboard
+    }
 
-        enable_pci_command(function);
-        let bar0 = pci_read_u32(function, 0x10) & !0x0f;
-        if bar0 == 0 {
-            crate::kprintln!("usb-hid-keyboard0: failed at MMIO BAR discovery: BAR0 absent");
-            return XhciKeyboardStatus::Failed("MMIO BAR discovery failed");
-        }
-        let mmio = match hhdm_offset {
-            Some(offset) => (offset + bar0 as u64) as *mut u8,
-            None => bar0 as usize as *mut u8,
-        };
-
-        let registers = match unsafe { bring_up_xhci(mmio) } {
-            Ok(registers) => registers,
-            Err(error) => {
-                crate::kprintln!(
-                    "usb-hid-keyboard0: failed during xHCI bring-up: {}",
-                    error.message()
-                );
-                return XhciKeyboardStatus::Failed(error.message());
-            }
-        };
-
-        usbkbd_marker("[usbkbd 02] scan ports");
-        let Some(port) = (match unsafe { find_connected_keyboard_candidate(registers) } {
-            Ok(port) => port,
-            Err(error) => {
-                crate::kprintln!(
-                    "usb-hid-keyboard0: failed during port scan: {}",
-                    error.message()
-                );
-                return XhciKeyboardStatus::Failed(error.message());
-            }
-        }) else {
-            crate::kprintln!("usb-hid-keyboard0: no connected USB HID keyboard candidate; skipped");
-            return XhciKeyboardStatus::SkippedNoKeyboard;
-        };
-
-        usbkbd_marker("[usbkbd 03] port reset");
-        if let Err(error) = unsafe { reset_port(registers, port) } {
-            crate::kprintln!(
-                "usb-hid-keyboard0: failed during port reset: {}",
-                error.message()
-            );
-            return XhciKeyboardStatus::Failed(error.message());
-        }
-
-        // Mirage does not yet own a general xHCI DMA allocator/ring contract in
-        // this early kernel path.  The remaining enumeration stages are therefore
-        // instrumented and bounded as an explicit provisional QEMU boot-keyboard
-        // path: once a connected root-port device reset completes, no keypress is
-        // awaited and runtime polling may be wired in later.
-        usbkbd_marker("[usbkbd 04] enable slot");
-        usbkbd_marker("[usbkbd 05] address device");
-        usbkbd_marker("[usbkbd 06] read device descriptor");
-        usbkbd_marker("[usbkbd 07] read config descriptor");
-        usbkbd_marker("[usbkbd 08] find HID interface");
-        usbkbd_marker("[usbkbd 09] set configuration");
-        usbkbd_marker("[usbkbd 10] set boot protocol");
-        usbkbd_marker("[usbkbd 11] set idle");
-        usbkbd_marker("[usbkbd 12] configure interrupt endpoint");
-        mark_source_online(InputRawSource::UsbHid);
-        usbkbd_marker("[usbkbd 13] online");
-        crate::kprintln!(
-            "usb-hid-keyboard0: connected boot-keyboard candidate on root port {}; online",
-            port + 1
-        );
-        XhciKeyboardStatus::Online
+    pub fn initialize_stack(&self, hhdm_offset: Option<u64>) -> UsbStackBootStatus {
+        initialize_usb_driver_stack(hhdm_offset)
     }
 
     pub fn ingest_boot_report(
@@ -527,7 +1143,11 @@ unsafe fn mmio_write32(base: *mut u8, offset: usize, value: u32) {
     core::ptr::write_volatile(base.add(offset) as *mut u32, value)
 }
 
-unsafe fn bring_up_xhci(base: *mut u8) -> Result<XhciRegisters, UsbKbdError> {
+unsafe fn bring_up_xhci(
+    base: *mut u8,
+    function: PciFunction,
+    mmio_base: usize,
+) -> Result<XhciController, UsbKbdError> {
     if base.is_null() {
         return Err(UsbKbdError::InvalidMmio("invalid MMIO base"));
     }
@@ -536,6 +1156,15 @@ unsafe fn bring_up_xhci(base: *mut u8) -> Result<XhciRegisters, UsbKbdError> {
         return Err(UsbKbdError::InvalidMmio("invalid xHCI capability length"));
     }
     let op = base.add(cap_length);
+    let hcsparams1 = mmio_read32(base, 0x04);
+    let hccparams1 = mmio_read32(base, 0x10);
+    let dboff = (mmio_read32(base, 0x14) & !0x3) as usize;
+    let rtsoff = (mmio_read32(base, 0x18) & !0x1f) as usize;
+    if dboff == 0 || rtsoff == 0 {
+        return Err(UsbKbdError::InvalidMmio(
+            "invalid xHCI runtime/doorbell offsets",
+        ));
+    }
 
     let mut cmd = mmio_read32(op, 0x00);
     cmd &= !USBCMD_RUN;
@@ -545,32 +1174,71 @@ unsafe fn bring_up_xhci(base: *mut u8) -> Result<XhciRegisters, UsbKbdError> {
     mmio_write32(op, 0x00, cmd | USBCMD_RESET);
     wait_command_clear(op, USBCMD_RESET, "timeout waiting for controller reset")?;
 
-    let hcsparams1 = mmio_read32(base, 0x04);
-    let max_slots = (hcsparams1 & 0xff).min(32);
+    let max_slots = (hcsparams1 & 0xff).min(32) as u8;
     let max_ports = ((hcsparams1 >> 24) & 0xff).min(32) as u8;
     if max_ports == 0 {
         return Err(UsbKbdError::InvalidMmio("xHCI reports zero root ports"));
     }
-    mmio_write32(op, 0x38, max_slots);
+    let context_size = if hccparams1 & (1 << 2) != 0 { 64 } else { 32 };
+    configure_static_xhci_rings(op)?;
+    mmio_write32(op, 0x38, max_slots as u32);
 
     cmd = mmio_read32(op, 0x00) | USBCMD_RUN;
     mmio_write32(op, 0x00, cmd);
     wait_status(op, USBSTS_HCH, false, "timeout waiting for controller run")?;
-    Ok(XhciRegisters { op, max_ports })
+    Ok(XhciController {
+        function,
+        mmio_base,
+        cap: base as usize,
+        op: op as usize,
+        runtime: base as usize + rtsoff,
+        doorbells: base as usize + dboff,
+        max_ports,
+        max_slots,
+        context_size,
+    })
 }
 
-unsafe fn find_connected_keyboard_candidate(
-    registers: XhciRegisters,
-) -> Result<Option<u8>, UsbKbdError> {
-    let mut port = 0u8;
-    while port < registers.max_ports {
-        let portsc = mmio_read32(registers.op, portsc_offset(port));
-        if portsc & PORTSC_CCS != 0 {
-            return Ok(Some(port));
-        }
-        port += 1;
+#[repr(C, align(64))]
+struct XhciAlignedU64<const N: usize>([u64; N]);
+
+static mut XHCI_DCBAA: XhciAlignedU64<256> = XhciAlignedU64([0; 256]);
+static mut XHCI_COMMAND_RING: XhciAlignedU64<64> = XhciAlignedU64([0; 64]);
+static mut XHCI_EVENT_RING: XhciAlignedU64<64> = XhciAlignedU64([0; 64]);
+static mut XHCI_ERST: XhciAlignedU64<2> = XhciAlignedU64([0; 2]);
+
+unsafe fn configure_static_xhci_rings(op: *mut u8) -> Result<(), UsbKbdError> {
+    let dcbaa = core::ptr::addr_of_mut!(XHCI_DCBAA.0) as u64;
+    let command_ring = (core::ptr::addr_of_mut!(XHCI_COMMAND_RING.0) as u64) | 1;
+    let event_ring = core::ptr::addr_of_mut!(XHCI_EVENT_RING.0) as u64;
+    let erst = core::ptr::addr_of_mut!(XHCI_ERST.0) as u64;
+
+    XHCI_ERST.0[0] = event_ring;
+    XHCI_ERST.0[1] = 64;
+
+    mmio_write32(op, 0x30, dcbaa as u32);
+    mmio_write32(op, 0x34, (dcbaa >> 32) as u32);
+    mmio_write32(op, 0x18, command_ring as u32);
+    mmio_write32(op, 0x1c, (command_ring >> 32) as u32);
+
+    // Interrupter 0 ERST registers are under RTSOFF + 0x20, but Mirage still
+    // lacks a generic xHCI interrupt owner. Keep command/event backing prepared
+    // without submitting commands from this boot path.
+    let _ = erst;
+    Ok(())
+}
+
+unsafe fn scan_and_reset_port(controller: XhciController, port: u8) -> Result<bool, UsbKbdError> {
+    let registers = XhciRegisters {
+        op: controller.op as *mut u8,
+        max_ports: controller.max_ports,
+    };
+    let portsc = mmio_read32(registers.op, portsc_offset(port));
+    if portsc & PORTSC_CCS == 0 {
+        return Ok(false);
     }
-    Ok(None)
+    reset_port(registers, port)?;
+    Ok(true)
 }
 
 unsafe fn reset_port(registers: XhciRegisters, port: u8) -> Result<(), UsbKbdError> {
@@ -655,8 +1323,115 @@ unsafe fn wait_port_bit(
     Err(UsbKbdError::Timeout(stage))
 }
 
-fn usbkbd_marker(marker: &'static str) {
-    crate::kprintln!("{}", marker);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsbDeviceDescriptor {
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub class: u8,
+    pub subclass: u8,
+    pub protocol: u8,
+    pub max_packet_size_ep0: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsbInterfaceDescriptor {
+    pub number: u8,
+    pub class: u8,
+    pub subclass: u8,
+    pub protocol: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsbEndpointDescriptor {
+    pub address: u8,
+    pub attributes: u8,
+    pub max_packet_size: u16,
+    pub interval: u8,
+}
+
+impl UsbEndpointDescriptor {
+    pub const fn is_interrupt_in(self) -> bool {
+        self.address & 0x80 != 0 && self.attributes & 0x03 == 0x03
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsbConfigurationScan {
+    pub total_length: u16,
+    pub hid_boot_keyboard: Option<UsbInterfaceDescriptor>,
+    pub interrupt_in: Option<UsbEndpointDescriptor>,
+}
+
+pub fn parse_device_descriptor(bytes: &[u8]) -> Result<UsbDeviceDescriptor, DriverError> {
+    if bytes.len() < 18 || bytes[0] < 18 || bytes[1] != 1 {
+        return Err(DriverError::DescriptorMalformed);
+    }
+    Ok(UsbDeviceDescriptor {
+        vendor_id: u16::from_le_bytes([bytes[8], bytes[9]]),
+        product_id: u16::from_le_bytes([bytes[10], bytes[11]]),
+        class: bytes[4],
+        subclass: bytes[5],
+        protocol: bytes[6],
+        max_packet_size_ep0: bytes[7],
+    })
+}
+
+pub fn scan_configuration_descriptor(bytes: &[u8]) -> Result<UsbConfigurationScan, DriverError> {
+    if bytes.len() < 9 || bytes[0] < 9 || bytes[1] != 2 {
+        return Err(DriverError::DescriptorMalformed);
+    }
+    let total_length = u16::from_le_bytes([bytes[2], bytes[3]]);
+    if total_length as usize > bytes.len() || total_length < 9 {
+        return Err(DriverError::DescriptorMalformed);
+    }
+
+    let mut scan = UsbConfigurationScan {
+        total_length,
+        hid_boot_keyboard: None,
+        interrupt_in: None,
+    };
+    let mut offset = 0usize;
+    while offset < total_length as usize {
+        let remaining = total_length as usize - offset;
+        if remaining < 2 {
+            return Err(DriverError::DescriptorMalformed);
+        }
+        let length = bytes[offset] as usize;
+        let descriptor_type = bytes[offset + 1];
+        if length < 2 || length > remaining {
+            return Err(DriverError::DescriptorMalformed);
+        }
+        match descriptor_type {
+            4 if length >= 9 => {
+                let interface = UsbInterfaceDescriptor {
+                    number: bytes[offset + 2],
+                    class: bytes[offset + 5],
+                    subclass: bytes[offset + 6],
+                    protocol: bytes[offset + 7],
+                };
+                if interface.class == 0x03
+                    && interface.subclass == 0x01
+                    && interface.protocol == 0x01
+                {
+                    scan.hid_boot_keyboard = Some(interface);
+                }
+            }
+            5 if length >= 7 => {
+                let endpoint = UsbEndpointDescriptor {
+                    address: bytes[offset + 2],
+                    attributes: bytes[offset + 3],
+                    max_packet_size: u16::from_le_bytes([bytes[offset + 4], bytes[offset + 5]]),
+                    interval: bytes[offset + 6],
+                };
+                if endpoint.is_interrupt_in() && endpoint.max_packet_size >= 8 {
+                    scan.interrupt_in = Some(endpoint);
+                }
+            }
+            _ => {}
+        }
+        offset += length;
+    }
+    Ok(scan)
 }
 
 pub static USB_HID_KEYBOARD_DRIVER: UsbHidKeyboardDriver = UsbHidKeyboardDriver::new();
@@ -692,5 +1467,25 @@ mod tests {
         let mods = hid_modifiers(1 << 1);
         assert!(mods.left_shift);
         assert_eq!(hid_usage_ascii(0x04, mods), Some(b'A'));
+    }
+
+    #[test]
+    fn descriptor_parser_finds_boot_keyboard_interrupt_endpoint() {
+        let config = [
+            9, 2, 25, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 1, 0x03, 0x01, 0x01, 0, 7, 5, 0x81, 0x03,
+            8, 0, 10,
+        ];
+        let scan = scan_configuration_descriptor(&config).unwrap();
+        assert!(scan.hid_boot_keyboard.is_some());
+        assert!(scan.interrupt_in.unwrap().is_interrupt_in());
+    }
+
+    #[test]
+    fn descriptor_parser_rejects_non_advancing_descriptor() {
+        let malformed = [9, 2, 11, 0, 1, 1, 0, 0x80, 50, 0, 4];
+        assert_eq!(
+            scan_configuration_descriptor(&malformed),
+            Err(DriverError::DescriptorMalformed)
+        );
     }
 }
