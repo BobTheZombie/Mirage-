@@ -164,13 +164,7 @@ qemu-kernel: config-generate rust-src check-rust-src $(TARGET_JSON)
 		-Z build-std=core,alloc,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
 
-seed-rs-kernel: rust-src check-rust-src $(TARGET_JSON)
-	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release --no-default-features --features seed-rs-qemu-emergency --bin mirage-kernel \
-		--target $(TARGET_JSON) \
-		$(CARGO_JSON_TARGET_SPEC_FLAG) \
-		$(UNSTABLE_OPTIONS_FLAG) \
-		-Z build-std=core,alloc,compiler_builtins \
-		-Z build-std-features=compiler-builtins-mem
+seed-rs-kernel: qemu-kernel
 
 limine: $(LIMINE_BIN)
 
@@ -187,6 +181,7 @@ iso: config-generate qemu-kernel limine
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/limine $(ISO_ROOT)/EFI/BOOT
 	cp $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
+	./tools/verify-seed-rs-elf.sh $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
 	cp boot/limine/limine.conf $(ISO_ROOT)/boot/limine/limine.conf
 	cp $(LIMINE_DIR)/limine-bios.sys $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/limine-bios-cd.bin $(ISO_ROOT)/boot/limine/

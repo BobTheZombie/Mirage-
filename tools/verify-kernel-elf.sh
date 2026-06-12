@@ -19,8 +19,8 @@ Environment overrides:
 
 Checks performed:
   * prints the ELF entry point from `readelf -h`
-  * prints symbol addresses for `_start`, `__mirage_x86_64_bootstrap`, and
-    `kernel_main` using `nm -n`
+  * prints symbol addresses for `_start`, `__mirage_x86_64_seed_entry`, optional
+    `__mirage_x86_64_bootstrap`, and `kernel_main` using `nm -n`
   * reports whether Limine request sections are present via `readelf -S`
   * prints SHA256 hashes for the built kernel and ISO kernel copy
   * exits nonzero if `_start` or `kernel_main` is missing, the ELF entry point
@@ -130,6 +130,7 @@ entry_norm=$(normalize_hex "$entry_line")
 
 printf '\nSymbol addresses:\n'
 start_addr=$(symbol_addr "$built_kernel" _start || true)
+seed_entry_addr=$(symbol_addr "$built_kernel" __mirage_x86_64_seed_entry || true)
 bootstrap_addr=$(symbol_addr "$built_kernel" __mirage_x86_64_bootstrap || true)
 kernel_main_addr=$(symbol_addr "$built_kernel" kernel_main || true)
 
@@ -141,11 +142,19 @@ else
     failures=$((failures + 1))
 fi
 
+if [ -n "$seed_entry_addr" ]; then
+    printf '  __mirage_x86_64_seed_entry: %s\n' "$seed_entry_addr"
+else
+    printf '  __mirage_x86_64_seed_entry: MISSING\n'
+    error "required symbol missing: __mirage_x86_64_seed_entry"
+    failures=$((failures + 1))
+fi
+
 if [ -n "$bootstrap_addr" ]; then
     printf '  __mirage_x86_64_bootstrap: %s\n' "$bootstrap_addr"
+    warn "legacy compatibility symbol present: __mirage_x86_64_bootstrap"
 else
     printf '  __mirage_x86_64_bootstrap: MISSING\n'
-    warn "symbol not found: __mirage_x86_64_bootstrap"
 fi
 
 if [ -n "$kernel_main_addr" ]; then

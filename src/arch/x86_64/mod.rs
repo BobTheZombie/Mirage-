@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::boot::BootInfo;
 use crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER;
+#[cfg(not(feature = "emergency-boot"))]
 use crate::kernel::boot_phase::{boot_phase_ok, boot_phase_skipped, boot_phase_start, BootPhase};
 use crate::kernel::cpu::MAX_CORES;
 use crate::kernel::device::{DeviceDriver, MirageInputEvent};
