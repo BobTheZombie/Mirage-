@@ -688,4 +688,39 @@ mod tests {
         manager.transition(BootPhase::BootInfo, PhaseState::Started, "started");
         assert_eq!(manager.progress_percent(), 80);
     }
+
+    #[test]
+    fn seed_rs_handoff_registers_defaults_before_seed_transition() {
+        let source = include_str!("../arch/x86_64/seed_rs.rs");
+        let handoff_start = source
+            .find("pub unsafe fn x86_64_handoff() -> !")
+            .expect("x86_64_handoff should be present");
+        let handoff = &source[handoff_start..];
+
+        let clear_bss = handoff
+            .find("boot::clear_bss();")
+            .expect("seed handoff should clear BSS before registration");
+        let register_defaults = handoff
+            .find("boot_register_default_subsystems();")
+            .expect("seed handoff should register default boot phases");
+        let start_seed = handoff
+            .find("boot_phase_start(BootPhase::SeedRs);")
+            .expect("seed handoff should start the Seed-rs phase");
+        let first_marker = handoff
+            .find("[seed-rs 01] entered seed entry")
+            .expect("seed handoff should emit its first diagnostic after phase start");
+
+        assert!(
+            clear_bss < register_defaults,
+            "BSS must be cleared before writing the boot phase manager's static table"
+        );
+        assert!(
+            register_defaults < start_seed,
+            "default registration must precede Seed-rs start to avoid auto-registration warnings"
+        );
+        assert!(
+            start_seed < first_marker,
+            "Seed-rs diagnostics should be emitted after the phase transition is tracked"
+        );
+    }
 }

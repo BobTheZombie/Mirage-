@@ -32,13 +32,12 @@ extern "Rust" {
 /// Mirage-owned x86_64 handoff after Limine enters the kernel ELF.
 pub unsafe fn x86_64_handoff() -> ! {
     seed_com1_init();
-    boot_phase_start(BootPhase::SeedRs);
-    seed_com1_write_str("[seed-rs 01] entered seed entry\r\n");
 
     boot::clear_bss();
-    seed_com1_write_str("[seed-rs 02] bss cleared\r\n");
-
     boot_register_default_subsystems();
+    boot_phase_start(BootPhase::SeedRs);
+    seed_com1_write_str("[seed-rs 01] entered seed entry\r\n");
+    seed_com1_write_str("[seed-rs 02] bss cleared\r\n");
 
     let sections = KernelSections::from_linker();
     seed_com1_write_str("[seed-rs 03] linker sections captured\r\n");
