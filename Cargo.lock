@@ -43,6 +43,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirage-acpi"
+version = "0.1.0"
+
+[[package]]
 name = "mirage-ahci"
 version = "0.1.0"
 dependencies = [
@@ -66,6 +70,7 @@ dependencies = [
 name = "mirage-amd-iommu"
 version = "0.1.0"
 dependencies = [
+ "mirage-acpi",
  "mirage-cap",
  "mirage-ipc",
  "mirage-pci",

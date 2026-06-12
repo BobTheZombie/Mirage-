@@ -13,6 +13,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use mirage_acpi::parse_ivrs_header;
 use mirage_cap::{CapabilityObject, CapabilityRights, CapabilitySet};
 use mirage_ipc::EndpointId;
 use mirage_pci::{PciDevice, PciError};
@@ -595,6 +596,33 @@ impl AmdIommu {
     }
 }
 
+/// Safe ACPI IVRS discovery summary. Mirage records remapping capability but
+/// deliberately leaves global translation disabled until DMA domains are ready.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AmdIvrsInfo {
+    pub iv_info: u32,
+    pub entries_offset: usize,
+    pub remapping_capable: bool,
+    pub global_translation_enabled: bool,
+}
+
+impl AmdIvrsInfo {
+    pub const fn identity_safe_placeholder_policy(&self) -> &'static str {
+        "translation-disabled; identity DMA must remain supervisor-authorized until domains exist"
+    }
+}
+
+/// Parse an ACPI IVRS table byte slice without enabling the IOMMU.
+pub fn parse_ivrs_table(bytes: &[u8]) -> Result<AmdIvrsInfo, AmdIommuError> {
+    let header = parse_ivrs_header(bytes).map_err(AmdIommuError::AcpiIvrs)?;
+    Ok(AmdIvrsInfo {
+        iv_info: header.iv_info,
+        entries_offset: header.entries_offset,
+        remapping_capable: true,
+        global_translation_enabled: false,
+    })
+}
+
 /// Discover AMD IOMMU capabilities from a PCI enumeration snapshot.
 pub fn discover_iommu_from_pci(
     devices: &[PciDevice],
@@ -739,6 +767,7 @@ pub enum AmdIommuError {
         object: CapabilityObject,
         reason: mirage_cap::CapabilityError,
     },
+    AcpiIvrs(mirage_acpi::AcpiError),
 }
 
 impl From<PciError> for AmdIommuError {
@@ -806,6 +835,16 @@ mod tests {
         PciDevice::new(PciAddress::new(0, 2, 0).unwrap(), config).unwrap()
     }
 
+    fn acpi_table(sig: &[u8; 4], len: usize) -> Vec<u8> {
+        let mut bytes = vec![0u8; len];
+        bytes[0..4].copy_from_slice(sig);
+        bytes[4..8].copy_from_slice(&(len as u32).to_le_bytes());
+        bytes[8] = 1;
+        let sum = bytes.iter().fold(0u8, |s, b| s.wrapping_add(*b));
+        bytes[9] = (0u8).wrapping_sub(sum);
+        bytes
+    }
+
     fn iommu() -> AmdIommu {
         AmdIommu::new(
             AmdIommuId::new(1),
@@ -828,6 +867,19 @@ mod tests {
         assert_eq!(capability.mmio_base, 0x1_fedc_4000);
         assert_eq!(capability.pci_segment, 2);
         assert_eq!(capability.device_id, DeviceId::new(0, 2, 0).unwrap());
+    }
+
+    #[test]
+    fn parses_ivrs_without_enabling_translation() {
+        let ivrs = acpi_table(b"IVRS", 48);
+        let info = parse_ivrs_table(&ivrs).unwrap();
+
+        assert!(info.remapping_capable);
+        assert!(!info.global_translation_enabled);
+        assert_eq!(info.entries_offset, 48);
+        assert!(info
+            .identity_safe_placeholder_policy()
+            .contains("translation-disabled"));
     }
 
     #[test]

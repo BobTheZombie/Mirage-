@@ -102,10 +102,13 @@ pub struct AmdFeatureSet {
     pub avx2: bool,
     pub smep: bool,
     pub smap: bool,
+    pub pat: bool,
+    pub mtrr: bool,
     pub nx: bool,
     pub syscall_sysret: bool,
     pub rdtscp: bool,
     pub svm: bool,
+    pub sme: bool,
     /// True only if an explicitly modeled, reported CPUID feature bit says so.
     /// Current AMD64 CPUID parsing in Mirage does not infer IOMMU presence from
     /// vendor, SVM, PCI/ACPI tables, or platform presence.
@@ -126,7 +129,11 @@ pub struct AmdCpuId {
     ext_80000007: CpuidLeaf,
     ext_80000008: CpuidLeaf,
     ext_8000000a: CpuidLeaf,
+    brand_80000002: CpuidLeaf,
+    brand_80000003: CpuidLeaf,
+    brand_80000004: CpuidLeaf,
     ext_8000001e: CpuidLeaf,
+    ext_8000001f: CpuidLeaf,
 }
 
 impl AmdCpuId {
@@ -155,7 +162,11 @@ impl AmdCpuId {
             ext_80000007: read_if(reader, max_extended_leaf, 0x8000_0007, 0),
             ext_80000008: read_if(reader, max_extended_leaf, 0x8000_0008, 0),
             ext_8000000a: read_if(reader, max_extended_leaf, 0x8000_000a, 0),
+            brand_80000002: read_if(reader, max_extended_leaf, 0x8000_0002, 0),
+            brand_80000003: read_if(reader, max_extended_leaf, 0x8000_0003, 0),
+            brand_80000004: read_if(reader, max_extended_leaf, 0x8000_0004, 0),
             ext_8000001e: read_if(reader, max_extended_leaf, 0x8000_001e, 0),
+            ext_8000001f: read_if(reader, max_extended_leaf, 0x8000_001f, 0),
         }
     }
 
@@ -178,7 +189,11 @@ impl AmdCpuId {
             0x8000_0007 => self.ext_80000007,
             0x8000_0008 => self.ext_80000008,
             0x8000_000a => self.ext_8000000a,
+            0x8000_0002 => self.brand_80000002,
+            0x8000_0003 => self.brand_80000003,
+            0x8000_0004 => self.brand_80000004,
             0x8000_001e => self.ext_8000001e,
+            0x8000_001f => self.ext_8000001f,
             _ => CpuidLeaf::new(0, 0, 0, 0),
         }
     }
@@ -190,6 +205,27 @@ impl AmdCpuId {
         bytes[4..8].copy_from_slice(&self.leaf0.edx.to_le_bytes());
         bytes[8..12].copy_from_slice(&self.leaf0.ecx.to_le_bytes());
         AmdVendor::from_bytes(bytes)
+    }
+
+    /// Decode the 48-byte processor brand string from extended CPUID leaves.
+    pub fn brand_string(self) -> [u8; 48] {
+        let mut bytes = [0u8; 48];
+        let leaves = [
+            self.brand_80000002,
+            self.brand_80000003,
+            self.brand_80000004,
+        ];
+        let mut out = 0usize;
+        let mut index = 0usize;
+        while index < leaves.len() {
+            let leaf = leaves[index];
+            for reg in [leaf.eax, leaf.ebx, leaf.ecx, leaf.edx] {
+                bytes[out..out + 4].copy_from_slice(&reg.to_le_bytes());
+                out += 4;
+            }
+            index += 1;
+        }
+        bytes
     }
 
     /// Decode AMD family/model/stepping from CPUID leaf `0x0000_0001:EAX`.
@@ -243,10 +279,13 @@ impl AmdCpuId {
             avx2: bit(self.leaf7_0.ebx, 5),
             smep: bit(self.leaf7_0.ebx, 7),
             smap: bit(self.leaf7_0.ebx, 20),
+            pat: bit(self.leaf1.edx, 16),
+            mtrr: bit(self.leaf1.edx, 12),
             nx: bit(self.ext_80000001.edx, 20),
             syscall_sysret: bit(self.ext_80000001.edx, 11),
             rdtscp: bit(self.ext_80000001.edx, 27),
             svm: bit(self.ext_80000001.ecx, 2),
+            sme: bit(self.ext_8000001f.eax, 0),
             iommu: false,
         }
     }
@@ -345,7 +384,7 @@ mod tests {
     #[test]
     fn feature_decode_uses_reported_bits_only() {
         let leaf1_ecx = (1 << 0) | (1 << 9) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 28);
-        let leaf1_edx = (1 << 4) | (1 << 9) | (1 << 25) | (1 << 26);
+        let leaf1_edx = (1 << 4) | (1 << 9) | (1 << 12) | (1 << 16) | (1 << 25) | (1 << 26);
         let leaf7_ebx = (1 << 5) | (1 << 7) | (1 << 20);
         let ext1_ecx = 1 << 2;
         let ext1_edx = (1 << 11) | (1 << 20) | (1 << 27);
@@ -355,10 +394,11 @@ mod tests {
                 (0x0000_0000, 0, vendor_leaf()),
                 (0x0000_0001, 0, CpuidLeaf::new(0, 0, leaf1_ecx, leaf1_edx)),
                 (0x0000_0007, 0, CpuidLeaf::new(0, leaf7_ebx, 0, 0)),
-                (0x8000_0000, 0, CpuidLeaf::new(0x8000_000a, 0, 0, 0)),
+                (0x8000_0000, 0, CpuidLeaf::new(0x8000_001f, 0, 0, 0)),
                 (0x8000_0001, 0, CpuidLeaf::new(0, 0, ext1_ecx, ext1_edx)),
                 (0x8000_0007, 0, CpuidLeaf::new(0, 0, 0, ext7_edx)),
                 (0x8000_000a, 0, CpuidLeaf::new(0, 0, 0, u32::MAX)),
+                (0x8000_001f, 0, CpuidLeaf::new(1, 0, 0, 0)),
             ],
         });
 
@@ -379,11 +419,56 @@ mod tests {
         assert!(features.avx2);
         assert!(features.smep);
         assert!(features.smap);
+        assert!(features.pat);
+        assert!(features.mtrr);
         assert!(features.nx);
         assert!(features.syscall_sysret);
         assert!(features.rdtscp);
         assert!(features.svm);
+        assert!(features.sme);
         assert!(!features.iommu);
+    }
+
+    #[test]
+    fn brand_string_decodes_extended_brand_leaves() {
+        let cpu = AmdCpuId::from_reader(&MockCpuid {
+            leaves: &[
+                (0x0000_0000, 0, vendor_leaf()),
+                (0x8000_0000, 0, CpuidLeaf::new(0x8000_0004, 0, 0, 0)),
+                (
+                    0x8000_0002,
+                    0,
+                    CpuidLeaf::new(
+                        u32::from_le_bytes(*b"AMD "),
+                        u32::from_le_bytes(*b"Ryze"),
+                        u32::from_le_bytes(*b"n 5 "),
+                        u32::from_le_bytes(*b"4500"),
+                    ),
+                ),
+                (
+                    0x8000_0003,
+                    0,
+                    CpuidLeaf::new(
+                        u32::from_le_bytes(*b"U wi"),
+                        u32::from_le_bytes(*b"th R"),
+                        u32::from_le_bytes(*b"adeo"),
+                        u32::from_le_bytes(*b"n Gr"),
+                    ),
+                ),
+                (
+                    0x8000_0004,
+                    0,
+                    CpuidLeaf::new(
+                        u32::from_le_bytes(*b"aphi"),
+                        u32::from_le_bytes(*b"cs  "),
+                        0,
+                        0,
+                    ),
+                ),
+            ],
+        });
+
+        assert!(cpu.brand_string().starts_with(b"AMD Ryzen 5 4500U"));
     }
 
     #[test]

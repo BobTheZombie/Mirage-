@@ -2,6 +2,7 @@
 members = [
     ".",
     "tools/mirageconfig",
+    "crates/mirage-acpi",
     "crates/mirage-ahci",
     "crates/mirage-amd-chipset",
     "crates/mirage-amd-iommu",
@@ -52,10 +53,11 @@ required-features = ["qfs-std"]
 default = ["mock"]
 mock = []
 hw-pci = []
+hw-acpi = []
 hw-amd64 = []
 hw-ryzen = ["hw-amd64"]
 hw-amd-chipset = ["hw-ryzen", "hw-pci"]
-hw-amd-iommu = ["hw-ryzen", "hw-pci"]
+hw-amd-iommu = ["hw-ryzen", "hw-pci", "hw-acpi"]
 hw-amd-telemetry = ["hw-ryzen"]
 hw-nvme = ["hw-pci"]
 hw-ahci = ["hw-pci"]
@@ -63,7 +65,7 @@ hw-xhci = ["hw-pci"]
 hw-i8042 = []
 hw-ps2-keyboard = ["hw-i8042", "hw-keyboard"]
 hw-usb-hid = ["hw-xhci", "hw-keyboard"]
-hw-acpi-ec = []
+hw-acpi-ec = ["hw-acpi"]
 hw-laptop-hotkeys = ["hw-acpi-ec", "hw-keyboard"]
 hw-keyboard = []
 hw-framebuffer = ["dep:mirage-fb", "mirage-fb/hw-framebuffer"]
@@ -71,6 +73,8 @@ full-boot = []
 emergency-boot = []
 seed-rs-qemu-emergency = ["emergency-boot"]
 hw-amdgpu = ["hw-pci", "hw-framebuffer"]
+hw-apu-renoir = ["hw-amd64", "hw-ryzen", "hw-amd-chipset", "hw-acpi", "hw-pci"]
+hw-ryzen-4500u = ["hw-apu-renoir"]
 # Enables host/testing QFS adapters backed by the Rust standard library.
 qfs-std = ["dep:mirage-block", "dep:mirage-storage"]
 

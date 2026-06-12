@@ -1,0 +1,12 @@
+[package]
+name = "mirage-acpi"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Bounds-checked ACPI table parsing primitives for Mirage"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+hw-acpi = []
+hw-acpi-ec = ["hw-acpi"]

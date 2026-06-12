@@ -9,7 +9,7 @@
 use crate::kernel::sync::SpinLock;
 
 /// Maximum number of boot subsystem records tracked without allocation.
-pub const BOOT_PHASE_CAPACITY: usize = 34;
+pub const BOOT_PHASE_CAPACITY: usize = 46;
 /// Current number of canonical Mirage boot phases.
 pub const BOOT_PHASE_COUNT: usize = BOOT_PHASE_CAPACITY;
 
@@ -49,6 +49,18 @@ pub enum BootPhase {
     Idt,
     Pic,
     Interrupts,
+    Amd64Cpu,
+    RyzenCpu,
+    RyzenTopology,
+    AmdSoc,
+    AmdIommu,
+    AcpiTables,
+    Thermal,
+    Battery,
+    AmdGpuRenoir,
+    AmdXhci,
+    Nvme,
+    Ahci,
     I8042,
     Ps2Keyboard,
     Xhci,
@@ -78,6 +90,16 @@ impl BootPhase {
     /// Friendly current-phase message for the persistent boot screen.
     pub const fn friendly_name(self) -> &'static str {
         match self {
+            Self::Amd64Cpu => "AMD64 CPU",
+            Self::RyzenCpu => "Ryzen CPU",
+            Self::RyzenTopology => "Ryzen Topology",
+            Self::AmdSoc => "AMD SoC",
+            Self::AmdIommu => "AMD IOMMU",
+            Self::AcpiTables => "ACPI Tables",
+            Self::AmdGpuRenoir => "AMDGPU Renoir",
+            Self::AmdXhci => "AMD xHCI",
+            Self::Nvme => "NVMe",
+            Self::Ahci => "AHCI",
             Self::UsbCore => "USB Core",
             Self::UsbHid => "USB HID",
             Self::UsbKeyboard => "USB Keyboard",
@@ -105,6 +127,7 @@ pub enum PhaseState {
     Enabled,
     Failed,
     Skipped,
+    Detected,
     Stub,
 }
 
@@ -120,6 +143,7 @@ impl PhaseState {
             Self::Enabled => "ENABLED",
             Self::Failed => "FAILED",
             Self::Skipped => "SKIPPED",
+            Self::Detected => "DETECTED",
             Self::Stub => "STUB",
         }
     }
@@ -128,7 +152,7 @@ impl PhaseState {
         let weight = weight as u16;
         match self {
             Self::Ok | Self::Online | Self::Enabled => weight,
-            Self::Skipped | Self::Stub => {
+            Self::Skipped | Self::Detected | Self::Stub => {
                 if required {
                     weight / 2
                 } else {
@@ -403,6 +427,90 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         false,
         3,
     ),
+    descriptor(
+        BootPhase::Amd64Cpu,
+        "AMD64 CPU",
+        SubsystemCategory::Architecture,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::RyzenCpu,
+        "Ryzen CPU",
+        SubsystemCategory::Architecture,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::RyzenTopology,
+        "Ryzen Topology",
+        SubsystemCategory::Scheduler,
+        false,
+        2,
+    ),
+    descriptor(
+        BootPhase::AmdSoc,
+        "AMD SoC",
+        SubsystemCategory::Device,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::AmdIommu,
+        "AMD IOMMU",
+        SubsystemCategory::Device,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::AcpiTables,
+        "ACPI Tables",
+        SubsystemCategory::Architecture,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::Thermal,
+        "Thermal",
+        SubsystemCategory::Device,
+        false,
+        2,
+    ),
+    descriptor(
+        BootPhase::Battery,
+        "Battery",
+        SubsystemCategory::Device,
+        false,
+        2,
+    ),
+    descriptor(
+        BootPhase::AmdGpuRenoir,
+        "AMDGPU Renoir",
+        SubsystemCategory::Device,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::AmdXhci,
+        "AMD xHCI",
+        SubsystemCategory::Device,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::Nvme,
+        "NVMe",
+        SubsystemCategory::Storage,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::Ahci,
+        "AHCI",
+        SubsystemCategory::Storage,
+        false,
+        3,
+    ),
     descriptor(BootPhase::Xhci, "xHCI", SubsystemCategory::Device, false, 4),
     descriptor(
         BootPhase::UsbCore,
@@ -577,6 +685,10 @@ pub fn boot_phase_failed(phase: BootPhase, message: &'static str) {
 
 pub fn boot_phase_skipped(phase: BootPhase, message: &'static str) {
     transition(phase, PhaseState::Skipped, message);
+}
+
+pub fn boot_phase_detected(phase: BootPhase) {
+    transition(phase, PhaseState::Detected, "detected");
 }
 
 pub fn boot_phase_stub(phase: BootPhase, message: &'static str) {

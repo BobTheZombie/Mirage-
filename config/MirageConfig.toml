@@ -336,3 +336,85 @@ depends_on = ["CONFIG_MIRAGE_DEBUG", "CONFIG_MIRAGE_IPC"]
 selects = []
 visible_if = ["CONFIG_MIRAGE_DEBUG"]
 type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_ACPI"
+prompt = "ACPI table parsing"
+category = "Hardware"
+default = false
+help = "Enable bounds-checked ACPI RSDP/RSDT/XSDT/FADT/MADT/HPET/MCFG/IVRS table parsing. AML interpretation remains gated separately."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = []
+visible_if = []
+type = "bool"
+cargo_feature = "hw-acpi"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_RENOIR"
+prompt = "AMD Renoir APU platform"
+category = "Hardware"
+default = false
+help = "Enable AMD Renoir/Lucienne-class APU discovery for Ryzen mobile systems."
+depends_on = ["CONFIG_MIRAGE_HW_RYZEN"]
+selects = ["CONFIG_MIRAGE_HW_AMD64", "CONFIG_MIRAGE_HW_RYZEN", "CONFIG_MIRAGE_HW_AMD_SOC", "CONFIG_MIRAGE_HW_ACPI", "CONFIG_MIRAGE_HW_PCI"]
+visible_if = ["CONFIG_MIRAGE_HW_RYZEN"]
+type = "bool"
+cargo_feature = "hw-apu-renoir"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_RYZEN_4500U"
+prompt = "AMD Ryzen 5 4500U laptop/APU profile"
+category = "Hardware"
+default = false
+help = "Enable Ryzen 5 4500U-class Renoir laptop discovery; selects AMD64, Ryzen, Renoir, AMD SoC, ACPI, and PCI support."
+depends_on = ["CONFIG_MIRAGE_ARCH_X86_64"]
+selects = ["CONFIG_MIRAGE_HW_AMD64", "CONFIG_MIRAGE_HW_RYZEN", "CONFIG_MIRAGE_HW_RENOIR", "CONFIG_MIRAGE_HW_AMD_SOC", "CONFIG_MIRAGE_HW_ACPI", "CONFIG_MIRAGE_HW_PCI"]
+visible_if = []
+type = "bool"
+cargo_feature = "hw-ryzen-4500u"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_AMD_SOC"
+prompt = "AMD SoC inventory"
+category = "Hardware"
+default = false
+help = "Enable AMD SoC PCI inventory for host bridges, PSP, SMBus/I2C, audio/ACP, storage, USB, IOMMU, and GPU candidates."
+depends_on = ["CONFIG_MIRAGE_HW_RYZEN", "CONFIG_MIRAGE_HW_PCI"]
+selects = ["CONFIG_MIRAGE_HW_AMD_CHIPSET"]
+visible_if = ["CONFIG_MIRAGE_HW_RYZEN"]
+type = "bool"
+cargo_feature = "hw-amd-chipset"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_AMDGPU_RENOIR"
+prompt = "AMDGPU Renoir discovery"
+category = "Hardware"
+default = false
+help = "Enable hardware-gated AMDGPU Renoir PCI/BAR discovery without GPU reset or modesetting."
+depends_on = ["CONFIG_MIRAGE_HW_PCI"]
+selects = ["CONFIG_MIRAGE_HW_RENOIR"]
+visible_if = ["CONFIG_MIRAGE_HW_PCI"]
+type = "bool"
+cargo_feature = "hw-amdgpu"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_THERMAL"
+prompt = "ACPI thermal table hooks"
+category = "Hardware"
+default = false
+help = "Expose ACPI thermal table/method discovery state; AML-dependent thermal zones skip until an AML interpreter is present."
+depends_on = ["CONFIG_MIRAGE_HW_ACPI"]
+selects = []
+visible_if = ["CONFIG_MIRAGE_HW_ACPI"]
+type = "bool"
+
+[[options]]
+symbol = "CONFIG_MIRAGE_HW_BATTERY"
+prompt = "ACPI battery/AC hooks"
+category = "Hardware"
+default = false
+help = "Expose battery and AC adapter discovery state; AML-dependent methods skip until an AML interpreter is present."
+depends_on = ["CONFIG_MIRAGE_HW_ACPI"]
+selects = []
+visible_if = ["CONFIG_MIRAGE_HW_ACPI"]
+type = "bool"
