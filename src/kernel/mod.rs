@@ -867,13 +867,14 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Ok(RootMountSource::BuiltInBlockQfs)
     }
 
-    pub fn bootstrap_userspace_init(&mut self) -> KernelResult<ProcessId> {
-        const INIT_CANDIDATES: [&str; 3] = ["/sbin/init", "/bin/init", "/bin/sh"];
+    pub fn bootstrap_userspace_init(&mut self) -> KernelResult<(ProcessId, &'static str)> {
+        const INIT_CANDIDATES: [&str; 4] =
+            ["/sbin/spider-rs", "/sbin/init", "/bin/init", "/bin/sh"];
         let init = self.spawn_initial_process(Credentials::system())?;
         let mut idx = 0usize;
         while idx < INIT_CANDIDATES.len() {
             match self.exec_bootstrap_path(init, INIT_CANDIDATES[idx]) {
-                Ok(()) => return Ok(init),
+                Ok(()) => return Ok((init, INIT_CANDIDATES[idx])),
                 Err(_) => {
                     idx += 1;
                 }

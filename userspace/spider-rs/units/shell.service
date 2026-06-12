@@ -1,0 +1,10 @@
+[Unit]
+Description=Mirage shell
+After=basic.target
+
+[Service]
+ExecStart=/bin/msh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

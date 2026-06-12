@@ -9,7 +9,7 @@
 use crate::kernel::sync::SpinLock;
 
 /// Maximum number of boot subsystem records tracked without allocation.
-pub const BOOT_PHASE_CAPACITY: usize = 46;
+pub const BOOT_PHASE_CAPACITY: usize = 47;
 /// Current number of canonical Mirage boot phases.
 pub const BOOT_PHASE_COUNT: usize = BOOT_PHASE_CAPACITY;
 
@@ -76,6 +76,7 @@ pub enum BootPhase {
     RootFs,
     Supervisor,
     Userspace,
+    SpiderRs,
     Mtss,
     BootScreen,
     IdleLoop,
@@ -105,6 +106,7 @@ impl BootPhase {
             Self::UsbKeyboard => "USB Keyboard",
             Self::KernelMapper => "Kernel Mapper",
             Self::RootFs => "Root FS",
+            Self::SpiderRs => "Spider-rs",
             Self::Mtss => "MTSS",
             _ => self.name(),
         }
@@ -625,6 +627,13 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         3,
     ),
     descriptor(
+        BootPhase::SpiderRs,
+        "Spider-rs",
+        SubsystemCategory::Userspace,
+        false,
+        2,
+    ),
+    descriptor(
         BootPhase::Mtss,
         "MTSS",
         SubsystemCategory::Scheduler,
@@ -737,6 +746,7 @@ pub fn boot_register_compiled_subsystems() {
     register_phase(BootPhase::RootFs);
     register_phase(BootPhase::Supervisor);
     register_phase(BootPhase::Userspace);
+    register_phase(BootPhase::SpiderRs);
     register_phase(BootPhase::Mtss);
     register_phase(BootPhase::BootScreen);
     register_phase(BootPhase::IdleLoop);
