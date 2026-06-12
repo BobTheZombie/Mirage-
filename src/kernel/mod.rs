@@ -23,6 +23,7 @@ pub mod syscall;
 pub mod thread;
 pub mod time;
 pub mod timer;
+pub mod userspace;
 
 use crate::arch::x86_64::{
     self,
@@ -946,6 +947,21 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     /// switching, syscall entry, and capability checks remain kernel-owned.
     pub fn kernel_schedule_next(&mut self) -> Option<KernelThreadScheduleRecord> {
         self.scheduler.next()
+    }
+
+    /// Attempt the Spider-rs PID 1 launch path without faking ring-3 entry.
+    ///
+    /// The current milestone validates the ordering and loader availability. If
+    /// the ELF/rootfs byte path or architecture userspace entry is missing, the
+    /// caller must mark Spider-rs as `Stub` or `Failed`, not `Online`.
+    pub fn bootstrap_spider_rs_pid1(&mut self) -> KernelResult<ProcessId> {
+        if !self.mtss_initialized {
+            return Err(KernelError::InvalidArgument);
+        }
+        match crate::kernel::userspace::load_elf_from_file("/sbin/spider-rs") {
+            Ok(_program) => Err(KernelError::InvalidArgument),
+            Err(_) => Err(KernelError::Filesystem(VfsError::NotFound)),
+        }
     }
 
     /// Return the current micro-thread to MTSS after a cooperative yield or the
