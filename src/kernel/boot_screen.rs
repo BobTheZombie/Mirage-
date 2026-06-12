@@ -90,7 +90,7 @@ const SERVICE_SCREEN_PHASES: [BootPhase; 4] = [
 ];
 
 #[cfg(feature = "hw-framebuffer")]
-const INPUT_SCREEN_PHASES: [BootPhase; 6] = [
+const INPUT_SCREEN_PHASES: [BootPhase; 7] = [
     BootPhase::Input,
     BootPhase::Xhci,
     BootPhase::UsbCore,
@@ -167,7 +167,7 @@ fn status_color(state: PhaseState) -> crate::arch::x86_64::framebuffer_console::
         PhaseState::Ok | PhaseState::Online | PhaseState::Enabled => RgbColor::GREEN,
         PhaseState::Started | PhaseState::Pending => RgbColor::YELLOW,
         PhaseState::Registered | PhaseState::Skipped => RgbColor::GRAY,
-        PhaseState::Stub => RgbColor::CYAN,
+        PhaseState::Detected | PhaseState::Stub => RgbColor::CYAN,
         PhaseState::Failed => RgbColor::RED,
         PhaseState::Unregistered => RgbColor::GRAY,
     }
