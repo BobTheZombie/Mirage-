@@ -10,8 +10,9 @@
 use crate::kernel::boot_phase::{boot_register_subsystem, SubsystemDescriptor};
 
 use crate::kernel::boot_phase::{
-    boot_phase_enabled, boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_skipped,
-    boot_phase_start, boot_phase_stub, BootPhase, PhaseState, SubsystemCategory, BOOT_PHASE_COUNT,
+    boot_phase_detected, boot_phase_enabled, boot_phase_failed, boot_phase_ok, boot_phase_online,
+    boot_phase_skipped, boot_phase_start, boot_phase_stub, BootPhase, PhaseState,
+    SubsystemCategory, BOOT_PHASE_COUNT,
 };
 
 pub const DISPATCH_REGISTRY_CAPACITY: usize = BOOT_PHASE_COUNT;
@@ -214,7 +215,9 @@ fn dispatch_one(service: &'static dyn DispatchService, report: &mut DispatchRepo
     }
 
     match service.probe() {
-        DispatchProbeResult::Present => {}
+        DispatchProbeResult::Present => {
+            boot_phase_detected(descriptor.phase);
+        }
         DispatchProbeResult::NotPresent(message) | DispatchProbeResult::Unsupported(message) => {
             report.skipped += 1;
             write_dispatch_skipped(descriptor.name, message);
@@ -252,7 +255,8 @@ fn failed_dependency(dependencies: &'static [BootPhase]) -> Option<&'static str>
             | PhaseState::Online
             | PhaseState::Enabled
             | PhaseState::Detected
-            | PhaseState::Stub => {}
+            | PhaseState::Stub
+            | PhaseState::Running => {}
             PhaseState::Failed => return Some("dependency failed"),
             PhaseState::Skipped => return Some("dependency skipped"),
             _ => return Some("dependency not ready"),

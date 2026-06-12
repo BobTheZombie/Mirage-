@@ -454,10 +454,20 @@ impl PciProbeDevice {
             && self.prog_if == 0x30
         {
             "AMD xHCI Controller"
+        } else if self.class == 0x0c && self.subclass == 0x03 && self.prog_if == 0x30 {
+            "xHCI Controller"
         } else if self.class == 0x01 && self.subclass == 0x08 && self.prog_if == 0x02 {
             "NVMe Controller"
+        } else if self.vendor_id == 0x8086 && self.class == 0x01 && self.subclass == 0x06 {
+            "Intel AHCI Controller"
         } else if self.class == 0x01 && self.subclass == 0x06 && self.prog_if == 0x01 {
             "AHCI Controller"
+        } else if self.vendor_id == 0x8086 && self.class == 0x06 && self.subclass == 0x00 {
+            "Intel Host Bridge"
+        } else if self.vendor_id == 0x1234 && self.class == 0x03 {
+            "QEMU VGA Display Controller"
+        } else if self.vendor_id == 0x8086 && self.class == 0x02 {
+            "Intel Ethernet Controller"
         } else if self.vendor_id == 0x1022 {
             "AMD SoC Device"
         } else {
@@ -706,23 +716,6 @@ fn scan_pci_devices(mut visitor: impl FnMut(PciProbeDevice)) {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
-fn pci_any(mut predicate: impl FnMut(u16, u16, u8, u8, u8) -> bool) -> bool {
-    let mut found = false;
-    scan_pci_devices(|device| {
-        if predicate(
-            device.vendor_id,
-            device.device_id,
-            device.class,
-            device.subclass,
-            device.prog_if,
-        ) {
-            found = true;
-        }
-    });
-    found
-}
-
-#[cfg(not(feature = "emergency-boot"))]
 fn initialize_platform_probes(
     boot_info: &BootInfo,
 ) -> mirage_platform::PlatformRegistry<{ mirage_platform::MAX_PLATFORM_DEVICE_EVENTS }> {
@@ -773,7 +766,7 @@ fn initialize_platform_probes(
         boot_phase_skipped(BootPhase::RyzenTopology, "CPUID topology unavailable");
     }
 
-    let amd_soc = pci_any(|vendor, _, _, _, _| vendor == 0x1022);
+    let amd_soc = registry.find_amd_soc_device().is_some();
     boot_phase_start(BootPhase::AmdSoc);
     if amd_soc {
         boot_phase_ok(BootPhase::AmdSoc);
@@ -801,9 +794,7 @@ fn initialize_platform_probes(
     boot_phase_start(BootPhase::Battery);
     boot_phase_skipped(BootPhase::Battery, "battery ACPI probe not implemented");
 
-    let renoir_gpu = pci_any(|vendor, device, class, _, _| {
-        vendor == 0x1002 && class == 0x03 && matches!(device, 0x1636 | 0x1638)
-    });
+    let renoir_gpu = registry.find_amdgpu_renoir().is_some();
     boot_phase_start(BootPhase::AmdGpuRenoir);
     if renoir_gpu {
         boot_phase_ok(BootPhase::AmdGpuRenoir);
@@ -811,9 +802,9 @@ fn initialize_platform_probes(
         boot_phase_skipped(BootPhase::AmdGpuRenoir, "Renoir GPU PCI device not present");
     }
 
-    let amd_xhci = pci_any(|vendor, _, class, subclass, prog_if| {
-        vendor == 0x1022 && class == 0x0c && subclass == 0x03 && prog_if == 0x30
-    });
+    let amd_xhci = registry
+        .find_xhci()
+        .is_some_and(|device| device.vendor_id == Some(0x1022));
     boot_phase_start(BootPhase::AmdXhci);
     if amd_xhci {
         boot_phase_ok(BootPhase::AmdXhci);
@@ -842,32 +833,20 @@ fn initialize_storage_hardware(
     platform: &mirage_platform::PlatformRegistry<{ mirage_platform::MAX_PLATFORM_DEVICE_EVENTS }>,
 ) {
     boot_phase_start(BootPhase::Nvme);
-    if platform.contains_kind(mirage_platform::PlatformDeviceKind::Storage) {
-        if platform
-            .find_by_location(mirage_platform::PlatformLocation::Unknown)
-            .is_some()
-        {
-            boot_phase_skipped(BootPhase::Nvme, "native NVMe probe not implemented");
-        } else if platform
-            .find_by_pci_id(0x144d, 0xa808)
-            .or_else(|| platform.find_by_pci_id(0x8086, 0xf1a5))
-            .is_some()
-        {
-            boot_phase_stub(
-                BootPhase::Nvme,
-                "NVMe driver compiled in but probe/start not implemented",
-            );
-        } else {
-            boot_phase_skipped(BootPhase::Nvme, "NVMe controller not present");
-        }
+    if platform.find_nvme().is_some() {
+        boot_phase_stub(
+            BootPhase::Nvme,
+            "NVMe controller detected; driver probe/start not implemented",
+        );
     } else {
         boot_phase_skipped(BootPhase::Nvme, "NVMe controller not present");
     }
+
     boot_phase_start(BootPhase::Ahci);
-    if platform.contains_kind(mirage_platform::PlatformDeviceKind::Storage) {
+    if platform.find_ahci().is_some() {
         boot_phase_stub(
             BootPhase::Ahci,
-            "AHCI driver compiled in but probe/start not implemented",
+            "AHCI controller detected; driver probe/start not implemented",
         );
     } else {
         boot_phase_skipped(BootPhase::Ahci, "AHCI controller not present");

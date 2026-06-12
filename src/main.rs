@@ -8,8 +8,8 @@ use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
-    boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_start, boot_phase_stub,
-    boot_phase_validate_no_unresolved, BootPhase,
+    boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_running, boot_phase_start,
+    boot_phase_stub, boot_phase_validate_no_unresolved, BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
@@ -233,11 +233,16 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
         boot_phase_start(BootPhase::Mtss);
         kernel.kernel_mtss_init();
-        boot_phase_ok(BootPhase::Mtss);
+        boot_phase_online(BootPhase::Mtss);
         mirage::kprintln!("MTSS initialized");
         boot_phase_start(BootPhase::UserspaceLoader);
-        boot_phase_online(BootPhase::UserspaceLoader);
-        mirage::kprintln!("userspace ELF loader initialized");
+        boot_phase_stub(
+            BootPhase::UserspaceLoader,
+            "ELF validator exists; rootfs byte read and ring-3 entry are not implemented",
+        );
+        mirage::kprintln!(
+            "userspace ELF loader stubbed: rootfs byte read and ring-3 entry unavailable"
+        );
         boot_phase_start(BootPhase::SpiderRs);
         match kernel.bootstrap_spider_rs_pid1() {
             Ok(pid) => {
@@ -261,6 +266,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         boot_phase_start(BootPhase::BootScreen);
         boot_phase_ok(BootPhase::BootScreen);
         boot_phase_start(BootPhase::IdleLoop);
+        boot_phase_running(BootPhase::IdleLoop);
         boot_phase_validate_no_unresolved();
         let mut observed_timer_ticks = x86_64::timer_ticks();
         loop {
