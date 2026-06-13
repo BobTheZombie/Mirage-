@@ -17,8 +17,8 @@ use crate::arch::x86_64::xhci_keyboard::{
     DriverStatus, XhciKeyboardStatus, USB_HID_KEYBOARD_DRIVER,
 };
 use crate::kernel::boot_phase::{
-    boot_phase_enabled, boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_skipped,
-    boot_phase_start, boot_phase_stub, BootPhase,
+    boot_phase_detected, boot_phase_enabled, boot_phase_failed, boot_phase_ok, boot_phase_online,
+    boot_phase_skipped, boot_phase_start, boot_phase_stub, BootPhase,
 };
 use crate::kernel::cpu::MAX_CORES;
 #[cfg(not(feature = "emergency-boot"))]
@@ -881,25 +881,55 @@ fn cpu_platform_name(cpu: CpuProbe) -> &'static str {
 fn initialize_storage_hardware(
     platform: &mirage_platform::PlatformRegistry<{ mirage_platform::MAX_PLATFORM_DEVICE_EVENTS }>,
 ) {
-    boot_phase_start(BootPhase::Nvme);
-    if platform.find_nvme().is_some() {
-        boot_phase_stub(
+    boot_phase_start(BootPhase::BlockLayer);
+    boot_phase_ok(BootPhase::BlockLayer);
+
+    let nvme_present = platform.platform_find_nvme_controller().is_some();
+    let ahci_present = platform.platform_find_ahci_controller().is_some();
+
+    if nvme_present {
+        boot_phase_detected(BootPhase::Nvme);
+        boot_phase_start(BootPhase::Nvme);
+        // Kernel policy is honest: discovering PCIe NVMe hardware is not the same as
+        // registering a namespace. The hardware driver crates contain bounded queue
+        // mechanics, but this early arch path does not claim Online until a namespace
+        // is registered through the block layer.
+        boot_phase_failed(
             BootPhase::Nvme,
-            "NVMe controller detected; driver probe/start not implemented",
+            "NVMe controller detected; namespace registration not wired in this boot path",
         );
+        boot_phase_skipped(BootPhase::NvmeNamespace, "no NVMe namespace registered");
     } else {
         boot_phase_skipped(BootPhase::Nvme, "NVMe controller not present");
+        boot_phase_skipped(BootPhase::NvmeNamespace, "NVMe controller not present");
     }
 
-    boot_phase_start(BootPhase::Ahci);
-    if platform.find_ahci().is_some() {
-        boot_phase_stub(
+    if ahci_present {
+        boot_phase_detected(BootPhase::Ahci);
+        boot_phase_start(BootPhase::Ahci);
+        boot_phase_failed(
             BootPhase::Ahci,
-            "AHCI controller detected; driver probe/start not implemented",
+            "AHCI controller detected; SATA disk registration not wired in this boot path",
         );
+        boot_phase_skipped(BootPhase::SataDisk, "no SATA disk registered");
     } else {
         boot_phase_skipped(BootPhase::Ahci, "AHCI controller not present");
+        boot_phase_skipped(BootPhase::SataDisk, "AHCI controller not present");
     }
+
+    if nvme_present || ahci_present {
+        boot_phase_failed(
+            BootPhase::M2Storage,
+            "M.2-capable storage path detected but no block device is online",
+        );
+    } else {
+        boot_phase_skipped(BootPhase::M2Storage, "no M.2-capable storage path present");
+    }
+
+    boot_phase_skipped(
+        BootPhase::Qfs,
+        "root QFS block mount deferred until block device selection",
+    );
 }
 
 #[allow(unused_mut, unused_variables)]

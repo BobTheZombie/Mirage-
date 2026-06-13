@@ -369,16 +369,22 @@ fn byte_len(sector_size: usize, sector_count: u64) -> Result<u64, DeviceError> {
 fn map_block_error(error: BlockError) -> DeviceError {
     match error {
         BlockError::OutOfBounds => DeviceError::NotFound,
-        BlockError::BufferSizeMismatch | BlockError::EmptyRange | BlockError::InvalidBlockSize => {
-            DeviceError::BufferTooSmall
-        }
+        BlockError::BufferSizeMismatch
+        | BlockError::BufferTooSmall
+        | BlockError::EmptyRange
+        | BlockError::InvalidBlockSize => DeviceError::BufferTooSmall,
         BlockError::DeviceOffline | BlockError::DeviceFaulted | BlockError::QueueEmpty => {
             DeviceError::Busy
         }
         BlockError::RangeOverflow
         | BlockError::ReadOnly
         | BlockError::DeviceMismatch
-        | BlockError::Io => DeviceError::Unsupported,
+        | BlockError::Io
+        | BlockError::NoDevice
+        | BlockError::Timeout
+        | BlockError::Unsupported
+        | BlockError::BufferMisaligned
+        | BlockError::DmaError => DeviceError::Unsupported,
     }
 }
 

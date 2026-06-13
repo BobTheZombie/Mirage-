@@ -259,6 +259,42 @@ impl PlatformDevice {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformCapabilityError {
+    NotPciDevice,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlatformPciCommandFlag {
+    MemorySpace,
+    BusMaster,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlatformPciCommandUpdate {
+    pub location: PlatformLocation,
+    pub set_bits: u16,
+}
+
+impl PlatformPciCommandUpdate {
+    pub const fn for_device(
+        device: PlatformDevice,
+        flag: PlatformPciCommandFlag,
+    ) -> Result<Self, PlatformCapabilityError> {
+        if !matches!(device.location, PlatformLocation::Pci { .. }) {
+            return Err(PlatformCapabilityError::NotPciDevice);
+        }
+        let set_bits = match flag {
+            PlatformPciCommandFlag::MemorySpace => 1 << 1,
+            PlatformPciCommandFlag::BusMaster => 1 << 2,
+        };
+        Ok(Self {
+            location: device.location,
+            set_bits,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlatformRegistryError {
     Full,
     Duplicate,
@@ -407,6 +443,32 @@ impl<const CAPACITY: usize> PlatformRegistry<CAPACITY> {
         self.find_nvme()
     }
 
+    pub fn platform_iter_storage_controllers(&self, mut callback: impl FnMut(PlatformDevice)) {
+        self.platform_iter_pci(|device| {
+            if matches!(
+                (device.class_code, device.subclass, device.prog_if),
+                (Some(0x01), Some(0x06), Some(0x01)) | (Some(0x01), Some(0x08), Some(0x02))
+            ) {
+                callback(device);
+            }
+        });
+    }
+
+    pub const fn platform_get_pci_bars(device: PlatformDevice) -> [Option<PlatformPciBar>; 6] {
+        device.bars
+    }
+
+    pub const fn platform_enable_pci_bus_mastering(
+        device: PlatformDevice,
+    ) -> Result<PlatformPciCommandUpdate, PlatformCapabilityError> {
+        PlatformPciCommandUpdate::for_device(device, PlatformPciCommandFlag::BusMaster)
+    }
+
+    pub const fn platform_enable_pci_mmio(
+        device: PlatformDevice,
+    ) -> Result<PlatformPciCommandUpdate, PlatformCapabilityError> {
+        PlatformPciCommandUpdate::for_device(device, PlatformPciCommandFlag::MemorySpace)
+    }
     pub fn find_xhci(&self) -> Option<PlatformDevice> {
         self.find_pci_by_class(0x0c, 0x03, 0x30)
     }
@@ -1165,9 +1227,29 @@ mod registry_query_tests {
             ))
             .unwrap();
 
+        let ahci = registry.platform_find_ahci_controller().unwrap();
         assert!(registry.find_ahci().is_some());
         assert!(registry.find_xhci().is_some());
         assert!(registry.find_nvme().is_none());
+        let mut storage_count = 0;
+        registry.platform_iter_storage_controllers(|_| storage_count += 1);
+        assert_eq!(storage_count, 1);
+        assert_eq!(
+            PlatformRegistry::<4>::platform_get_pci_bars(ahci),
+            [None; 6]
+        );
+        assert_eq!(
+            PlatformRegistry::<4>::platform_enable_pci_mmio(ahci)
+                .unwrap()
+                .set_bits,
+            1 << 1
+        );
+        assert_eq!(
+            PlatformRegistry::<4>::platform_enable_pci_bus_mastering(ahci)
+                .unwrap()
+                .set_bits,
+            1 << 2
+        );
     }
 
     #[test]

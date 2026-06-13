@@ -231,26 +231,46 @@ impl BlockResponse {
 /// Backend-independent block operation errors.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlockError {
+    NoDevice,
     InvalidBlockSize,
     EmptyRange,
     RangeOverflow,
     OutOfBounds,
     BufferSizeMismatch,
+    /// Alias used by newer hardware drivers when a caller-provided buffer is too small.
+    BufferTooSmall,
+    BufferMisaligned,
     DeviceOffline,
     DeviceFaulted,
+    Timeout,
+    Unsupported,
+    DmaError,
     ReadOnly,
     QueueEmpty,
     DeviceMismatch,
     Io,
 }
 
+/// Stable storage class for a block device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockDeviceKind {
+    NvmeNamespace,
+    SataDisk,
+    RamDisk,
+    BuiltIn,
+}
+
 /// Static properties advertised by a block device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockDeviceInfo {
     pub id: BlockDeviceId,
+    pub name: &'static str,
+    pub kind: BlockDeviceKind,
     pub block_size: BlockSize,
     pub sectors: SectorCount,
+    pub block_count: u64,
     pub read_only: bool,
+    pub readonly: bool,
     pub write_cache: bool,
 }
 
@@ -264,13 +284,38 @@ impl BlockDeviceInfo {
     ) -> Self {
         Self {
             id,
+            name: "block",
+            kind: BlockDeviceKind::BuiltIn,
             block_size,
             sectors,
+            block_count: sectors.get(),
             read_only,
+            readonly: read_only,
             write_cache,
         }
     }
 
+    pub const fn named(
+        id: BlockDeviceId,
+        name: &'static str,
+        kind: BlockDeviceKind,
+        block_size: BlockSize,
+        sectors: SectorCount,
+        read_only: bool,
+        write_cache: bool,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            kind,
+            block_size,
+            sectors,
+            block_count: sectors.get(),
+            read_only,
+            readonly: read_only,
+            write_cache,
+        }
+    }
     pub fn validate_range(self, range: BlockRange) -> Result<(), BlockError> {
         range.validate_within(self.sectors)
     }
@@ -514,6 +559,147 @@ impl BlockScheduler {
     }
 }
 
+/// Error returned by the fixed-capacity registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockRegistryError {
+    Full,
+    Duplicate,
+    NoDevice,
+}
+
+/// Fixed-capacity no-heap block registry used by early boot and kernel tests.
+pub struct FixedBlockDeviceRegistry<'a, const CAPACITY: usize> {
+    slots: [Option<&'a mut dyn BlockDevice>; CAPACITY],
+    len: usize,
+}
+
+impl<'a, const CAPACITY: usize> FixedBlockDeviceRegistry<'a, CAPACITY> {
+    pub const fn new() -> Self {
+        Self {
+            slots: [const { None }; CAPACITY],
+            len: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn register(&mut self, device: &'a mut dyn BlockDevice) -> Result<(), BlockRegistryError> {
+        let id = device.info().id;
+        if self.lookup(id).is_some() {
+            return Err(BlockRegistryError::Duplicate);
+        }
+        if self.len >= CAPACITY {
+            return Err(BlockRegistryError::Full);
+        }
+        self.slots[self.len] = Some(device);
+        self.len += 1;
+        Ok(())
+    }
+
+    pub fn unregister(&mut self, id: BlockDeviceId) -> Result<(), BlockRegistryError> {
+        let mut index = 0usize;
+        while index < self.len {
+            if self.slots[index].as_ref().map(|d| d.info().id) == Some(id) {
+                let mut cursor = index;
+                while cursor + 1 < self.len {
+                    self.slots[cursor] = self.slots[cursor + 1].take();
+                    cursor += 1;
+                }
+                self.len -= 1;
+                self.slots[self.len] = None;
+                return Ok(());
+            }
+            index += 1;
+        }
+        Err(BlockRegistryError::NoDevice)
+    }
+
+    pub fn lookup(&self, id: BlockDeviceId) -> Option<BlockDeviceInfo> {
+        let mut index = 0usize;
+        while index < self.len {
+            if let Some(device) = self.slots[index].as_ref() {
+                let info = device.info();
+                if info.id == id {
+                    return Some(info);
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
+    pub fn lookup_by_name(&self, name: &str) -> Option<BlockDeviceInfo> {
+        let mut index = 0usize;
+        while index < self.len {
+            if let Some(device) = self.slots[index].as_ref() {
+                let info = device.info();
+                if info.name == name {
+                    return Some(info);
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
+    pub fn enumerate(&self, mut callback: impl FnMut(BlockDeviceInfo)) {
+        let mut index = 0usize;
+        while index < self.len {
+            if let Some(device) = self.slots[index].as_ref() {
+                callback(device.info());
+            }
+            index += 1;
+        }
+    }
+
+    pub fn read_blocks(
+        &mut self,
+        id: BlockDeviceId,
+        range: BlockRange,
+        buffer: &mut [u8],
+    ) -> Result<(), BlockError> {
+        let device = self.device_mut(id)?;
+        device.read_blocks(range, buffer)
+    }
+
+    pub fn write_blocks(
+        &mut self,
+        id: BlockDeviceId,
+        range: BlockRange,
+        data: &[u8],
+    ) -> Result<(), BlockError> {
+        let device = self.device_mut(id)?;
+        device.write_blocks(range, data)
+    }
+
+    pub fn flush(&mut self, id: BlockDeviceId) -> Result<(), BlockError> {
+        self.device_mut(id)?.flush()
+    }
+
+    fn device_mut(&mut self, id: BlockDeviceId) -> Result<&mut dyn BlockDevice, BlockError> {
+        let mut index = 0usize;
+        while index < self.len {
+            if self.slots[index].as_ref().map(|d| d.info().id) == Some(id) {
+                return Ok(self.slots[index].as_deref_mut().expect("slot checked"));
+            }
+            index += 1;
+        }
+        Err(BlockError::NoDevice)
+    }
+}
+
+impl<const CAPACITY: usize> Default for FixedBlockDeviceRegistry<'_, CAPACITY> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +813,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fixed_registry_registers_looks_up_enumerates_and_dispatches() {
+        let mut device = MockBlockDevice::new(2, 512);
+        device.info = BlockDeviceInfo::named(
+            BlockDeviceId::new(42),
+            "sata0",
+            BlockDeviceKind::SataDisk,
+            BlockSize::new(512).unwrap(),
+            SectorCount::new(2),
+            false,
+            true,
+        );
+        let mut registry: FixedBlockDeviceRegistry<2> = FixedBlockDeviceRegistry::new();
+        registry.register(&mut device).unwrap();
+        assert_eq!(
+            registry.lookup(BlockDeviceId::new(42)).unwrap().name,
+            "sata0"
+        );
+        assert_eq!(
+            registry.lookup_by_name("sata0").unwrap().kind,
+            BlockDeviceKind::SataDisk
+        );
+        let mut seen = 0;
+        registry.enumerate(|info| {
+            assert_eq!(info.block_count, 2);
+            seen += 1;
+        });
+        assert_eq!(seen, 1);
+        let data = [0x5au8; 512];
+        registry
+            .write_blocks(
+                BlockDeviceId::new(42),
+                BlockRange::new(Lba::new(0), SectorCount::new(1)),
+                &data,
+            )
+            .unwrap();
+        let mut out = [0u8; 512];
+        registry
+            .read_blocks(
+                BlockDeviceId::new(42),
+                BlockRange::new(Lba::new(0), SectorCount::new(1)),
+                &mut out,
+            )
+            .unwrap();
+        assert_eq!(out, data);
+        assert_eq!(registry.unregister(BlockDeviceId::new(42)), Ok(()));
+        assert_eq!(registry.lookup(BlockDeviceId::new(42)), None);
+    }
     #[test]
     fn queue_submit_and_complete_preserves_fifo_order() {
         let mut queue = BlockQueue::new();
