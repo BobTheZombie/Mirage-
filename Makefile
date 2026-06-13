@@ -375,3 +375,27 @@ qemu-nvme-qfs: $(BUILD_DIR)/nvme-qfs.img image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_KERNEL_CMDLINE="root=nvme0n1" MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(BUILD_DIR)/nvme-qfs.img,if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=mirage-nvme0" tools/run-qemu.sh
 
 qemu-m2-qfs: qemu-nvme-qfs
+
+EXT4_ROOT_IMAGE := $(BUILD_DIR)/ext4-root.img
+EXT4_ROOT_SIZE ?= 128M
+
+.PHONY: ext4-image qemu-ahci-ext4 qemu-nvme-ext4
+
+ext4-image: spider-rs
+	@set -eu; \
+	mkdir -p $(BUILD_DIR)/ext4-staging/sbin $(BUILD_DIR)/ext4-staging/etc/spider/system $(BUILD_DIR)/ext4-staging/bin; \
+	cp $(BUILD_DIR)/rootfs/sbin/spider-rs $(BUILD_DIR)/ext4-staging/sbin/spider-rs; \
+	cp userspace/spider-rs/units/* $(BUILD_DIR)/ext4-staging/etc/spider/system/; \
+	printf '#!/bin/sh\necho hello from GNU/Mirage ext4 rootfs\n' > $(BUILD_DIR)/ext4-staging/bin/hello; \
+	chmod +x $(BUILD_DIR)/ext4-staging/bin/hello; \
+	truncate -s $(EXT4_ROOT_SIZE) $(EXT4_ROOT_IMAGE); \
+	if command -v mkfs.ext4 >/dev/null 2>&1; then mkfs.ext4 -F -O '^has_journal' -d $(BUILD_DIR)/ext4-staging $(EXT4_ROOT_IMAGE); \
+	elif command -v mke2fs >/dev/null 2>&1; then mke2fs -t ext4 -F -O '^has_journal' -d $(BUILD_DIR)/ext4-staging $(EXT4_ROOT_IMAGE); \
+	else echo 'mkfs.ext4 or mke2fs is required to create $(EXT4_ROOT_IMAGE)' >&2; exit 1; fi; \
+	echo 'Created $(EXT4_ROOT_IMAGE) with /sbin/spider-rs, Spider units, and /bin/hello (non-journaled for Mirage-safe rw experiments).'
+
+qemu-ahci-ext4: ext4-image image
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_KERNEL_CMDLINE="root=ext4:sata0" MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(EXT4_ROOT_IMAGE),if=none,id=sata0,format=raw -device ich9-ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0" tools/run-qemu.sh
+
+qemu-nvme-ext4: ext4-image image
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_KERNEL_CMDLINE="root=ext4:nvme0n1" MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(EXT4_ROOT_IMAGE),if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=mirage-nvme0" tools/run-qemu.sh

@@ -30,6 +30,10 @@ use crate::arch::x86_64::{
     boot::{BootInfo, BootModules, FramebufferInfo},
     clock, ThreadRunOutcome,
 };
+use crate::kernel::boot_phase::{
+    boot_phase_detected, boot_phase_failed, boot_phase_online, boot_phase_skipped,
+    boot_phase_start, BootPhase,
+};
 use crate::kernel::cpu::CpuCoreState;
 use crate::kernel::device::{
     DeviceDescriptor, DeviceError as DriverError, DeviceId, DeviceKind, DeviceManager,
@@ -247,11 +251,27 @@ impl RootFileSystem {
         &mut self,
         device: &'static dyn crate::kernel::device::BlockStorageDevice,
     ) -> Result<(), VfsError> {
+        boot_phase_start(BootPhase::Ext4);
         let mut superblock = [0u8; 1024];
-        read_ext4_superblock(device, &mut superblock)?;
-        let backend = Ext4Backend::mount(device, &superblock, SsdUsbOptions::flash_friendly(8))
-            .map_err(|_| VfsError::Unsupported)?;
+        if let Err(error) = read_ext4_superblock(device, &mut superblock) {
+            boot_phase_skipped(BootPhase::Ext4, "superblock unavailable");
+            return Err(error);
+        }
+        let backend =
+            match Ext4Backend::mount(device, &superblock, SsdUsbOptions::flash_friendly(8)) {
+                Ok(backend) => backend,
+                Err(crate::kernel::fs::Ext4Error::BadMagic) => {
+                    boot_phase_skipped(BootPhase::Ext4, "no ext4 superblock");
+                    return Err(VfsError::InvalidSuperblock);
+                }
+                Err(_) => {
+                    boot_phase_failed(BootPhase::Ext4, "mount failed");
+                    return Err(VfsError::Unsupported);
+                }
+            };
+        boot_phase_detected(BootPhase::Ext4);
         *self = Self::Ext4(backend);
+        boot_phase_online(BootPhase::Ext4);
         Ok(())
     }
 }
@@ -847,11 +867,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             let descriptor = descriptors[device_index];
             if descriptor.kind == DeviceKind::BlockStorage {
                 if let Ok(device) = self.devices.block_storage_static(descriptor.id) {
-                    if self.root_fs.mount_qfs(false, device).is_ok() {
-                        return Ok(RootMountSource::DiscoveredBlockQfs);
-                    }
                     if self.root_fs.mount_ext4(device).is_ok() {
                         return Ok(RootMountSource::DiscoveredBlockExt4);
+                    }
+                    if self.root_fs.mount_qfs(false, device).is_ok() {
+                        return Ok(RootMountSource::DiscoveredBlockQfs);
                     }
                 }
             }
@@ -859,11 +879,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         }
 
         let built_in = crate::kernel::device::built_in_block_storage();
-        if self.root_fs.mount_qfs(false, built_in).is_ok() {
-            return Ok(RootMountSource::DiscoveredBlockQfs);
-        }
         if self.root_fs.mount_ext4(built_in).is_ok() {
             return Ok(RootMountSource::DiscoveredBlockExt4);
+        }
+        if self.root_fs.mount_qfs(false, built_in).is_ok() {
+            return Ok(RootMountSource::DiscoveredBlockQfs);
         }
         Ok(RootMountSource::BuiltInBlockQfs)
     }

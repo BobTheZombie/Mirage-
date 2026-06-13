@@ -11,7 +11,7 @@ use crate::kernel::sync::SpinLock;
 /// Maximum number of boot subsystem records tracked without allocation.
 pub const BOOT_PHASE_CAPACITY: usize = 64;
 /// Current number of canonical Mirage boot phases.
-pub const BOOT_PHASE_COUNT: usize = 53;
+pub const BOOT_PHASE_COUNT: usize = 54;
 
 /// Coarse subsystem ownership used by boot rendering and future debug queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +66,7 @@ pub enum BootPhase {
     Ahci,
     SataDisk,
     Qfs,
+    Ext4,
     I8042,
     Ps2Keyboard,
     Xhci,
@@ -112,6 +113,7 @@ impl BootPhase {
             Self::Ahci => "AHCI",
             Self::SataDisk => "SATA Disk",
             Self::Qfs => "QFS",
+            Self::Ext4 => "ext4",
             Self::UsbCore => "USB Core",
             Self::UsbHid => "USB HID",
             Self::UsbKeyboard => "USB Keyboard",
@@ -565,6 +567,13 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
     ),
     descriptor(BootPhase::Qfs, "QFS", SubsystemCategory::Storage, false, 3),
     descriptor(
+        BootPhase::Ext4,
+        "ext4",
+        SubsystemCategory::Storage,
+        false,
+        3,
+    ),
+    descriptor(
         BootPhase::I8042,
         "I8042",
         SubsystemCategory::Input,
@@ -782,6 +791,7 @@ pub fn boot_register_compiled_subsystems() {
         register_phase(BootPhase::SataDisk);
     }
     register_phase(BootPhase::Qfs);
+    register_phase(BootPhase::Ext4);
     #[cfg(feature = "hw-i8042")]
     register_phase(BootPhase::I8042);
     #[cfg(feature = "hw-ps2-keyboard")]

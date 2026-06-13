@@ -28,10 +28,30 @@ pub const EXT4_N_BLOCKS: usize = 15;
 pub const EXT4_INODE_BLOCK_BYTES: usize = EXT4_N_BLOCKS * 4;
 pub const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
 pub const EXT4_INDEX_FL: u32 = 0x0000_1000;
+pub const EXT4_FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0000_0004;
+pub const EXT4_FEATURE_COMPAT_DIR_INDEX: u32 = 0x0000_0020;
+pub const EXT4_FEATURE_INCOMPAT_FILETYPE: u32 = 0x0000_0002;
 pub const EXT4_FEATURE_INCOMPAT_EXTENTS: u32 = 0x0000_0040;
 pub const EXT4_FEATURE_INCOMPAT_64BIT: u32 = 0x0000_0080;
+pub const EXT4_FEATURE_INCOMPAT_FLEX_BG: u32 = 0x0000_0200;
 pub const EXT4_FEATURE_INCOMPAT_CSUM_SEED: u32 = 0x0002_0000;
+pub const EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER: u32 = 0x0000_0001;
+pub const EXT4_FEATURE_RO_COMPAT_LARGE_FILE: u32 = 0x0000_0002;
+pub const EXT4_FEATURE_RO_COMPAT_HUGE_FILE: u32 = 0x0000_0008;
 pub const EXT4_FEATURE_RO_COMPAT_METADATA_CSUM: u32 = 0x0000_0400;
+
+const EXT4_SUPPORTED_COMPAT: u32 = EXT4_FEATURE_COMPAT_HAS_JOURNAL | EXT4_FEATURE_COMPAT_DIR_INDEX;
+const EXT4_SUPPORTED_INCOMPAT: u32 = EXT4_FEATURE_INCOMPAT_FILETYPE
+    | EXT4_FEATURE_INCOMPAT_EXTENTS
+    | EXT4_FEATURE_INCOMPAT_64BIT
+    | EXT4_FEATURE_INCOMPAT_FLEX_BG
+    | EXT4_FEATURE_INCOMPAT_CSUM_SEED;
+const EXT4_SUPPORTED_RO_COMPAT_READ: u32 = EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER
+    | EXT4_FEATURE_RO_COMPAT_LARGE_FILE
+    | EXT4_FEATURE_RO_COMPAT_HUGE_FILE
+    | EXT4_FEATURE_RO_COMPAT_METADATA_CSUM;
+const EXT4_SAFE_RW_RO_COMPAT: u32 =
+    EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT4_FEATURE_RO_COMPAT_LARGE_FILE;
 pub const EXT4_EXTENT_MAGIC: u16 = 0xf30a;
 pub const EXT4_DIR_ENTRY_HEADER_LEN: usize = 8;
 pub const EXT4_MAX_NAME_LEN: usize = 255;
@@ -52,6 +72,7 @@ pub enum Ext4Error {
     InvalidDirectoryEntry,
     InvalidBitmap,
     JournalReplayNeeded,
+    UnsupportedFeature,
     NoSpace,
     Device(DeviceError),
 }
@@ -147,6 +168,64 @@ impl Ext4Timestamp {
     pub const fn unix_seconds(self) -> u64 {
         let epoch_hi = ((self.extra_nanos_epoch >> 30) & 0x3) as u64;
         ((epoch_hi << 32) | self.seconds as u64) & 0x0000_0003_ffff_ffff
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ext4MountMode {
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ext4FeaturePolicy {
+    pub requested: Ext4MountMode,
+    pub effective_read_only: bool,
+    pub unsupported_compat: u32,
+    pub unsupported_incompat: u32,
+    pub unsupported_ro_compat: u32,
+    pub journal_present: bool,
+    pub metadata_checksum_present: bool,
+}
+
+impl Ext4FeaturePolicy {
+    pub fn analyze(
+        superblock: &Ext4Superblock,
+        requested: Ext4MountMode,
+    ) -> Result<Self, Ext4Error> {
+        let unsupported_compat = superblock.feature_compat & !EXT4_SUPPORTED_COMPAT;
+        let unsupported_incompat = superblock.feature_incompat & !EXT4_SUPPORTED_INCOMPAT;
+        let unsupported_ro_compat = superblock.feature_ro_compat & !EXT4_SUPPORTED_RO_COMPAT_READ;
+        if unsupported_incompat != 0 || unsupported_ro_compat != 0 {
+            return Err(Ext4Error::UnsupportedFeature);
+        }
+
+        let journal_present = (superblock.feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) != 0;
+        let metadata_checksum_present = superblock.metadata_checksums_enabled();
+        let rw_ro_unsupported = superblock.feature_ro_compat & !EXT4_SAFE_RW_RO_COMPAT;
+        let effective_read_only = match requested {
+            Ext4MountMode::ReadOnly => true,
+            Ext4MountMode::ReadWrite => {
+                if journal_present {
+                    return Err(Ext4Error::JournalReplayNeeded);
+                }
+                rw_ro_unsupported != 0 || metadata_checksum_present || unsupported_compat != 0
+            }
+        };
+
+        Ok(Self {
+            requested,
+            effective_read_only,
+            unsupported_compat,
+            unsupported_incompat,
+            unsupported_ro_compat,
+            journal_present,
+            metadata_checksum_present,
+        })
+    }
+
+    pub const fn allows_writes(self) -> bool {
+        !self.effective_read_only
     }
 }
 
@@ -1192,6 +1271,8 @@ pub struct Ext4Backend<'a> {
     device: &'a dyn BlockStorageDevice,
     pub superblock: Ext4Superblock,
     pub options: SsdUsbOptions,
+    pub feature_policy: Ext4FeaturePolicy,
+    read_only: bool,
 }
 
 impl<'a> Ext4Backend<'a> {
@@ -1200,16 +1281,40 @@ impl<'a> Ext4Backend<'a> {
         superblock_bytes: &[u8],
         options: SsdUsbOptions,
     ) -> Result<Self, Ext4Error> {
+        Self::mount_with_mode(device, superblock_bytes, options, Ext4MountMode::ReadOnly)
+    }
+
+    pub fn mount_with_mode(
+        device: &'a dyn BlockStorageDevice,
+        superblock_bytes: &[u8],
+        options: SsdUsbOptions,
+        mode: Ext4MountMode,
+    ) -> Result<Self, Ext4Error> {
         let superblock = Ext4Superblock::parse(superblock_bytes)?;
+        let feature_policy = Ext4FeaturePolicy::analyze(&superblock, mode)?;
         let block_size = superblock.block_size()? as usize;
-        if block_size == 0 || block_size % device.sector_size() != 0 {
+        if block_size == 0
+            || block_size > MAX_METADATA_BLOCK_BYTES
+            || block_size % device.sector_size() != 0
+        {
             return Err(Ext4Error::InvalidBlockSize);
         }
-        Ok(Self {
+        let backend = Self {
             device,
             superblock,
             options,
-        })
+            feature_policy,
+            read_only: feature_policy.effective_read_only,
+        };
+        let root = backend.read_inode_record(InodeId::ROOT)?;
+        if root.mode.kind() != InodeKind::Directory {
+            return Err(Ext4Error::InvalidInode);
+        }
+        Ok(backend)
+    }
+
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn plan_extent_first_allocation(&self, goal: AllocationGoal) -> ExtentAllocationPlan {
@@ -1308,9 +1413,6 @@ impl<'a> Ext4Backend<'a> {
 }
 
 const EXT4_ROOT_INODE: u64 = 2;
-const MAX_EXT4_EXTENTS_PER_INODE: usize =
-    (EXT4_INODE_BLOCK_BYTES - ExtentHeader::SIZE) / Extent::SIZE;
-
 impl From<Ext4Error> for VfsError {
     fn from(value: Ext4Error) -> Self {
         match value {
@@ -1323,9 +1425,10 @@ impl From<Ext4Error> for VfsError {
             | Ext4Error::InvalidInode
             | Ext4Error::InvalidDirectoryEntry
             | Ext4Error::InvalidBitmap => VfsError::InvalidArgument,
-            Ext4Error::JournalReplayNeeded => VfsError::Busy,
+            Ext4Error::JournalReplayNeeded => VfsError::JournalRequired,
+            Ext4Error::UnsupportedFeature => VfsError::UnsupportedFeature,
             Ext4Error::NoSpace => VfsError::NoSpace,
-            Ext4Error::Device(_) => VfsError::Unsupported,
+            Ext4Error::Device(_) => VfsError::Io,
         }
     }
 }
@@ -1421,18 +1524,7 @@ impl<'a> Ext4Backend<'a> {
         logical_block: u64,
     ) -> Result<Option<u64>, Ext4Error> {
         if inode.uses_extents() {
-            let tree = ExtentTree::<MAX_EXT4_EXTENTS_PER_INODE>::parse_leaf(&inode.block)?;
-            let mut idx = 0usize;
-            while idx < tree.header.entries as usize {
-                let extent = tree.extents[idx].ok_or(Ext4Error::InvalidExtent)?;
-                let start = extent.logical_block as u64;
-                let end = start.saturating_add(extent.len as u64);
-                if logical_block >= start && logical_block < end {
-                    return Ok(Some(extent.start + logical_block - start));
-                }
-                idx += 1;
-            }
-            return Ok(None);
+            return self.extent_data_block_for(&inode.block, logical_block, 0);
         }
 
         if logical_block < 12 {
@@ -1443,8 +1535,98 @@ impl<'a> Ext4Backend<'a> {
             } else {
                 Ok(Some(block))
             }
+        } else if logical_block < 12 + self.indirect_entries_per_block()? {
+            self.legacy_single_indirect_data_block_for(inode, logical_block - 12)
         } else {
-            Err(Ext4Error::InvalidExtent)
+            Err(Ext4Error::UnsupportedFeature)
+        }
+    }
+
+    fn extent_data_block_for(
+        &self,
+        node: &[u8],
+        logical_block: u64,
+        depth_seen: u16,
+    ) -> Result<Option<u64>, Ext4Error> {
+        let header = ExtentHeader::parse(node)?;
+        if header.entries > header.max_entries
+            || header.entries as usize > self.max_extent_entries(node.len())
+        {
+            return Err(Ext4Error::InvalidExtent);
+        }
+        if header.depth == 0 {
+            let mut idx = 0usize;
+            while idx < header.entries as usize {
+                let off = ExtentHeader::SIZE + idx * Extent::SIZE;
+                let extent = Extent::parse(
+                    node.get(off..off + Extent::SIZE)
+                        .ok_or(Ext4Error::BufferTooSmall)?,
+                )?;
+                let start = extent.logical_block as u64;
+                let end = start.saturating_add(extent.len as u64);
+                if logical_block >= start && logical_block < end {
+                    return Ok(Some(extent.start + logical_block - start));
+                }
+                idx += 1;
+            }
+            return Ok(None);
+        }
+        if depth_seen >= 5 {
+            return Err(Ext4Error::InvalidExtent);
+        }
+        let mut chosen: Option<ExtentIndex> = None;
+        let mut idx = 0usize;
+        while idx < header.entries as usize {
+            let off = ExtentHeader::SIZE + idx * ExtentIndex::SIZE;
+            let index = ExtentIndex::parse(
+                node.get(off..off + ExtentIndex::SIZE)
+                    .ok_or(Ext4Error::BufferTooSmall)?,
+            )?;
+            if logical_block >= index.logical_block as u64 {
+                chosen = Some(index);
+            } else {
+                break;
+            }
+            idx += 1;
+        }
+        let chosen = chosen.ok_or(Ext4Error::InvalidExtent)?;
+        let mut block = [0u8; MAX_METADATA_BLOCK_BYTES];
+        self.read_block_into(chosen.leaf, &mut block)?;
+        let block_size = self.superblock.block_size()? as usize;
+        self.extent_data_block_for(&block[..block_size], logical_block, depth_seen + 1)
+    }
+
+    const fn max_extent_entries(&self, bytes_len: usize) -> usize {
+        (bytes_len.saturating_sub(ExtentHeader::SIZE)) / Extent::SIZE
+    }
+
+    fn indirect_entries_per_block(&self) -> Result<u64, Ext4Error> {
+        Ok(self.superblock.block_size()? as u64 / 4)
+    }
+
+    fn legacy_single_indirect_data_block_for(
+        &self,
+        inode: &InodeRecord,
+        indirect_index: u64,
+    ) -> Result<Option<u64>, Ext4Error> {
+        let indirect_block = LeCursor::new(&inode.block).u32_at(12 * 4)? as u64;
+        if indirect_block == 0 {
+            return Ok(None);
+        }
+        let block_size = self.superblock.block_size()? as usize;
+        let mut block = [0u8; MAX_METADATA_BLOCK_BYTES];
+        self.read_block_into(indirect_block, &mut block)?;
+        let offset = (indirect_index as usize)
+            .checked_mul(4)
+            .ok_or(Ext4Error::InvalidExtent)?;
+        if offset + 4 > block_size {
+            return Err(Ext4Error::InvalidExtent);
+        }
+        let physical = LeCursor::new(&block).u32_at(offset)? as u64;
+        if physical == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(physical))
         }
     }
 
@@ -1525,7 +1707,7 @@ impl<'a> FileSystem for Ext4Backend<'a> {
 
     fn super_block(&self) -> VfsSuperBlock {
         let mut superblock = self.superblock.to_vfs_superblock();
-        superblock.read_only = true;
+        superblock.read_only = self.read_only;
         superblock
     }
 
@@ -1848,6 +2030,78 @@ mod tests {
         let view = map.as_bitmap();
         assert_eq!(view.is_set(9).unwrap(), true);
         assert_eq!(view.first_zero_from(0, 16), Some(10));
+    }
+
+    fn feature_policy_superblock() -> Ext4Superblock {
+        Ext4Superblock {
+            inodes_count: 16,
+            blocks_count: 128,
+            reserved_blocks_count: 0,
+            free_blocks_count: 64,
+            free_inodes_count: 8,
+            first_data_block: 1,
+            log_block_size: 0,
+            log_cluster_size: 0,
+            blocks_per_group: 128,
+            clusters_per_group: 128,
+            inodes_per_group: 16,
+            mount_time: 0,
+            write_time: 0,
+            mount_count: 0,
+            max_mount_count: 0,
+            state: 1,
+            errors: 0,
+            minor_rev_level: 0,
+            last_check: 0,
+            check_interval: 0,
+            creator_os: 0,
+            rev_level: 1,
+            first_inode: 11,
+            inode_size: EXT4_DYNAMIC_INODE_SIZE,
+            block_group_nr: 0,
+            feature_compat: EXT4_FEATURE_COMPAT_DIR_INDEX,
+            feature_incompat: EXT4_FEATURE_INCOMPAT_FILETYPE | EXT4_FEATURE_INCOMPAT_EXTENTS,
+            feature_ro_compat: EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER
+                | EXT4_FEATURE_RO_COMPAT_LARGE_FILE,
+            uuid: [0; 16],
+            volume_name: [0; 16],
+            last_mounted: [0; 64],
+            algorithm_usage_bitmap: 0,
+            descriptor_size: 32,
+            checksum_seed: 0,
+            checksum: 0,
+        }
+    }
+
+    #[test]
+    fn feature_policy_allows_non_journaled_rw_baseline() {
+        let sb = feature_policy_superblock();
+        let policy = Ext4FeaturePolicy::analyze(&sb, Ext4MountMode::ReadWrite).unwrap();
+        assert!(policy.allows_writes());
+        assert!(!policy.journal_present);
+    }
+
+    #[test]
+    fn feature_policy_refuses_journaled_rw() {
+        let mut sb = feature_policy_superblock();
+        sb.feature_compat |= EXT4_FEATURE_COMPAT_HAS_JOURNAL;
+        assert_eq!(
+            Ext4FeaturePolicy::analyze(&sb, Ext4MountMode::ReadWrite),
+            Err(Ext4Error::JournalReplayNeeded)
+        );
+        let ro = Ext4FeaturePolicy::analyze(&sb, Ext4MountMode::ReadOnly).unwrap();
+        assert!(ro.effective_read_only);
+        assert!(ro.journal_present);
+    }
+
+    #[test]
+    fn feature_policy_rejects_unknown_incompat_bits() {
+        let mut sb = feature_policy_superblock();
+        sb.feature_incompat |= 0x8000_0000;
+        assert_eq!(
+            Ext4FeaturePolicy::analyze(&sb, Ext4MountMode::ReadOnly),
+            Err(Ext4Error::UnsupportedFeature)
+        );
     }
 
     #[test]
