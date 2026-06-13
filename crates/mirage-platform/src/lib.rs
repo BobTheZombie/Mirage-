@@ -58,6 +58,68 @@ pub enum PlatformLocation {
     Unknown,
 }
 
+/// PCI Base Address Register metadata captured during one platform PCI pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlatformPciBar {
+    pub index: u8,
+    pub raw: u64,
+    pub base: u64,
+    pub is_mmio: bool,
+    pub is_64bit: bool,
+    pub prefetchable: bool,
+}
+
+impl PlatformPciBar {
+    pub const fn empty(index: u8) -> Self {
+        Self {
+            index,
+            raw: 0,
+            base: 0,
+            is_mmio: false,
+            is_64bit: false,
+            prefetchable: false,
+        }
+    }
+
+    pub const fn mmio32(index: u8, raw: u32) -> Self {
+        Self {
+            index,
+            raw: raw as u64,
+            base: (raw as u64) & 0xffff_fff0,
+            is_mmio: true,
+            is_64bit: false,
+            prefetchable: raw & 0x08 != 0,
+        }
+    }
+
+    pub const fn mmio64(index: u8, low: u32, high: u32) -> Self {
+        let raw = ((high as u64) << 32) | low as u64;
+        Self {
+            index,
+            raw,
+            base: raw & 0xffff_ffff_ffff_fff0,
+            is_mmio: true,
+            is_64bit: true,
+            prefetchable: low & 0x08 != 0,
+        }
+    }
+
+    pub const fn io(index: u8, raw: u32) -> Self {
+        Self {
+            index,
+            raw: raw as u64,
+            base: (raw & 0xffff_fffc) as u64,
+            is_mmio: false,
+            is_64bit: false,
+            prefetchable: false,
+        }
+    }
+
+    pub const fn is_present(self) -> bool {
+        self.raw != 0 && self.base != 0
+    }
+}
+
 /// Hardware fact emitted by platform discovery.
 ///
 /// This type intentionally records presence only. It does not mean a driver was
@@ -73,6 +135,8 @@ pub struct PlatformDevice {
     pub subclass: Option<u8>,
     pub prog_if: Option<u8>,
     pub header_type: Option<u8>,
+    pub bars: [Option<PlatformPciBar>; 6],
+    pub irq_line: Option<u8>,
 }
 
 impl PlatformDevice {
@@ -91,6 +155,8 @@ impl PlatformDevice {
             subclass: None,
             prog_if: None,
             header_type: None,
+            bars: [None; 6],
+            irq_line: None,
         }
     }
 
@@ -105,6 +171,8 @@ impl PlatformDevice {
             subclass: Some(model),
             prog_if: Some(stepping),
             header_type: None,
+            bars: [None; 6],
+            irq_line: None,
         }
     }
 
@@ -135,6 +203,8 @@ impl PlatformDevice {
             subclass: Some(subclass),
             prog_if: Some(prog_if),
             header_type: Some(header_type),
+            bars: [None; 6],
+            irq_line: None,
         }
     }
 
@@ -149,6 +219,8 @@ impl PlatformDevice {
             subclass: None,
             prog_if: None,
             header_type: None,
+            bars: [None; 6],
+            irq_line: None,
         }
     }
 
@@ -162,6 +234,27 @@ impl PlatformDevice {
 
     pub const fn is_pci_id(self, vendor_id: u16, device_id: u16) -> bool {
         matches!((self.vendor_id, self.device_id), (Some(v), Some(d)) if v == vendor_id && d == device_id)
+    }
+
+    pub const fn with_bars(mut self, bars: [Option<PlatformPciBar>; 6]) -> Self {
+        self.bars = bars;
+        self
+    }
+
+    pub const fn with_irq_line(mut self, irq_line: u8) -> Self {
+        self.irq_line = Some(irq_line);
+        self
+    }
+
+    pub const fn mmio_bar(self, index: usize) -> Option<PlatformPciBar> {
+        if index < self.bars.len() {
+            match self.bars[index] {
+                Some(bar) if bar.is_mmio && bar.is_present() => Some(bar),
+                _ => None,
+            }
+        } else {
+            None
+        }
     }
 }
 
@@ -230,6 +323,14 @@ impl<const CAPACITY: usize> PlatformRegistry<CAPACITY> {
         None
     }
 
+    pub fn platform_find_pci_by_id(
+        &self,
+        vendor_id: u16,
+        device_id: u16,
+    ) -> Option<PlatformDevice> {
+        self.find_by_pci_id(vendor_id, device_id)
+    }
+
     pub fn find_by_pci_id(&self, vendor_id: u16, device_id: u16) -> Option<PlatformDevice> {
         let mut index = 0usize;
         while index < self.len {
@@ -245,6 +346,15 @@ impl<const CAPACITY: usize> PlatformRegistry<CAPACITY> {
 
     pub fn contains_pci_id(&self, vendor_id: u16, device_id: u16) -> bool {
         self.find_by_pci_id(vendor_id, device_id).is_some()
+    }
+
+    pub fn platform_find_pci_by_class(
+        &self,
+        class_code: u8,
+        subclass: u8,
+        prog_if: u8,
+    ) -> Option<PlatformDevice> {
+        self.find_pci_by_class(class_code, subclass, prog_if)
     }
 
     pub fn find_pci_by_class(
@@ -269,21 +379,68 @@ impl<const CAPACITY: usize> PlatformRegistry<CAPACITY> {
         None
     }
 
+    pub fn platform_iter_pci(&self, mut callback: impl FnMut(PlatformDevice)) {
+        let mut index = 0usize;
+        while index < self.len {
+            if let Some(device) = self.devices[index] {
+                if matches!(device.location, PlatformLocation::Pci { .. }) {
+                    callback(device);
+                }
+            }
+            index += 1;
+        }
+    }
+
     pub fn find_ahci(&self) -> Option<PlatformDevice> {
         self.find_pci_by_class(0x01, 0x06, 0x01)
+    }
+
+    pub fn platform_find_ahci_controller(&self) -> Option<PlatformDevice> {
+        self.find_ahci()
     }
 
     pub fn find_nvme(&self) -> Option<PlatformDevice> {
         self.find_pci_by_class(0x01, 0x08, 0x02)
     }
 
+    pub fn platform_find_nvme_controller(&self) -> Option<PlatformDevice> {
+        self.find_nvme()
+    }
+
     pub fn find_xhci(&self) -> Option<PlatformDevice> {
         self.find_pci_by_class(0x0c, 0x03, 0x30)
+    }
+
+    pub fn platform_find_xhci_controller(&self) -> Option<PlatformDevice> {
+        self.find_xhci()
+    }
+
+    pub fn platform_find_amd_xhci_controller(&self) -> Option<PlatformDevice> {
+        let mut found = None;
+        self.platform_iter_pci(|device| {
+            if found.is_none()
+                && device.vendor_id == Some(0x1022)
+                && device.class_code == Some(0x0c)
+                && device.subclass == Some(0x03)
+                && device.prog_if == Some(0x30)
+            {
+                found = Some(device);
+            }
+        });
+        found
+    }
+
+    pub fn platform_find_renoir_gpu(&self) -> Option<PlatformDevice> {
+        self.find_amdgpu_renoir()
     }
 
     pub fn find_amdgpu_renoir(&self) -> Option<PlatformDevice> {
         self.find_by_pci_id(0x1002, 0x1636)
             .or_else(|| self.find_by_pci_id(0x1002, 0x1638))
+    }
+
+    pub fn platform_has_amd_soc_device(&self) -> bool {
+        self.find_amd_soc_device().is_some()
     }
 
     pub fn find_amd_soc_device(&self) -> Option<PlatformDevice> {

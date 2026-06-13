@@ -1,3 +1,25 @@
+# Platform Discovery Notes
+
+Mirage platform discovery records hardware facts before policy or service binding.
+The Platform Registry is the single source for discovered CPU, ACPI, PCI, storage,
+display, USB, and input candidates.
+
+Current query helpers include:
+
+- `platform_find_pci_by_id(vendor, device)`
+- `platform_find_pci_by_class(class, subclass, prog_if)`
+- `platform_iter_pci(callback)`
+- `platform_find_xhci_controller()`
+- `platform_find_amd_xhci_controller()`
+- `platform_find_nvme_controller()`
+- `platform_find_ahci_controller()`
+- `platform_find_renoir_gpu()`
+- `platform_has_amd_soc_device()`
+
+PCI records include name, kind, location, vendor/device ID, class/subclass/prog-if,
+header type, BAR metadata, and interrupt-line metadata when available.
+
+Drivers must query the registry rather than rescanning PCI.
 # Mirage Platform Discovery
 
 Mirage separates hardware discovery from driver/service lifecycle management.

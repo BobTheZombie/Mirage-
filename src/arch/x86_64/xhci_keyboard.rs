@@ -5,19 +5,21 @@
 //! `usb-hid0`, and `usb-kbd0`.  The boundaries mirror the future supervised
 //! driver-service ownership model and avoid the old fragile inline HID init path.
 
-use crate::arch::x86_64::io::{inb, outb};
 use crate::kernel::device::{DeviceDriver, DeviceError, DeviceKind};
 use crate::kernel::input::{
     copy_mirage_events, mark_source_online, publish_keyboard_event, InputRawSource, KeyCode,
     KeyModifiers, KeyState, KeyboardEvent,
 };
 use crate::subkernel::{DeviceSecurity, SecurityClass};
+use mirage_platform::{
+    PlatformDevice, PlatformLocation, PlatformRegistry, MAX_PLATFORM_DEVICE_EVENTS,
+};
 
 const PCI_CONFIG_ADDRESS: u16 = 0xcf8;
 const PCI_CONFIG_DATA: u16 = 0xcfc;
-const PCI_CLASS_SERIAL_BUS: u8 = 0x0c;
-const PCI_SUBCLASS_USB: u8 = 0x03;
-const PCI_PROGIF_XHCI: u8 = 0x30;
+pub const PCI_CLASS_SERIAL_BUS: u8 = 0x0c;
+pub const PCI_SUBCLASS_USB: u8 = 0x03;
+pub const PCI_PROGIF_XHCI: u8 = 0x30;
 
 const USBSTS_HCH: u32 = 1 << 0;
 const USBCMD_RUN: u32 = 1 << 0;
@@ -108,6 +110,10 @@ impl DriverError {
 
 pub trait DriverModule {
     fn descriptor(&self) -> DriverModuleDescriptor;
+    fn preflight_skip(&self) -> Option<&'static str> {
+        None
+    }
+
     fn init(&self) -> Result<(), DriverError>;
     fn start(&self) -> Result<(), DriverError>;
     fn stop(&self) -> Result<(), DriverError>;
@@ -294,8 +300,16 @@ impl DriverModule for XhciHostModule {
         }
     }
 
+    fn preflight_skip(&self) -> Option<&'static str> {
+        if selected_xhci_function().is_none() {
+            Some("no xHCI controller")
+        } else {
+            None
+        }
+    }
+
     fn init(&self) -> Result<(), DriverError> {
-        let Some(function) = find_xhci_controller() else {
+        let Some(function) = selected_xhci_function() else {
             crate::kprintln!("[xhci] skipped: no xHCI controller");
             USB_DRIVER_STACK
                 .lock()
@@ -311,7 +325,8 @@ impl DriverModule for XhciHostModule {
             function.function
         );
         enable_pci_command(function);
-        let Some(bar0) = pci_mmio_bar_base(function, 0x10) else {
+        let Some(bar0) = selected_xhci_mmio_bar().or_else(|| pci_mmio_bar_base(function, 0x10))
+        else {
             USB_DRIVER_STACK
                 .lock()
                 .registry
@@ -421,7 +436,7 @@ impl DriverModule for UsbCoreModule {
                         id: (found + 1) as u8,
                         port,
                         endpoint_count: 1,
-                        is_hid_boot_keyboard_candidate: true,
+                        is_hid_boot_keyboard_candidate: false,
                     };
                     if USB_DRIVER_STACK.lock().add_device(record) {
                         found += 1;
@@ -642,6 +657,14 @@ impl DriverModule for UsbKeyboardModule {
     }
 }
 
+pub fn initialize_usb_driver_stack_with_platform(
+    hhdm_offset: Option<u64>,
+    platform: &PlatformRegistry<MAX_PLATFORM_DEVICE_EVENTS>,
+) -> UsbStackBootStatus {
+    select_xhci_from_platform(platform);
+    initialize_usb_driver_stack(hhdm_offset)
+}
+
 pub fn initialize_usb_driver_stack(hhdm_offset: Option<u64>) -> UsbStackBootStatus {
     set_current_hhdm_offset(hhdm_offset);
     {
@@ -699,7 +722,7 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
         let dependency = descriptor.dependencies[dep_index];
         let dependency_state = crate::kernel::boot_phase::boot_phase_state(dependency);
         match dependency_state {
-            PhaseState::Ok | PhaseState::Online | PhaseState::Enabled => {}
+            PhaseState::Ok | PhaseState::Online | PhaseState::Enabled | PhaseState::Running => {}
             PhaseState::Failed => {
                 let reason = "required dependency failed";
                 let mut stack = USB_DRIVER_STACK.lock();
@@ -734,6 +757,15 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
             }
         }
         dep_index += 1;
+    }
+
+    if let Some(reason) = module.preflight_skip() {
+        let mut stack = USB_DRIVER_STACK.lock();
+        stack.registry.set_status(slot, DriverStatus::Skipped);
+        drop(stack);
+        boot_phase_skipped(descriptor.phase, reason);
+        crate::kprintln!("[usbdrv] {} skipped: {}", descriptor.name, reason);
+        return ModuleInitStatus::Skipped(reason);
     }
 
     boot_phase_start(descriptor.phase);
@@ -784,6 +816,71 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
 
 static CURRENT_HHDM_OFFSET: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(u64::MAX);
+static SELECTED_XHCI_FUNCTION: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(u32::MAX);
+static SELECTED_XHCI_MMIO_BAR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+fn select_xhci_from_platform(platform: &PlatformRegistry<MAX_PLATFORM_DEVICE_EVENTS>) {
+    if let Some(device) = platform.platform_find_xhci_controller() {
+        if let Some(function) = pci_function_from_platform_device(device) {
+            SELECTED_XHCI_FUNCTION.store(
+                encode_pci_function(function),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            let mmio = device.mmio_bar(0).map(|bar| bar.base).unwrap_or(0);
+            SELECTED_XHCI_MMIO_BAR.store(mmio, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    }
+    SELECTED_XHCI_FUNCTION.store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
+    SELECTED_XHCI_MMIO_BAR.store(0, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn pci_function_from_platform_device(device: PlatformDevice) -> Option<PciFunction> {
+    match device.location {
+        PlatformLocation::Pci {
+            bus,
+            device,
+            function,
+        } => Some(PciFunction {
+            bus,
+            device,
+            function,
+        }),
+        _ => None,
+    }
+}
+
+const fn encode_pci_function(function: PciFunction) -> u32 {
+    ((function.bus as u32) << 16) | ((function.device as u32) << 8) | function.function as u32
+}
+
+const fn decode_pci_function(raw: u32) -> PciFunction {
+    PciFunction {
+        bus: ((raw >> 16) & 0xff) as u8,
+        device: ((raw >> 8) & 0xff) as u8,
+        function: (raw & 0xff) as u8,
+    }
+}
+
+fn selected_xhci_function() -> Option<PciFunction> {
+    let raw = SELECTED_XHCI_FUNCTION.load(core::sync::atomic::Ordering::Relaxed);
+    if raw == u32::MAX {
+        None
+    } else {
+        Some(decode_pci_function(raw))
+    }
+}
+
+fn selected_xhci_mmio_bar() -> Option<u64> {
+    let raw = SELECTED_XHCI_MMIO_BAR.load(core::sync::atomic::Ordering::Relaxed);
+    if raw == 0 {
+        None
+    } else {
+        Some(raw)
+    }
+}
 
 fn set_current_hhdm_offset(offset: Option<u64>) {
     CURRENT_HHDM_OFFSET.store(
@@ -841,6 +938,14 @@ impl UsbHidKeyboardDriver {
 
     pub fn initialize_stack(&self, hhdm_offset: Option<u64>) -> UsbStackBootStatus {
         initialize_usb_driver_stack(hhdm_offset)
+    }
+
+    pub fn initialize_stack_with_platform(
+        &self,
+        hhdm_offset: Option<u64>,
+        platform: &PlatformRegistry<MAX_PLATFORM_DEVICE_EVENTS>,
+    ) -> UsbStackBootStatus {
+        initialize_usb_driver_stack_with_platform(hhdm_offset, platform)
     }
 
     pub fn ingest_boot_report(
@@ -1138,50 +1243,7 @@ pub fn hid_usage_ascii(usage: u8, modifiers: KeyModifiers) -> Option<u8> {
     })
 }
 
-fn find_xhci_controller() -> Option<PciFunction> {
-    // Trust only bus 0 until bridge bus discovery exists. Follow PCI rules:
-    // read function 0 first and scan functions 1..7 only for multifunction devices.
-    let bus = 0u8;
-    let mut device = 0u8;
-    while device <= 31 {
-        let function0 = PciFunction {
-            bus,
-            device,
-            function: 0,
-        };
-        let id0 = pci_read_u32(function0, 0x00);
-        if (id0 & 0xffff) as u16 != 0xffff {
-            if is_xhci_pci_function(function0) {
-                return Some(function0);
-            }
-
-            let header_type = ((pci_read_u32(function0, 0x0c) >> 16) & 0xff) as u8;
-            if (header_type & 0x80) != 0 {
-                let mut function = 1u8;
-                while function <= 7 {
-                    let candidate = PciFunction {
-                        bus,
-                        device,
-                        function,
-                    };
-                    let id = pci_read_u32(candidate, 0x00);
-                    if (id & 0xffff) as u16 != 0xffff && is_xhci_pci_function(candidate) {
-                        return Some(candidate);
-                    }
-                    function += 1;
-                }
-            }
-        }
-        device += 1;
-    }
-    None
-}
-
-fn is_xhci_pci_function(function: PciFunction) -> bool {
-    let class_reg = pci_read_u32(function, 0x08);
-    let class = (class_reg >> 24) as u8;
-    let subclass = (class_reg >> 16) as u8;
-    let prog_if = (class_reg >> 8) as u8;
+pub const fn is_xhci_class(class: u8, subclass: u8, prog_if: u8) -> bool {
     class == PCI_CLASS_SERIAL_BUS && subclass == PCI_SUBCLASS_USB && prog_if == PCI_PROGIF_XHCI
 }
 
@@ -1426,6 +1488,87 @@ unsafe fn wait_port_bit(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct XhciTrb {
+    pub parameter: u64,
+    pub status: u32,
+    pub control: u32,
+}
+
+impl XhciTrb {
+    pub const fn new(parameter: u64, status: u32, trb_type: u8, cycle: bool) -> Self {
+        let mut control = (trb_type as u32) << 10;
+        if cycle {
+            control |= 1;
+        }
+        Self {
+            parameter,
+            status,
+            control,
+        }
+    }
+
+    pub const fn trb_type(self) -> u8 {
+        ((self.control >> 10) & 0x3f) as u8
+    }
+
+    pub const fn cycle(self) -> bool {
+        self.control & 1 != 0
+    }
+
+    pub const fn words(self) -> [u32; 4] {
+        [
+            self.parameter as u32,
+            (self.parameter >> 32) as u32,
+            self.status,
+            self.control,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct XhciRingCursor {
+    index: usize,
+    cycle: bool,
+    capacity: usize,
+}
+
+impl XhciRingCursor {
+    pub const fn new(capacity: usize) -> Self {
+        Self {
+            index: 0,
+            cycle: true,
+            capacity,
+        }
+    }
+
+    pub const fn index(self) -> usize {
+        self.index
+    }
+    pub const fn cycle(self) -> bool {
+        self.cycle
+    }
+
+    pub fn advance(&mut self) {
+        if self.capacity == 0 {
+            return;
+        }
+        self.index += 1;
+        if self.index >= self.capacity {
+            self.index = 0;
+            self.cycle = !self.cycle;
+        }
+    }
+}
+
+pub const TRB_TYPE_NOOP_COMMAND: u8 = 23;
+pub const TRB_TYPE_ENABLE_SLOT_COMMAND: u8 = 9;
+pub const TRB_TYPE_ADDRESS_DEVICE_COMMAND: u8 = 11;
+pub const TRB_TYPE_CONFIGURE_ENDPOINT_COMMAND: u8 = 12;
+pub const TRB_TYPE_COMMAND_COMPLETION_EVENT: u8 = 33;
+pub const TRB_TYPE_TRANSFER_EVENT: u8 = 32;
+pub const TRB_TYPE_PORT_STATUS_CHANGE_EVENT: u8 = 34;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UsbDeviceDescriptor {
     pub vendor_id: u16,
     pub product_id: u16,
@@ -1589,5 +1732,33 @@ mod tests {
             scan_configuration_descriptor(&malformed),
             Err(DriverError::DescriptorMalformed)
         );
+    }
+
+    #[test]
+    fn trb_packing_preserves_type_and_cycle() {
+        let trb = XhciTrb::new(0x1122_3344_5566_7788, 8, TRB_TYPE_NOOP_COMMAND, true);
+        assert_eq!(trb.words()[0], 0x5566_7788);
+        assert_eq!(trb.words()[1], 0x1122_3344);
+        assert_eq!(trb.trb_type(), TRB_TYPE_NOOP_COMMAND);
+        assert!(trb.cycle());
+    }
+
+    #[test]
+    fn ring_cursor_toggles_cycle_on_wrap() {
+        let mut cursor = XhciRingCursor::new(2);
+        assert_eq!(cursor.index(), 0);
+        assert!(cursor.cycle());
+        cursor.advance();
+        assert_eq!(cursor.index(), 1);
+        assert!(cursor.cycle());
+        cursor.advance();
+        assert_eq!(cursor.index(), 0);
+        assert!(!cursor.cycle());
+    }
+
+    #[test]
+    fn xhci_class_match_requires_programming_interface() {
+        assert!(is_xhci_class(0x0c, 0x03, 0x30));
+        assert!(!is_xhci_class(0x0c, 0x03, 0x20));
     }
 }

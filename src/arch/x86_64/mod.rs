@@ -4,6 +4,8 @@
 //! control to higher-level kernel subsystems.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+#[cfg(not(feature = "emergency-boot"))]
+use mirage_platform::PlatformPciBar;
 
 #[cfg(feature = "hw-laptop-hotkeys")]
 use crate::arch::x86_64::acpi_ec::{AcpiEcStatus, ACPI_EC_HOTKEY_DRIVER};
@@ -442,6 +444,8 @@ struct PciProbeDevice {
     subclass: u8,
     prog_if: u8,
     header_type: u8,
+    bars: [Option<PlatformPciBar>; 6],
+    irq_line: u8,
 }
 
 impl PciProbeDevice {
@@ -501,6 +505,8 @@ impl PciProbeDevice {
             self.prog_if,
             self.header_type,
         )
+        .with_bars(self.bars)
+        .with_irq_line(self.irq_line)
     }
 }
 
@@ -576,6 +582,47 @@ const fn pci_class_fields(class_reg: u32) -> PciClassFields {
 #[cfg(not(feature = "emergency-boot"))]
 const fn pci_header_type(header_reg: u32) -> u8 {
     ((header_reg >> 16) & 0xff) as u8
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn pci_probe_bars(function: PciProbeFunction, header_type: u8) -> [Option<PlatformPciBar>; 6] {
+    let mut bars = [None; 6];
+    if (header_type & 0x7f) != 0x00 {
+        return bars;
+    }
+    let mut index = 0usize;
+    while index < 6 {
+        let offset = 0x10 + (index as u8 * 4);
+        let raw = pci_probe_read_u32(function, offset);
+        if raw == 0 {
+            index += 1;
+            continue;
+        }
+        if raw & 0x1 != 0 {
+            bars[index] = Some(PlatformPciBar::io(index as u8, raw));
+            index += 1;
+        } else {
+            let bar_type = (raw >> 1) & 0x3;
+            if bar_type == 0x2 && index + 1 < 6 {
+                let high = pci_probe_read_u32(function, offset + 4);
+                bars[index] = Some(PlatformPciBar::mmio64(index as u8, raw, high));
+                index += 2;
+            } else {
+                bars[index] = Some(PlatformPciBar::mmio32(index as u8, raw));
+                index += 1;
+            }
+        }
+    }
+    bars
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn pci_interrupt_line(function: PciProbeFunction, header_type: u8) -> u8 {
+    if (header_type & 0x7f) == 0x00 {
+        (pci_probe_read_u32(function, 0x3c) & 0xff) as u8
+    } else {
+        0xff
+    }
 }
 
 #[cfg(not(feature = "emergency-boot"))]
@@ -675,6 +722,8 @@ fn pci_probe_function(function: PciProbeFunction) -> Option<PciProbeDevice> {
         subclass: class.subclass,
         prog_if: class.prog_if,
         header_type,
+        bars: pci_probe_bars(function, header_type),
+        irq_line: pci_interrupt_line(function, header_type),
     })
 }
 
@@ -896,7 +945,8 @@ fn initialize_input_hardware(
 
     #[cfg(feature = "hw-usb-hid")]
     {
-        let usb_status = USB_HID_KEYBOARD_DRIVER.initialize_stack(boot_info.hhdm_offset);
+        let usb_status =
+            USB_HID_KEYBOARD_DRIVER.initialize_stack_with_platform(boot_info.hhdm_offset, platform);
         mark_driver_phase(
             BootPhase::Xhci,
             usb_status.xhci,
