@@ -312,6 +312,45 @@ impl PciBar {
         }
     }
 
+    pub fn from_config_raw_sized(
+        index: u8,
+        low: u32,
+        high: Option<u32>,
+        size_low: u32,
+        size_high: Option<u32>,
+    ) -> Result<Option<Self>, PciError> {
+        let decoded = match Self::from_config_raw(index, low, high)? {
+            Some(bar) => bar,
+            None => return Ok(None),
+        };
+        let length = match decoded.kind {
+            PciBarKind::IoPort => bar_size_from_mask32(size_low & 0xffff_fffc),
+            PciBarKind::Memory32 => bar_size_from_mask32(size_low & 0xffff_fff0),
+            PciBarKind::Memory64 => {
+                let high_mask = match size_high {
+                    Some(value) => value as u64,
+                    None => 0,
+                };
+                bar_size_from_mask(
+                    (high_mask << 32) | ((size_low & 0xffff_fff0) as u64),
+                    u64::MAX,
+                )
+            }
+        };
+
+        match length {
+            Some(length) => Ok(Some(Self {
+                length: Some(length),
+                ..decoded
+            })),
+            None => Err(PciError::InvalidBarSize),
+        }
+    }
+
+    pub const fn is_memory(self) -> bool {
+        matches!(self.kind, PciBarKind::Memory32 | PciBarKind::Memory64)
+    }
+
     pub const fn index(self) -> u8 {
         self.index
     }
@@ -330,6 +369,23 @@ impl PciBar {
 
     pub const fn prefetchable(self) -> bool {
         self.prefetchable
+    }
+}
+
+const fn bar_size_from_mask32(mask: u32) -> Option<u64> {
+    bar_size_from_mask(mask as u64, u32::MAX as u64)
+}
+
+const fn bar_size_from_mask(mask: u64, width_mask: u64) -> Option<u64> {
+    if mask == 0 {
+        return None;
+    }
+
+    let size = ((!mask) & width_mask).wrapping_add(1);
+    if size == 0 || (size & (size - 1)) != 0 {
+        None
+    } else {
+        Some(size)
     }
 }
 
@@ -797,6 +853,7 @@ pub enum PciError {
     InvalidConfigOffset,
     DeviceNotPresent,
     BackendDisabled,
+    InvalidBarSize,
 }
 
 #[cfg(test)]
@@ -893,6 +950,38 @@ mod tests {
         assert_eq!(header.bar(2), None);
         assert_eq!(bar3.kind(), PciBarKind::IoPort);
         assert_eq!(bar3.base(), 0x0000_d000);
+    }
+
+    #[test]
+    fn decodes_sized_bars_from_probe_masks() {
+        let mmio32 = PciBar::from_config_raw_sized(0, 0xfebc_0000, None, 0xffff_c000, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mmio32.kind(), PciBarKind::Memory32);
+        assert_eq!(mmio32.base(), 0xfebc_0000);
+        assert_eq!(mmio32.length(), Some(0x4000));
+        assert!(mmio32.is_memory());
+
+        let mmio64 = PciBar::from_config_raw_sized(
+            1,
+            0x0000_c004,
+            Some(0x0000_0001),
+            0xffff_c000,
+            Some(0xffff_ffff),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(mmio64.kind(), PciBarKind::Memory64);
+        assert_eq!(mmio64.base(), 0x0000_0001_0000_c000);
+        assert_eq!(mmio64.length(), Some(0x4000));
+
+        let io = PciBar::from_config_raw_sized(3, 0x0000_d001, None, 0xffff_ff01, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(io.kind(), PciBarKind::IoPort);
+        assert_eq!(io.base(), 0x0000_d000);
+        assert_eq!(io.length(), Some(0x100));
+        assert!(!io.is_memory());
     }
 
     #[test]

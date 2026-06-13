@@ -12,6 +12,17 @@ use core::ptr;
 
 use mirage_cap::{CapabilityObject, CapabilityRights, CapabilitySet};
 
+/// Hardware-facing allocations and mappings must be page-granular.
+pub const PAGE_SIZE: usize = 4096;
+
+const fn is_page_aligned_usize(value: usize) -> bool {
+    (value & (PAGE_SIZE - 1)) == 0
+}
+
+const fn is_page_aligned_u64(value: u64) -> bool {
+    (value & (PAGE_SIZE as u64 - 1)) == 0
+}
+
 /// Execution backend selected for a Mirage driver or hardware-facing service.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum HardwareBackend {
@@ -298,6 +309,8 @@ pub struct DmaBuffer {
 }
 
 impl DmaBuffer {
+    pub const PAGE_SIZE: usize = PAGE_SIZE;
+
     pub fn new(
         id: HardwareResourceId,
         phys_base: PhysAddr,
@@ -308,6 +321,12 @@ impl DmaBuffer {
     ) -> Result<Self, HardwareError> {
         if bytes == 0 {
             return Err(HardwareError::EmptyRange);
+        }
+        if !is_page_aligned_u64(phys_base.get())
+            || !is_page_aligned_usize(virt_base.get())
+            || !is_page_aligned_usize(bytes)
+        {
+            return Err(HardwareError::MisalignedDma);
         }
 
         let bytes_u64 = u64::try_from(bytes).map_err(|_| HardwareError::RangeOverflow)?;
@@ -345,6 +364,12 @@ impl DmaBuffer {
 
     pub const fn direction(self) -> DmaDirection {
         self.direction
+    }
+
+    pub const fn is_page_aligned(self) -> bool {
+        is_page_aligned_u64(self.phys_base.get())
+            && is_page_aligned_usize(self.virt_base.get())
+            && is_page_aligned_usize(self.bytes)
     }
 }
 
@@ -467,6 +492,7 @@ pub enum HardwareError {
     OutOfRange,
     MisalignedAccess,
     InvalidPciBar,
+    MisalignedDma,
     BackendDisabled,
     MissingCapability,
     InsufficientCapabilityRights,
@@ -639,7 +665,7 @@ mod tests {
             HardwareResourceId::new(7),
             PhysAddr::new(0x3000),
             VirtAddr::new(0x4000),
-            0x80,
+            0x1000,
             DmaDirection::Bidirectional,
             &authority,
         )
@@ -665,6 +691,34 @@ mod tests {
                 &authority,
             ),
             Err(HardwareError::InsufficientCapabilityRights)
+        );
+    }
+
+    #[test]
+    fn dma_buffers_must_be_page_aligned() {
+        let authority = capabilities();
+
+        assert_eq!(
+            DmaBuffer::new(
+                HardwareResourceId::new(7),
+                PhysAddr::new(0x3001),
+                VirtAddr::new(0x4000),
+                0x1000,
+                DmaDirection::Bidirectional,
+                &authority,
+            ),
+            Err(HardwareError::MisalignedDma)
+        );
+        assert_eq!(
+            DmaBuffer::new(
+                HardwareResourceId::new(7),
+                PhysAddr::new(0x3000),
+                VirtAddr::new(0x4000),
+                0x80,
+                DmaDirection::Bidirectional,
+                &authority,
+            ),
+            Err(HardwareError::MisalignedDma)
         );
     }
 
