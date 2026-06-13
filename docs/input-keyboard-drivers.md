@@ -1,3 +1,21 @@
+# Keyboard Driver Notes
+
+Mirage has separate PS/2 and USB HID input paths that publish common keyboard
+events. PS/2 remains independent and must not regress while USB matures.
+
+USB path:
+
+```text
+Platform Registry xHCI candidate
+  -> xhci-host0
+  -> usb-core0
+  -> usb-hid0
+  -> usb-kbd0
+  -> MirageInputEvent / poll_debug_escape()
+```
+
+`usb-kbd0` is Online only after a descriptor-backed HID boot keyboard is bound and
+endpoint polling is scheduled. It must not wait for a keypress during init.
 # Mirage Hardware Keyboard Drivers
 
 Mirage now has an early, no-userspace input path for laptop and QEMU keyboards.

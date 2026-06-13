@@ -302,6 +302,17 @@ qemu-usb-none: config-generate image
 
 qemu-usb-kbd: qemu-keyboard-usb
 
+qemu-usb-xhci: override QEMU_FEATURES := hw-usb-hid
+qemu-usb-xhci: config-generate image
+	MIRAGE_QEMU_EXTRA_ARGS="-device qemu-xhci" \
+	MIRAGE_QEMU_SERIAL_ARGS="-serial stdio" \
+	MIRAGE_QEMU_DEBUG_ARGS="-d int,cpu_reset -D build/qemu.log" \
+	MIRAGE_REUSE_IMAGE=1 \
+	MIRAGE_ISO_IMAGE=$(ISO_IMAGE) \
+	tools/run-qemu.sh
+
+qemu-usb-keyboard: qemu-keyboard-usb
+
 qemu-keyboard-usb: override QEMU_FEATURES := hw-usb-hid
 qemu-keyboard-usb: config-generate image
 	MIRAGE_QEMU_EXTRA_ARGS="-device qemu-xhci -device usb-kbd" \
