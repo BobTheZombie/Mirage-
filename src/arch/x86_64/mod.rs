@@ -928,9 +928,23 @@ fn initialize_storage_hardware(
                         info.block_count
                     );
                 }
-                ahci::AhciBootStatus::NoDisk => {
+                ahci::AhciBootStatus::NoDisk { atapi_detected } => {
                     boot_phase_ok(BootPhase::Ahci);
                     boot_phase_skipped(BootPhase::SataDisk, "no SATA disk detected");
+                    if atapi_detected {
+                        boot_phase_detected(BootPhase::Atapi);
+                        boot_phase_online(BootPhase::Atapi);
+                        boot_phase_skipped(
+                            BootPhase::OpticalDisk,
+                            "ATAPI media probing not enabled",
+                        );
+                    } else {
+                        boot_phase_skipped(BootPhase::Atapi, "no ATAPI device detected");
+                        boot_phase_skipped(
+                            BootPhase::OpticalDisk,
+                            "no ATAPI optical device detected",
+                        );
+                    }
                 }
                 ahci::AhciBootStatus::Failed(reason) => {
                     boot_phase_failed(BootPhase::Ahci, reason);
@@ -942,10 +956,14 @@ fn initialize_storage_hardware(
         {
             boot_phase_skipped(BootPhase::Ahci, "hw-ahci feature disabled");
             boot_phase_skipped(BootPhase::SataDisk, "hw-ahci feature disabled");
+            boot_phase_skipped(BootPhase::Atapi, "hw-ahci feature disabled");
+            boot_phase_skipped(BootPhase::OpticalDisk, "hw-ahci feature disabled");
         }
     } else {
         boot_phase_skipped(BootPhase::Ahci, "AHCI controller not present");
         boot_phase_skipped(BootPhase::SataDisk, "AHCI controller not present");
+        boot_phase_skipped(BootPhase::Atapi, "AHCI controller not present");
+        boot_phase_skipped(BootPhase::OpticalDisk, "AHCI controller not present");
     }
 
     if sata_online {

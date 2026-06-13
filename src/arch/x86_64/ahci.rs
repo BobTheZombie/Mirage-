@@ -48,6 +48,9 @@ const TFD_DRQ: u32 = 1 << 3;
 const TFD_ERR: u32 = 1 << 0;
 const ATA_IDENTIFY_DEVICE: u8 = 0xec;
 const ATA_READ_DMA_EXT: u8 = 0x25;
+const ATA_WRITE_DMA_EXT: u8 = 0x35;
+const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
+const ATA_IDENTIFY_PACKET_DEVICE: u8 = 0xa1;
 const SATA_SIG_ATA: u32 = 0x0000_0101;
 const SATA_SIG_ATAPI: u32 = 0xeb14_0101;
 const SATA_SIG_SEMB: u32 = 0xc33c_0101;
@@ -67,7 +70,7 @@ pub struct RegisteredBlockInfo {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AhciBootStatus {
     Online(RegisteredBlockInfo),
-    NoDisk,
+    NoDisk { atapi_detected: bool },
     Failed(&'static str),
 }
 
@@ -218,22 +221,34 @@ pub fn bring_up_first_sata_disk(
     hhdm_offset: Option<u64>,
 ) -> AhciBootStatus {
     let Some(device) = platform.platform_find_ahci_controller() else {
-        return AhciBootStatus::NoDisk;
+        return AhciBootStatus::NoDisk {
+            atapi_detected: false,
+        };
     };
     let Some(hhdm) = hhdm_offset else {
         return AhciBootStatus::Failed("HHDM unavailable for AHCI DMA buffer access");
     };
     match unsafe { bring_up_device(device, hhdm) } {
-        Ok(Some(info)) => AhciBootStatus::Online(info),
-        Ok(None) => AhciBootStatus::NoDisk,
+        Ok(scan) => match scan.sata_disk {
+            Some(info) => AhciBootStatus::Online(info),
+            None => AhciBootStatus::NoDisk {
+                atapi_detected: scan.atapi_detected,
+            },
+        },
         Err(reason) => AhciBootStatus::Failed(reason),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AhciScanResult {
+    sata_disk: Option<RegisteredBlockInfo>,
+    atapi_detected: bool,
 }
 
 unsafe fn bring_up_device(
     device: PlatformDevice,
     hhdm: u64,
-) -> Result<Option<RegisteredBlockInfo>, &'static str> {
+) -> Result<AhciScanResult, &'static str> {
     let (bus, dev, function) = pci_location(device)?;
     crate::kprintln!(
         "[ahci] pci device: {:02x}:{:02x}.{} vendor={:04x} device={:04x}",
@@ -290,6 +305,7 @@ unsafe fn bring_up_device(
         wait_clear(hba.base(), HBA_GHC, GHC_HR, "AHCI controller reset timeout")?;
     }
 
+    let mut atapi_detected = false;
     let mut port = 0u8;
     while port < 32 {
         if (pi & (1u32 << port)) != 0 {
@@ -306,13 +322,27 @@ unsafe fn bring_up_device(
             if sata_device_present(ssts) && kind == PortSignature::SataDisk {
                 crate::kprintln!("[ahci] port {} SATA disk detected", port);
                 let info = init_port_and_identify(hba.base(), hhdm, port)?;
-                return Ok(Some(info));
+                return Ok(AhciScanResult {
+                    sata_disk: Some(info),
+                    atapi_detected,
+                });
+            } else if sata_device_present(ssts) && kind == PortSignature::Atapi {
+                atapi_detected = true;
+                crate::kprintln!("[ahci] port {} ATAPI device detected; packet media probing not yet enabled in this boot path", port);
             }
         }
         port += 1;
     }
     crate::kprintln!("[ahci] SATA Disk Skipped: no SATA disk detected");
-    Ok(None)
+    if atapi_detected {
+        crate::kprintln!(
+            "[ahci] ATAPI Detected; Optical Disk Skipped: packet media probe not enabled"
+        );
+    }
+    Ok(AhciScanResult {
+        sata_disk: None,
+        atapi_detected,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -418,6 +448,37 @@ pub fn read_blocks(lba: u64, count: u16, buffer: &mut [u8]) -> Result<(), &'stat
         buffer.copy_from_slice(src);
     }
     Ok(())
+}
+
+pub fn write_blocks(
+    _lba: u64,
+    _count: u16,
+    _buffer: &[u8],
+    writes_enabled: bool,
+) -> Result<(), &'static str> {
+    let _disk = SATA0.lock().ok_or("sata0 not registered")?;
+    if !writes_enabled {
+        return Err("read-only: AHCI writes disabled by kernel policy");
+    }
+    Err("WRITE DMA EXT path requires explicit mount-rw integration")
+}
+
+pub fn flush() -> Result<(), &'static str> {
+    let disk = SATA0.lock().ok_or("sata0 not registered")?;
+    unsafe {
+        issue_command(
+            disk.mmio,
+            disk.hhdm,
+            port_base(disk.port),
+            disk.command_list_phys,
+            disk.command_table_phys,
+            disk.dma_buffer_phys,
+            ATA_FLUSH_CACHE_EXT,
+            0,
+            0,
+            1,
+        )
+    }
 }
 
 pub fn validate_read_request(
@@ -764,7 +825,7 @@ impl BlockStorageDevice for AhciSataBlockDriver {
         Err(DeviceError::Unsupported)
     }
     fn flush(&self) -> Result<(), DeviceError> {
-        Ok(())
+        flush().map_err(|_| DeviceError::Unsupported)
     }
     fn discard(&self, _first_sector: u64, _sector_count: u64) -> Result<(), DeviceError> {
         Err(DeviceError::Unsupported)

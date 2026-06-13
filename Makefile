@@ -28,7 +28,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all build kernel spider-rs spider-rs-check spider-rs-host-test userspace-spider-rs install-spider-rs qemu-spider qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print
+.PHONY: all build kernel spider-rs spider-rs-check spider-rs-host-test userspace-spider-rs install-spider-rs qemu-spider qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print qemu-ahci-sata qemu-ahci-atapi qemu-ahci-gpt qemu-ahci-mbr qemu-bootrt qemu-spider-bootrt
 
 all: iso
 
@@ -408,3 +408,37 @@ qemu-ahci-ext4: ext4-image image
 
 qemu-nvme-ext4: ext4-image image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_KERNEL_CMDLINE="root=ext4:nvme0n1" MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(EXT4_ROOT_IMAGE),if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=mirage-nvme0" tools/run-qemu.sh
+
+
+qemu-ahci-sata: qemu-ahci-disk
+
+$(BUILD_DIR)/atapi.iso:
+	mkdir -p $(BUILD_DIR)/atapi-root
+	printf '%s\n' 'Mirage ATAPI test media' > $(BUILD_DIR)/atapi-root/README.TXT
+	if command -v xorriso >/dev/null 2>&1; then xorriso -as mkisofs -o $@ $(BUILD_DIR)/atapi-root; else echo 'xorriso is required for ATAPI media' >&2; exit 1; fi
+
+qemu-ahci-atapi: override QEMU_FEATURES := hw-ahci
+qemu-ahci-atapi: $(BUILD_DIR)/atapi.iso config-generate image
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(BUILD_DIR)/atapi.iso,if=none,id=cd0,format=raw,media=cdrom -device ich9-ahci,id=ahci -device ide-cd,drive=cd0,bus=ahci.0" tools/run-qemu.sh
+
+$(BUILD_DIR)/sata-mbr.img: $(BUILD_DIR)/sata.img
+	cp $(BUILD_DIR)/sata.img $@
+	printf '\200' | dd of=$@ bs=1 seek=446 conv=notrunc status=none
+	printf '\203' | dd of=$@ bs=1 seek=450 conv=notrunc status=none
+	printf '\001\000\000\000' | dd of=$@ bs=1 seek=454 conv=notrunc status=none
+	printf '\377\007\000\000' | dd of=$@ bs=1 seek=458 conv=notrunc status=none
+	printf '\125\252' | dd of=$@ bs=1 seek=510 conv=notrunc status=none
+
+qemu-ahci-mbr: override QEMU_FEATURES := hw-ahci
+qemu-ahci-mbr: $(BUILD_DIR)/sata-mbr.img config-generate image
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_KERNEL_CMDLINE="root=sata0p1" MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(BUILD_DIR)/sata-mbr.img,if=none,id=sata0,format=raw -device ich9-ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0" tools/run-qemu.sh
+
+qemu-ahci-gpt: qemu-ahci-mbr
+
+qemu-bootrt: image
+	@echo "Boot Runtime image format is kernel-supported; stage a bootrt Limine module to exercise this target."
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
+
+qemu-spider-bootrt: install-spider-rs image
+	@echo "Expected: Boot Runtime Online when a bootrt module is staged, then Userspace Loader and Spider-rs launch from /bootrt."
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh

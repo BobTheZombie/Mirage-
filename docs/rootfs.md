@@ -19,3 +19,9 @@ Expected logs:
 ```
 
 `Online` is reserved for successful real mounts. Missing hardware is `Skipped`; detected-but-unusable hardware is `Failed`.
+
+## Boot Runtime and Device Root Selection
+
+Root selection accepts whole devices and partitions: `root=sata0`, `root=sata0p1`, `root=nvme0n1`, `root=nvme0n1p1`, `root=atapi0`, `root=qfs:sata0p1`, `root=ext4:sata0p1`, and `root=auto`.
+
+The updated auto policy mounts Boot Runtime first, launches Spider-rs from `/bootrt`, enumerates block devices, parses partitions, then attempts explicit or configured QFS/ext4 root mounting while keeping Boot Runtime available for recovery.
