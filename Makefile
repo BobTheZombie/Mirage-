@@ -368,6 +368,15 @@ $(BUILD_DIR)/nvme-qfs.img:
 	mkdir -p $(BUILD_DIR)
 	$(CARGO) run --features qfs-std --bin qfsprogs -- mkfs $@
 
+
+$(BUILD_DIR)/sata.img:
+	mkdir -p $(BUILD_DIR)
+	truncate -s 64M $@
+
+qemu-ahci-disk: override QEMU_FEATURES := hw-ahci
+qemu-ahci-disk: $(BUILD_DIR)/sata.img config-generate image
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(BUILD_DIR)/sata.img,if=none,id=sata0,format=raw -device ich9-ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0" tools/run-qemu.sh
+
 qemu-ahci-qfs: $(BUILD_DIR)/sata-qfs.img image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_KERNEL_CMDLINE="root=sata0" MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(BUILD_DIR)/sata-qfs.img,if=none,id=sata0,format=raw -device ich9-ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0" tools/run-qemu.sh
 
@@ -379,7 +388,7 @@ qemu-m2-qfs: qemu-nvme-qfs
 EXT4_ROOT_IMAGE := $(BUILD_DIR)/ext4-root.img
 EXT4_ROOT_SIZE ?= 128M
 
-.PHONY: ext4-image qemu-ahci-ext4 qemu-nvme-ext4
+.PHONY: ext4-image qemu-ahci-disk qemu-ahci-ext4 qemu-nvme-ext4
 
 ext4-image: spider-rs
 	@set -eu; \
