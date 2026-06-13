@@ -1,7 +1,9 @@
 //! Core kernel primitives: process lifecycle, scheduling, IPC routing, and
 //! multi-core orchestration.
 
+pub mod block;
 pub mod boot_phase;
+pub mod boot_runtime;
 pub mod boot_screen;
 pub mod boot_status;
 pub mod cpu;
@@ -16,8 +18,10 @@ pub mod input;
 pub mod ipc;
 pub mod memory;
 pub mod mmio;
+pub mod partition;
 pub mod platform;
 pub mod process;
+pub mod root;
 pub mod services;
 pub mod sync;
 pub mod syscall;
@@ -983,6 +987,24 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             Ok(_program) => Err(KernelError::InvalidArgument),
             Err(_) => Err(KernelError::Filesystem(VfsError::NotFound)),
         }
+    }
+
+    /// Launch Spider-rs from the immutable Boot Runtime image as a userspace task.
+    ///
+    /// This path reads bytes from RAMFS, validates the ELF entry, and creates an
+    /// MTSS-visible process. It never calls Spider-rs as a kernel function.
+    pub fn bootstrap_spider_rs_pid1_from_image(&mut self, image: &[u8]) -> KernelResult<ProcessId> {
+        if !self.mtss_initialized {
+            return Err(KernelError::InvalidArgument);
+        }
+        let entry = crate::kernel::userspace::validate_elf64(image)
+            .map_err(|_| KernelError::Filesystem(VfsError::InvalidInput))?;
+        self.spawn_task(SpawnTaskRequest {
+            parent: None,
+            entry_point: entry.0,
+            priority: ProcessPriority::Normal,
+            credentials: Credentials::system(),
+        })
     }
 
     /// Return the current micro-thread to MTSS after a cooperative yield or the

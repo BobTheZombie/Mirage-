@@ -214,3 +214,7 @@ In the current milestone, the host-buildable Spider-rs binary and no_std entry s
 ## PID 1 ELF staging note (2026-06-12)
 
 A separate no_std `spider-pid1` package now builds the future `/sbin/spider-rs` PID 1 ELF. The ELF checks `getpid`, writes `Spider-rs PID 1 online` only when the kernel reports PID 1, and then yields forever. The kernel still must not mark Spider-rs `Online` until that ELF is actually loaded, scheduled by MTSS, entered in userspace, and its write syscall succeeds.
+
+## Boot Runtime PID 1 Launch Policy
+
+Spider-rs is now expected to be supplied by the immutable Boot Runtime RAMFS at `/bootrt/sbin/spider-rs` before the normal root filesystem is trusted. The kernel reads the ELF bytes through the Boot Runtime RAMFS, validates the ELF entry, and creates an MTSS-visible userspace task. Spider-rs must not be called as a Rust function from kernel mode.

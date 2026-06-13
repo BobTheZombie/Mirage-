@@ -8,8 +8,8 @@ use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
-    boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_running, boot_phase_start,
-    boot_phase_stub, boot_phase_validate_no_unresolved, BootPhase,
+    boot_phase_detected, boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_running,
+    boot_phase_start, boot_phase_stub, boot_phase_validate_no_unresolved, BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
@@ -71,6 +71,34 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         let supervisor = Supervisor::new();
         boot_phase_ok(BootPhase::SupervisorCreated);
         mirage::kprintln!("supervisor created");
+
+        boot_phase_start(BootPhase::BootRuntime);
+        let boot_runtime =
+            mirage::kernel::boot_runtime::find_boot_runtime_module(boot_info.modules).and_then(
+                |image| match mirage::kernel::boot_runtime::BootRuntimeRamFs::mount(image) {
+                    Ok((_runtime, fs)) => {
+                        boot_phase_detected(BootPhase::BootRuntime);
+                        boot_phase_online(BootPhase::BootRuntime);
+                        mirage::kprintln!("Boot Runtime Online: /bootrt/sbin/spider-rs available");
+                        Some(fs)
+                    }
+                    Err(error) => {
+                        boot_phase_failed(
+                            BootPhase::BootRuntime,
+                            "Boot Runtime image validation failed",
+                        );
+                        mirage::kprintln!("Boot Runtime validation failed: {:?}", error);
+                        None
+                    }
+                },
+            );
+        if boot_runtime.is_none() {
+            boot_phase_failed(
+                BootPhase::BootRuntime,
+                "Spider-rs-required Boot Runtime image missing",
+            );
+            mirage::kprintln!("Boot Runtime Failed: Spider-rs-required image missing");
+        }
 
         #[cfg(feature = "full-boot")]
         {
@@ -236,15 +264,43 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         boot_phase_online(BootPhase::Mtss);
         mirage::kprintln!("MTSS initialized");
         boot_phase_start(BootPhase::UserspaceLoader);
-        boot_phase_stub(
-            BootPhase::UserspaceLoader,
-            "ELF validator exists; rootfs byte read and ring-3 entry are not implemented",
-        );
-        mirage::kprintln!(
-            "userspace ELF loader stubbed: rootfs byte read and ring-3 entry unavailable"
-        );
+        static SPIDER_BOOTRT_IMAGE: mirage::kernel::sync::SpinLock<[u8; 1024 * 1024]> =
+            mirage::kernel::sync::SpinLock::new([0; 1024 * 1024]);
+        let mut spider_image = SPIDER_BOOTRT_IMAGE.lock();
+        let spider_len = if let Some(fs) = boot_runtime.as_ref() {
+            match fs.read(
+                mirage::kernel::boot_runtime::BOOTRT_MOUNTED_ENTRY,
+                0,
+                &mut spider_image[..],
+            ) {
+                Ok(len) => {
+                    boot_phase_online(BootPhase::UserspaceLoader);
+                    mirage::kprintln!(
+                        "Userspace Loader Online: read /bootrt/sbin/spider-rs ({} bytes)",
+                        len
+                    );
+                    Some(len)
+                }
+                Err(error) => {
+                    boot_phase_failed(
+                        BootPhase::UserspaceLoader,
+                        "Boot Runtime Spider-rs read failed",
+                    );
+                    mirage::kprintln!("userspace loader failed to read Spider-rs: {:?}", error);
+                    None
+                }
+            }
+        } else {
+            boot_phase_stub(BootPhase::UserspaceLoader, "Boot Runtime unavailable");
+            None
+        };
         boot_phase_start(BootPhase::SpiderRs);
-        match kernel.bootstrap_spider_rs_pid1() {
+        let spider_launch = if let Some(len) = spider_len {
+            kernel.bootstrap_spider_rs_pid1_from_image(&spider_image[..len])
+        } else {
+            kernel.bootstrap_spider_rs_pid1()
+        };
+        match spider_launch {
             Ok(pid) => {
                 boot_phase_start(BootPhase::Userspace);
                 boot_phase_ok(BootPhase::Userspace);

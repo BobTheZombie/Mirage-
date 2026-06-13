@@ -11,7 +11,7 @@ use crate::kernel::sync::SpinLock;
 /// Maximum number of boot subsystem records tracked without allocation.
 pub const BOOT_PHASE_CAPACITY: usize = 64;
 /// Current number of canonical Mirage boot phases.
-pub const BOOT_PHASE_COUNT: usize = 54;
+pub const BOOT_PHASE_COUNT: usize = 60;
 
 /// Coarse subsystem ownership used by boot rendering and future debug queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +65,11 @@ pub enum BootPhase {
     NvmeNamespace,
     Ahci,
     SataDisk,
+    Atapi,
+    OpticalDisk,
+    PartitionLayer,
+    Mbr,
+    Gpt,
     Qfs,
     Ext4,
     I8042,
@@ -84,6 +89,7 @@ pub enum BootPhase {
     UserspaceLoader,
     Userspace,
     SpiderRs,
+    BootRuntime,
     Mtss,
     BootScreen,
     IdleLoop,
@@ -112,6 +118,11 @@ impl BootPhase {
             Self::NvmeNamespace => "NVMe Namespace",
             Self::Ahci => "AHCI",
             Self::SataDisk => "SATA Disk",
+            Self::Atapi => "ATAPI",
+            Self::OpticalDisk => "Optical Disk",
+            Self::PartitionLayer => "Partition Layer",
+            Self::Mbr => "MBR",
+            Self::Gpt => "GPT",
             Self::Qfs => "QFS",
             Self::Ext4 => "ext4",
             Self::UsbCore => "USB Core",
@@ -121,6 +132,7 @@ impl BootPhase {
             Self::RootFs => "Root FS",
             Self::UserspaceLoader => "Userspace Loader",
             Self::SpiderRs => "Spider-rs",
+            Self::BootRuntime => "Boot Runtime",
             Self::Mtss => "MTSS",
             _ => self.name(),
         }
@@ -565,6 +577,29 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         false,
         3,
     ),
+    descriptor(
+        BootPhase::Atapi,
+        "ATAPI",
+        SubsystemCategory::Storage,
+        false,
+        2,
+    ),
+    descriptor(
+        BootPhase::OpticalDisk,
+        "Optical Disk",
+        SubsystemCategory::Storage,
+        false,
+        2,
+    ),
+    descriptor(
+        BootPhase::PartitionLayer,
+        "Partition Layer",
+        SubsystemCategory::Storage,
+        false,
+        3,
+    ),
+    descriptor(BootPhase::Mbr, "MBR", SubsystemCategory::Storage, false, 2),
+    descriptor(BootPhase::Gpt, "GPT", SubsystemCategory::Storage, false, 2),
     descriptor(BootPhase::Qfs, "QFS", SubsystemCategory::Storage, false, 3),
     descriptor(
         BootPhase::Ext4,
@@ -693,6 +728,13 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         2,
     ),
     descriptor(
+        BootPhase::BootRuntime,
+        "Boot Runtime",
+        SubsystemCategory::Userspace,
+        true,
+        4,
+    ),
+    descriptor(
         BootPhase::Mtss,
         "MTSS",
         SubsystemCategory::Scheduler,
@@ -789,7 +831,12 @@ pub fn boot_register_compiled_subsystems() {
     {
         register_phase(BootPhase::Ahci);
         register_phase(BootPhase::SataDisk);
+        register_phase(BootPhase::Atapi);
+        register_phase(BootPhase::OpticalDisk);
     }
+    register_phase(BootPhase::PartitionLayer);
+    register_phase(BootPhase::Mbr);
+    register_phase(BootPhase::Gpt);
     register_phase(BootPhase::Qfs);
     register_phase(BootPhase::Ext4);
     #[cfg(feature = "hw-i8042")]
@@ -817,6 +864,7 @@ pub fn boot_register_compiled_subsystems() {
     register_phase(BootPhase::UserspaceLoader);
     register_phase(BootPhase::Userspace);
     register_phase(BootPhase::SpiderRs);
+    register_phase(BootPhase::BootRuntime);
     register_phase(BootPhase::Mtss);
     register_phase(BootPhase::BootScreen);
     register_phase(BootPhase::IdleLoop);
