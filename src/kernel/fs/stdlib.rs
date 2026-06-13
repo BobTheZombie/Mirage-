@@ -108,23 +108,29 @@ pub const fn syscall_error_code_from_vfs(error: VfsError) -> SyscallErrorCode {
         VfsError::InvalidPath(PathError::TooLong)
         | VfsError::InvalidPath(PathError::ComponentTooLong)
         | VfsError::NameTooLong => SyscallErrorCode::NameTooLong,
-        VfsError::InvalidPath(PathError::Empty) | VfsError::NotFound => {
+        VfsError::NoDevice | VfsError::InvalidPath(PathError::Empty) | VfsError::NotFound => {
             SyscallErrorCode::FileNotFound
         }
-        VfsError::InvalidPath(PathError::NotAbsolute)
+        VfsError::InvalidSuperblock
+        | VfsError::CorruptFilesystem
+        | VfsError::InvalidPath(PathError::NotAbsolute)
         | VfsError::InvalidPath(PathError::InvalidByte)
-        | VfsError::InvalidArgument => SyscallErrorCode::InvalidArgument,
+        | VfsError::InvalidArgument
+        | VfsError::InvalidInput => SyscallErrorCode::InvalidArgument,
         VfsError::NotDirectory => SyscallErrorCode::NotDirectory,
         VfsError::IsDirectory => SyscallErrorCode::IsDirectory,
         VfsError::AlreadyExists => SyscallErrorCode::AlreadyExists,
         VfsError::PermissionDenied => SyscallErrorCode::PermissionDenied,
-        VfsError::ReadOnly => SyscallErrorCode::ReadOnlyFilesystem,
+        VfsError::ReadOnly | VfsError::JournalRequired => SyscallErrorCode::ReadOnlyFilesystem,
+        VfsError::Io | VfsError::ChecksumMismatch => SyscallErrorCode::DeviceFault,
         VfsError::NoSpace => SyscallErrorCode::NoSpace,
         VfsError::InvalidHandle => SyscallErrorCode::BadFileDescriptor,
         VfsError::Busy => SyscallErrorCode::FilesystemBusy,
         VfsError::CrossDevice => SyscallErrorCode::CrossDevice,
         VfsError::TooManyLinks => SyscallErrorCode::TooManyLinks,
-        VfsError::Unsupported => SyscallErrorCode::UnsupportedFilesystem,
+        VfsError::Unsupported | VfsError::UnsupportedFeature => {
+            SyscallErrorCode::UnsupportedFilesystem
+        }
     }
 }
 

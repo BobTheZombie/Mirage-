@@ -10,6 +10,10 @@ use crate::kernel::fs::{
 /// Errors surfaced by kernel-facing VFS operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VfsError {
+    NoDevice,
+    InvalidSuperblock,
+    UnsupportedFeature,
+    CorruptFilesystem,
     InvalidPath(PathError),
     NameTooLong,
     NotFound,
@@ -18,13 +22,17 @@ pub enum VfsError {
     AlreadyExists,
     PermissionDenied,
     ReadOnly,
+    Io,
     NoSpace,
+    JournalRequired,
+    ChecksumMismatch,
     InvalidHandle,
     InvalidArgument,
     Busy,
     CrossDevice,
     TooManyLinks,
     Unsupported,
+    InvalidInput,
 }
 
 impl From<PathError> for VfsError {
@@ -45,27 +53,48 @@ impl VfsError {
             VfsError::InvalidPath(PathError::TooLong)
             | VfsError::InvalidPath(PathError::ComponentTooLong)
             | VfsError::NameTooLong => 36,
-            VfsError::InvalidPath(PathError::Empty) | VfsError::NotFound => 2,
-            VfsError::InvalidPath(PathError::NotAbsolute)
+            VfsError::NoDevice | VfsError::InvalidPath(PathError::Empty) | VfsError::NotFound => 2,
+            VfsError::InvalidSuperblock
+            | VfsError::CorruptFilesystem
+            | VfsError::InvalidPath(PathError::NotAbsolute)
             | VfsError::InvalidPath(PathError::InvalidByte)
-            | VfsError::InvalidArgument => 22,
+            | VfsError::InvalidArgument
+            | VfsError::InvalidInput => 22,
             VfsError::NotDirectory => 20,
             VfsError::IsDirectory => 21,
             VfsError::AlreadyExists => 17,
             VfsError::PermissionDenied => 13,
             VfsError::ReadOnly => 30,
+            VfsError::Io => 5,
             VfsError::NoSpace => 28,
+            VfsError::JournalRequired => 30,
+            VfsError::ChecksumMismatch => 74,
             VfsError::InvalidHandle => 9,
             VfsError::Busy => 16,
             VfsError::CrossDevice => 18,
             VfsError::TooManyLinks => 31,
-            VfsError::Unsupported => 95,
+            VfsError::Unsupported | VfsError::UnsupportedFeature => 95,
         }
     }
 }
 
 /// Backward-compatible error name used by early filesystem code.
 pub type FsError = VfsError;
+
+/// Generic VFS file kind name used by mount-policy and filesystem-specific adapters.
+pub type FileKind = InodeKind;
+
+/// Mount-time access policy. Mirage mounts block filesystems read-only unless an
+/// explicit caller asks for writes and the filesystem can provide its safety policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MountFlags {
+    pub read_write: bool,
+}
+
+impl MountFlags {
+    pub const READ_ONLY: Self = Self { read_write: false };
+    pub const READ_WRITE: Self = Self { read_write: true };
+}
 
 /// Superblock state common to mounted filesystems.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
