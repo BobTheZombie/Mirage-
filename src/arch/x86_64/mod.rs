@@ -30,6 +30,8 @@ use crate::kernel::thread::{
 
 #[cfg(feature = "hw-laptop-hotkeys")]
 pub mod acpi_ec;
+#[cfg(feature = "hw-ahci")]
+pub mod ahci;
 pub mod boot;
 pub mod clock;
 pub mod device;
@@ -136,7 +138,7 @@ pub fn init_architecture(boot_info: &BootInfo) {
         initialize_framebuffer_console(boot_info);
         configure_interrupts();
         let mut platform_registry = initialize_platform_probes(boot_info);
-        initialize_storage_hardware(&platform_registry);
+        initialize_storage_hardware(boot_info, &platform_registry);
         initialize_input_hardware(boot_info, &mut platform_registry);
     }
 }
@@ -878,7 +880,9 @@ fn cpu_platform_name(cpu: CpuProbe) -> &'static str {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
+#[allow(unused_mut, unused_variables)]
 fn initialize_storage_hardware(
+    boot_info: &BootInfo,
     platform: &mirage_platform::PlatformRegistry<{ mirage_platform::MAX_PLATFORM_DEVICE_EVENTS }>,
 ) {
     boot_phase_start(BootPhase::BlockLayer);
@@ -904,23 +908,51 @@ fn initialize_storage_hardware(
         boot_phase_skipped(BootPhase::NvmeNamespace, "NVMe controller not present");
     }
 
+    let mut sata_online = false;
     if ahci_present {
         boot_phase_detected(BootPhase::Ahci);
         boot_phase_start(BootPhase::Ahci);
-        boot_phase_failed(
-            BootPhase::Ahci,
-            "AHCI controller detected; SATA disk registration not wired in this boot path",
-        );
-        boot_phase_skipped(BootPhase::SataDisk, "no SATA disk registered");
+        #[cfg(feature = "hw-ahci")]
+        {
+            match ahci::bring_up_first_sata_disk(platform, boot_info.hhdm_offset) {
+                ahci::AhciBootStatus::Online(info) => {
+                    sata_online = true;
+                    boot_phase_start(BootPhase::SataDisk);
+                    boot_phase_online(BootPhase::SataDisk);
+                    boot_phase_online(BootPhase::Ahci);
+                    crate::kprintln!(
+                        "[block] registered device {} kind=SataDisk blocks={} block_size={}",
+                        info.name,
+                        info.block_count,
+                        info.block_size
+                    );
+                }
+                ahci::AhciBootStatus::NoDisk => {
+                    boot_phase_ok(BootPhase::Ahci);
+                    boot_phase_skipped(BootPhase::SataDisk, "no SATA disk detected");
+                }
+                ahci::AhciBootStatus::Failed(reason) => {
+                    boot_phase_failed(BootPhase::Ahci, reason);
+                    boot_phase_skipped(BootPhase::SataDisk, "AHCI initialization failed");
+                }
+            }
+        }
+        #[cfg(not(feature = "hw-ahci"))]
+        {
+            boot_phase_skipped(BootPhase::Ahci, "hw-ahci feature disabled");
+            boot_phase_skipped(BootPhase::SataDisk, "hw-ahci feature disabled");
+        }
     } else {
         boot_phase_skipped(BootPhase::Ahci, "AHCI controller not present");
         boot_phase_skipped(BootPhase::SataDisk, "AHCI controller not present");
     }
 
-    if nvme_present || ahci_present {
-        boot_phase_failed(
+    if sata_online {
+        boot_phase_online(BootPhase::M2Storage);
+    } else if nvme_present || ahci_present {
+        boot_phase_skipped(
             BootPhase::M2Storage,
-            "M.2-capable storage path detected but no block device is online",
+            "no block device online for M.2-capable path",
         );
     } else {
         boot_phase_skipped(BootPhase::M2Storage, "no M.2-capable storage path present");

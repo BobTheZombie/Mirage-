@@ -974,18 +974,10 @@ fn write_duplicate_registration_serial(phase: BootPhase) {
 
 #[allow(unreachable_code)]
 fn write_unregistered_transition_serial(phase: BootPhase, state: PhaseState) {
-    #[cfg(test)]
-    {
-        let _ = (phase, state);
-        return;
-    }
-    unsafe {
-        crate::arch::x86_64::early_debug::com1_write_str("[Phase] Warning: ignored ");
-        crate::arch::x86_64::early_debug::com1_write_str(state.as_str());
-        crate::arch::x86_64::early_debug::com1_write_str(" for unregistered ");
-        crate::arch::x86_64::early_debug::com1_write_str(phase.name());
-        crate::arch::x86_64::early_debug::com1_write_str("\r\n");
-    }
+    // Feature-gated phases are intentionally absent from many builds. Treat
+    // transitions for absent phases as silent no-ops so clean boots do not emit
+    // noisy "ignored unregistered" diagnostics for drivers that were not compiled in.
+    let _ = (phase, state);
 }
 
 #[allow(unreachable_code)]
