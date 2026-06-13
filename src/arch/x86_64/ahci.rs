@@ -1,19 +1,24 @@
-//! Minimal x86_64 AHCI boot path for discovering one read-only SATA block device.
+//! Minimal x86_64 AHCI boot path for discovering read-only SATA block devices.
 //!
-//! This is intentionally mechanism-only: it initializes the HBA, identifies disks,
-//! and exposes the discovered block geometry. Filesystem/root policy remains above
-//! this architecture path.
+//! This is intentionally mechanism-only: it validates PCI BAR5, explicitly maps
+//! the HBA MMIO window, initializes the controller/ports with bounded waits, and
+//! exposes discovered read-only SATA geometry. Filesystem/root policy remains
+//! above this architecture path.
 
 use core::ptr::{read_volatile, write_volatile};
 
 use mirage_platform::{
-    PlatformDevice, PlatformLocation, PlatformRegistry, MAX_PLATFORM_DEVICE_EVENTS,
+    PlatformDevice, PlatformLocation, PlatformPciBar, PlatformRegistry, MAX_PLATFORM_DEVICE_EVENTS,
 };
 
+use crate::kernel::device::{BlockStorageDevice, DeviceDriver, DeviceError, DeviceKind};
 use crate::kernel::memory;
+use crate::kernel::mmio::{map_mmio, verify_mapped, MmioFlags, MmioRegion, PhysAddr};
 use crate::kernel::sync::SpinLock;
+use crate::subkernel::{DeviceSecurity, SecurityClass};
 
 const AHCI_BAR: usize = 5;
+const DEFAULT_ABAR_SIZE: usize = 4096;
 const HBA_CAP: usize = 0x00;
 const HBA_GHC: usize = 0x04;
 const HBA_PI: usize = 0x0c;
@@ -32,6 +37,7 @@ const PX_SSTS: usize = 0x28;
 const PX_SERR: usize = 0x30;
 const PX_CI: usize = 0x38;
 
+const GHC_HR: u32 = 1 << 0;
 const GHC_AE: u32 = 1 << 31;
 const CMD_ST: u32 = 1 << 0;
 const CMD_FRE: u32 = 1 << 4;
@@ -47,6 +53,8 @@ const SATA_SIG_ATAPI: u32 = 0xeb14_0101;
 const SATA_SIG_SEMB: u32 = 0xc33c_0101;
 const SATA_SIG_PM: u32 = 0x9669_0101;
 const POLL_LIMIT: usize = 1_000_000;
+const PCI_COMMAND_MEMORY: u16 = 1 << 1;
+const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegisteredBlockInfo {
@@ -157,6 +165,31 @@ fn copy_ata_string(words: &[u16; 256], start: usize, out: &mut [u8]) {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AhciBarInfo {
+    pub raw: u64,
+    pub physical: u64,
+    pub is_mmio: bool,
+    pub is_64bit: bool,
+    pub prefetchable: bool,
+    pub size: usize,
+}
+
+pub fn ahci_bar_info(bar: PlatformPciBar, probed_size: usize) -> AhciBarInfo {
+    AhciBarInfo {
+        raw: bar.raw,
+        physical: bar.base,
+        is_mmio: bar.is_mmio,
+        is_64bit: bar.is_64bit,
+        prefetchable: bar.prefetchable,
+        size: if probed_size == 0 {
+            DEFAULT_ABAR_SIZE
+        } else {
+            probed_size
+        },
+    }
+}
+
 #[derive(Clone, Copy)]
 struct AhciDiskState {
     mmio: usize,
@@ -170,6 +203,7 @@ struct AhciDiskState {
 }
 
 static SATA0: SpinLock<Option<AhciDiskState>> = SpinLock::new(None);
+pub static AHCI_SATA0_DRIVER: AhciSataBlockDriver = AhciSataBlockDriver;
 
 pub fn lookup_by_name(name: &str) -> Option<RegisteredBlockInfo> {
     if name == "sata0" {
@@ -187,7 +221,7 @@ pub fn bring_up_first_sata_disk(
         return AhciBootStatus::NoDisk;
     };
     let Some(hhdm) = hhdm_offset else {
-        return AhciBootStatus::Failed("HHDM unavailable for AHCI MMIO mapping");
+        return AhciBootStatus::Failed("HHDM unavailable for AHCI DMA buffer access");
     };
     match unsafe { bring_up_device(device, hhdm) } {
         Ok(Some(info)) => AhciBootStatus::Online(info),
@@ -200,43 +234,108 @@ unsafe fn bring_up_device(
     device: PlatformDevice,
     hhdm: u64,
 ) -> Result<Option<RegisteredBlockInfo>, &'static str> {
-    enable_pci_command(device)?;
-    let bar = device
-        .mmio_bar(AHCI_BAR)
-        .ok_or("AHCI BAR5/ABAR missing or not MMIO")?;
-    let mmio = hhdm
-        .checked_add(bar.base)
-        .ok_or("AHCI ABAR mapping overflow")? as usize;
-    let cap = mmio_read32(mmio, HBA_CAP);
-    let ghc = mmio_read32(mmio, HBA_GHC);
-    let pi = mmio_read32(mmio, HBA_PI);
-    let vs = mmio_read32(mmio, HBA_VS);
-    crate::kprintln!("[ahci] abar={:#x}", bar.base);
-    crate::kprintln!("[ahci] cap={:#x} ghc={:#x}", cap, ghc);
-    crate::kprintln!("[ahci] pi={:#x}", pi);
-    crate::kprintln!("[ahci] version={:#x}", vs);
-    mmio_write32(mmio, HBA_GHC, ghc | GHC_AE);
+    let (bus, dev, function) = pci_location(device)?;
+    crate::kprintln!(
+        "[ahci] pci device: {:02x}:{:02x}.{} vendor={:04x} device={:04x}",
+        bus,
+        dev,
+        function,
+        device.vendor_id.unwrap_or(0xffff),
+        device.device_id.unwrap_or(0xffff)
+    );
+    let command_before = pci_read16(bus, dev, function, 0x04);
+    crate::kprintln!("[ahci] pci command before={:#06x}", command_before);
+
+    let bar = device.bars[AHCI_BAR].ok_or("AHCI BAR5/ABAR missing")?;
+    let bar_size =
+        probe_bar_size(bus, dev, function, AHCI_BAR as u8, bar).unwrap_or(DEFAULT_ABAR_SIZE);
+    let bar_info = ahci_bar_info(bar, bar_size);
+    log_bar_info(bar_info);
+    validate_bar(bar_info)?;
+
+    let command_after = enable_pci_command(bus, dev, function)?;
+    crate::kprintln!("[ahci] pci command after={:#06x}", command_after);
+
+    let abar = map_mmio(
+        PhysAddr(bar_info.physical),
+        bar_info.size,
+        MmioFlags::DEVICE,
+    )
+    .map_err(|_| "AHCI ABAR MMIO map failed")?;
+    verify_mapped(abar.virt, core::cmp::min(0x14, abar.len))
+        .map_err(|_| "AHCI ABAR MMIO verification failed")?;
+    crate::kprintln!(
+        "[ahci] mapped ABAR phys={:#x} virt={:#x} len={:#x}",
+        abar.phys.0,
+        abar.virt.0,
+        abar.len
+    );
+    print_page_walk(abar.virt.0);
+
+    let hba = AhciHba::new(abar);
+    let cap = hba.read32(HBA_CAP);
+    let ghc = hba.read32(HBA_GHC);
+    let pi = hba.read32(HBA_PI);
+    let vs = hba.read32(HBA_VS);
+    crate::kprintln!("[ahci] CAP={:#x}", cap);
+    crate::kprintln!("[ahci] GHC={:#x}", ghc);
+    crate::kprintln!("[ahci] PI={:#x}", pi);
+    crate::kprintln!("[ahci] VS={:#x}", vs);
+
+    if (ghc & GHC_AE) == 0 {
+        hba.write32(HBA_GHC, ghc | GHC_AE);
+    }
+    let ghc_after_ae = hba.read32(HBA_GHC);
+    if (ghc_after_ae & GHC_HR) != 0 {
+        wait_clear(hba.base(), HBA_GHC, GHC_HR, "AHCI controller reset timeout")?;
+    }
 
     let mut port = 0u8;
     while port < 32 {
         if (pi & (1u32 << port)) != 0 {
             crate::kprintln!("[ahci] port {} implemented", port);
             let base = port_base(port);
-            let ssts = mmio_read32(mmio, base + PX_SSTS);
+            let ssts = hba.read32(base + PX_SSTS);
+            let status = parse_ssts(ssts);
             crate::kprintln!("[ahci] port {} ssts={:#x}", port, ssts);
-            if sata_device_present(ssts) {
-                let sig = mmio_read32(mmio, base + PX_SIG);
-                crate::kprintln!("[ahci] port {} sig={:#x}", port, sig);
-                if classify_signature(sig) == PortSignature::SataDisk {
-                    crate::kprintln!("[ahci] port {} SATA disk detected", port);
-                    let info = init_port_and_identify(mmio, hhdm, port)?;
-                    return Ok(Some(info));
-                }
+            crate::kprintln!("[ahci] port {} det={} ipm={}", port, status.det, status.ipm);
+            let sig = hba.read32(base + PX_SIG);
+            let kind = classify_signature(sig);
+            crate::kprintln!("[ahci] port {} sig={:#x}", port, sig);
+            log_port_type(port, kind);
+            if sata_device_present(ssts) && kind == PortSignature::SataDisk {
+                crate::kprintln!("[ahci] port {} SATA disk detected", port);
+                let info = init_port_and_identify(hba.base(), hhdm, port)?;
+                return Ok(Some(info));
             }
         }
         port += 1;
     }
+    crate::kprintln!("[ahci] SATA Disk Skipped: no SATA disk detected");
     Ok(None)
+}
+
+#[derive(Clone, Copy)]
+struct AhciHba {
+    region: MmioRegion,
+}
+
+impl AhciHba {
+    const fn new(region: MmioRegion) -> Self {
+        Self { region }
+    }
+
+    const fn base(self) -> usize {
+        self.region.virt.0 as usize
+    }
+
+    unsafe fn read32(self, offset: usize) -> u32 {
+        mmio_read32(self.base(), offset)
+    }
+
+    unsafe fn write32(self, offset: usize, value: u32) {
+        mmio_write32(self.base(), offset, value)
+    }
 }
 
 unsafe fn init_port_and_identify(
@@ -269,9 +368,11 @@ unsafe fn init_port_and_identify(
     if id.sectors == 0 {
         return Err("ATA IDENTIFY returned zero sectors");
     }
-    crate::kprint!("[ahci] port {} identify ok: model=\"", port);
+    crate::kprint!("[ahci] port {} identify ok\n[ahci] model=\"", port);
     print_model(&id.model);
-    crate::kprintln!("\" sectors={} sector_size={}", id.sectors, id.sector_size);
+    crate::kprintln!("\"");
+    crate::kprintln!("[ahci] sectors={}", id.sectors);
+    crate::kprintln!("[ahci] sector_size={}", id.sector_size);
     let info = RegisteredBlockInfo {
         name: "sata0",
         block_count: id.sectors,
@@ -293,16 +394,10 @@ unsafe fn init_port_and_identify(
 
 pub fn read_blocks(lba: u64, count: u16, buffer: &mut [u8]) -> Result<(), &'static str> {
     let disk = SATA0.lock().ok_or("sata0 not registered")?;
-    if count == 0
-        || lba
-            .checked_add(count as u64)
-            .is_none_or(|end| end > disk.info.block_count)
-    {
-        return Err("read out of bounds");
-    }
+    validate_read_request(disk.info, lba, count, buffer.len())?;
     let bytes = count as usize * disk.info.block_size as usize;
-    if buffer.len() != bytes || bytes > 4096 {
-        return Err("invalid read buffer length");
+    if bytes > 4096 {
+        return Err("read too large for AHCI bounce buffer");
     }
     unsafe {
         zero_frame(disk.hhdm, disk.dma_buffer_phys);
@@ -325,6 +420,26 @@ pub fn read_blocks(lba: u64, count: u16, buffer: &mut [u8]) -> Result<(), &'stat
     Ok(())
 }
 
+pub fn validate_read_request(
+    info: RegisteredBlockInfo,
+    lba: u64,
+    count: u16,
+    buffer_len: usize,
+) -> Result<(), &'static str> {
+    if count == 0
+        || lba
+            .checked_add(count as u64)
+            .is_none_or(|end| end > info.block_count)
+    {
+        return Err("read out of bounds");
+    }
+    let bytes = count as usize * info.block_size as usize;
+    if buffer_len != bytes {
+        return Err("invalid read buffer length");
+    }
+    Ok(())
+}
+
 unsafe fn issue_command(
     mmio: usize,
     hhdm: u64,
@@ -340,8 +455,8 @@ unsafe fn issue_command(
     wait_clear(mmio, p + PX_TFD, TFD_BSY | TFD_DRQ, "AHCI task file busy")?;
     zero_frame(hhdm, ct);
     let clv = (hhdm + cl) as *mut u8;
-    write_volatile(clv.add(0) as *mut u16, 5); // CFL=5, read command
-    write_volatile(clv.add(2) as *mut u16, 1); // one PRDT
+    write_volatile(clv.add(0) as *mut u16, 5);
+    write_volatile(clv.add(2) as *mut u16, 1);
     write_volatile(clv.add(4) as *mut u32, 0);
     write_volatile(clv.add(8) as *mut u32, ct as u32);
     write_volatile(clv.add(12) as *mut u32, (ct >> 32) as u32);
@@ -355,9 +470,10 @@ unsafe fn issue_command(
     mmio_write32(mmio, p + PX_IS, u32::MAX);
     mmio_write32(mmio, p + PX_CI, 1);
     wait_clear(mmio, p + PX_CI, 1, "AHCI command completion")?;
+    let is = mmio_read32(mmio, p + PX_IS);
     let tfd = mmio_read32(mmio, p + PX_TFD);
-    if (tfd & TFD_ERR) != 0 {
-        return Err("AHCI command task-file error");
+    if (tfd & TFD_ERR) != 0 || (is & 0x4000_0000) != 0 {
+        return Err("AHCI command failed");
     }
     Ok(())
 }
@@ -426,9 +542,6 @@ fn alloc_frame() -> Result<u64, &'static str> {
 }
 
 unsafe fn zero_frame(hhdm: u64, phys: u64) {
-    if phys == 0 && hhdm == 0 {
-        return;
-    }
     let ptr = (hhdm + phys) as *mut u8;
     let mut i = 0usize;
     while i < 4096 {
@@ -446,7 +559,7 @@ fn print_model(model: &[u8; 40]) {
     }
 }
 
-fn enable_pci_command(device: PlatformDevice) -> Result<(), &'static str> {
+fn pci_location(device: PlatformDevice) -> Result<(u8, u8, u8), &'static str> {
     let PlatformLocation::Pci {
         bus,
         device,
@@ -455,25 +568,221 @@ fn enable_pci_command(device: PlatformDevice) -> Result<(), &'static str> {
     else {
         return Err("AHCI platform device is not PCI");
     };
-    let address = |offset: u8| -> u32 {
-        0x8000_0000u32
-            | ((bus as u32) << 16)
-            | ((device as u32) << 11)
-            | ((function as u32) << 8)
-            | ((offset as u32) & 0xfc)
-    };
-    unsafe {
-        crate::arch::x86_64::io::outl(0xcf8, address(0x04));
-        let value = crate::arch::x86_64::io::inl(0xcfc) | 0x0006;
-        crate::arch::x86_64::io::outl(0xcf8, address(0x04));
-        crate::arch::x86_64::io::outl(0xcfc, value);
+    Ok((bus, device, function))
+}
+
+fn log_bar_info(info: AhciBarInfo) {
+    crate::kprintln!("[ahci] BAR5 raw={:#x}", info.raw);
+    crate::kprintln!("[ahci] BAR5 physical={:#x}", info.physical);
+    crate::kprintln!(
+        "[ahci] BAR5 type={}",
+        if info.is_mmio { "mmio" } else { "io" }
+    );
+    crate::kprintln!("[ahci] BAR5 width={}", if info.is_64bit { 64 } else { 32 });
+    crate::kprintln!("[ahci] BAR5 prefetchable={}", info.prefetchable);
+    crate::kprintln!("[ahci] BAR5 size={:#x}", info.size);
+}
+
+fn validate_bar(info: AhciBarInfo) -> Result<(), &'static str> {
+    if !info.is_mmio {
+        return Err("AHCI BAR5 is I/O port BAR, expected MMIO");
+    }
+    if info.physical == 0 {
+        return Err("AHCI BAR5 physical address is zero");
+    }
+    if (info.physical & 0xfff) != 0 {
+        return Err("AHCI BAR5 physical address is not page aligned");
+    }
+    if info.size < 0x110 {
+        return Err("AHCI BAR5 size too small");
     }
     Ok(())
+}
+
+fn log_port_type(port: u8, kind: PortSignature) {
+    let name = match kind {
+        PortSignature::SataDisk => "SATA",
+        PortSignature::Atapi => "ATAPI",
+        PortSignature::Semb => "SEMB",
+        PortSignature::PortMultiplier => "PortMultiplier",
+        PortSignature::Unknown(_) => "unknown",
+    };
+    crate::kprintln!("[ahci] port {} type={}", port, name);
+}
+
+fn print_page_walk(virt: u64) {
+    if let Some(walk) = crate::arch::x86_64::paging::walk_kernel_page_tables(virt) {
+        crate::kprintln!(
+            "[ahci] ABAR page walk cr3={:#x} pml4e={:#x} pdpte={:#x} pde={:#x} pte={:#x}",
+            walk.cr3,
+            walk.pml4e,
+            walk.pdpte,
+            walk.pde,
+            walk.pte
+        );
+    }
+}
+
+fn pci_config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    0x8000_0000u32
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | ((offset as u32) & 0xfc)
+}
+
+unsafe fn pci_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    crate::arch::x86_64::io::outl(0xcf8, pci_config_address(bus, device, function, offset));
+    crate::arch::x86_64::io::inl(0xcfc)
+}
+
+unsafe fn pci_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+    crate::arch::x86_64::io::outl(0xcf8, pci_config_address(bus, device, function, offset));
+    crate::arch::x86_64::io::outl(0xcfc, value);
+}
+
+unsafe fn pci_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
+    let value = pci_read32(bus, device, function, offset & !0x3);
+    ((value >> ((offset & 0x2) * 8)) & 0xffff) as u16
+}
+
+unsafe fn pci_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+    let aligned = offset & !0x3;
+    let shift = (offset & 0x2) * 8;
+    let old = pci_read32(bus, device, function, aligned);
+    let new = (old & !(0xffff << shift)) | ((value as u32) << shift);
+    pci_write32(bus, device, function, aligned, new);
+}
+
+unsafe fn enable_pci_command(bus: u8, device: u8, function: u8) -> Result<u16, &'static str> {
+    let command =
+        pci_read16(bus, device, function, 0x04) | PCI_COMMAND_MEMORY | PCI_COMMAND_BUS_MASTER;
+    pci_write16(bus, device, function, 0x04, command);
+    let after = pci_read16(bus, device, function, 0x04);
+    if (after & (PCI_COMMAND_MEMORY | PCI_COMMAND_BUS_MASTER))
+        != (PCI_COMMAND_MEMORY | PCI_COMMAND_BUS_MASTER)
+    {
+        return Err("AHCI PCI command bits did not stick");
+    }
+    Ok(after)
+}
+
+unsafe fn probe_bar_size(
+    bus: u8,
+    device: u8,
+    function: u8,
+    index: u8,
+    bar: PlatformPciBar,
+) -> Option<usize> {
+    let offset = 0x10 + index * 4;
+    let old_low = pci_read32(bus, device, function, offset);
+    let old_high = if bar.is_64bit && index < 5 {
+        Some(pci_read32(bus, device, function, offset + 4))
+    } else {
+        None
+    };
+    pci_write32(bus, device, function, offset, 0xffff_ffff);
+    if old_high.is_some() {
+        pci_write32(bus, device, function, offset + 4, 0xffff_ffff);
+    }
+    let mask_low = pci_read32(bus, device, function, offset);
+    let mask_high = if old_high.is_some() {
+        Some(pci_read32(bus, device, function, offset + 4))
+    } else {
+        None
+    };
+    pci_write32(bus, device, function, offset, old_low);
+    if let Some(high) = old_high {
+        pci_write32(bus, device, function, offset + 4, high);
+    }
+    let size = if bar.is_mmio && bar.is_64bit {
+        let mask =
+            (((mask_high.unwrap_or(0) as u64) << 32) | (mask_low as u64)) & 0xffff_ffff_ffff_fff0;
+        if mask == 0 {
+            return None;
+        }
+        (!mask).wrapping_add(1)
+    } else if bar.is_mmio {
+        let mask = mask_low & 0xffff_fff0;
+        if mask == 0 {
+            return None;
+        }
+        (!(mask as u32)).wrapping_add(1) as u64
+    } else {
+        let mask = mask_low & 0xffff_fffc;
+        if mask == 0 {
+            return None;
+        }
+        (!(mask as u32)).wrapping_add(1) as u64
+    };
+    if size == 0 || size > (usize::MAX as u64) {
+        None
+    } else {
+        Some(size as usize)
+    }
+}
+
+pub struct AhciSataBlockDriver;
+
+impl DeviceDriver for AhciSataBlockDriver {
+    fn kind(&self) -> DeviceKind {
+        DeviceKind::BlockStorage
+    }
+    fn name(&self) -> &'static str {
+        "sata0"
+    }
+    fn security(&self) -> DeviceSecurity {
+        DeviceSecurity::new(SecurityClass::Confidential, true)
+    }
+    fn as_block_storage(&self) -> Option<&dyn BlockStorageDevice> {
+        Some(self)
+    }
+}
+
+impl BlockStorageDevice for AhciSataBlockDriver {
+    fn sector_size(&self) -> usize {
+        lookup_by_name("sata0")
+            .map(|i| i.block_size as usize)
+            .unwrap_or(512)
+    }
+    fn sector_count(&self) -> u64 {
+        lookup_by_name("sata0").map(|i| i.block_count).unwrap_or(0)
+    }
+    fn read_sectors(&self, first_sector: u64, buffer: &mut [u8]) -> Result<usize, DeviceError> {
+        let info = lookup_by_name("sata0").ok_or(DeviceError::NotFound)?;
+        if buffer.len() % info.block_size as usize != 0 {
+            return Err(DeviceError::BufferTooSmall);
+        }
+        let count = buffer.len() / info.block_size as usize;
+        if count == 0 || count > u16::MAX as usize {
+            return Err(DeviceError::Unsupported);
+        }
+        read_blocks(first_sector, count as u16, buffer).map_err(|_| DeviceError::Unsupported)?;
+        Ok(buffer.len())
+    }
+    fn write_sectors(&self, _first_sector: u64, _data: &[u8]) -> Result<usize, DeviceError> {
+        Err(DeviceError::Unsupported)
+    }
+    fn flush(&self) -> Result<(), DeviceError> {
+        Ok(())
+    }
+    fn discard(&self, _first_sector: u64, _sector_count: u64) -> Result<(), DeviceError> {
+        Err(DeviceError::Unsupported)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bar5_parsing_uses_mmio_metadata_and_default_size() {
+        let bar = PlatformPciBar::mmio32(5, 0xfebd_5000);
+        let info = ahci_bar_info(bar, 0);
+        assert!(info.is_mmio);
+        assert_eq!(info.physical, 0xfebd_5000);
+        assert_eq!(info.size, DEFAULT_ABAR_SIZE);
+    }
 
     #[test]
     fn pxssts_parsing_detects_active_device() {
@@ -512,9 +821,30 @@ mod tests {
         assert_eq!(&id.model[..16], b"MIRAGE SATA DISK");
         assert_eq!(id.sector_size, 512);
     }
+
     #[test]
-    fn read_blocks_rejects_unregistered_sata0() {
+    fn read_blocks_bounds_validation() {
+        let info = RegisteredBlockInfo {
+            name: "sata0",
+            block_count: 4,
+            block_size: 512,
+            readonly: true,
+        };
+        assert_eq!(validate_read_request(info, 0, 1, 512), Ok(()));
+        assert_eq!(
+            validate_read_request(info, 4, 1, 512),
+            Err("read out of bounds")
+        );
+        assert_eq!(
+            validate_read_request(info, 0, 1, 256),
+            Err("invalid read buffer length")
+        );
+    }
+
+    #[test]
+    fn block_device_registration_state_reports_absent_by_default() {
         *SATA0.lock() = None;
+        assert_eq!(lookup_by_name("sata0"), None);
         let mut buffer = [0u8; 512];
         assert_eq!(read_blocks(0, 1, &mut buffer), Err("sata0 not registered"));
     }

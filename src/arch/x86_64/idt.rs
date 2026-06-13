@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(any(test, feature = "qfs-std")))]
 use super::interrupts;
 use super::{gdt, msr, pic};
-use crate::kernel::thread::CpuContext;
+use crate::kernel::thread::{CpuContext, PrivilegeMode};
 
 pub const DOUBLE_FAULT_VECTOR: u8 = 8;
 pub const PAGE_FAULT_VECTOR: u8 = 14;
@@ -286,6 +286,12 @@ fn dispatch_interrupt_with_context(vector: u64, error_code: u64, context: Option
             let cr2 = read_cr2();
             LAST_PAGE_FAULT_ADDRESS.store(cr2, Ordering::SeqCst);
             print_exception_diagnostics("page fault", vector, error_code, context, Some(cr2));
+            print_page_fault_decode(error_code);
+            print_page_walk(cr2);
+            if context.is_none_or(|frame| frame.privilege_mode == PrivilegeMode::Kernel) {
+                crate::kprintln!("x86_64: kernel page fault is fatal; halting safely");
+                halt_safely();
+            }
         }
         _ => {}
     }
@@ -355,6 +361,46 @@ fn print_exception_diagnostics(
         );
     } else {
         crate::kprintln!("  register frame unavailable");
+    }
+}
+
+fn print_page_fault_decode(error_code: u64) {
+    crate::kprintln!(
+        "  page-fault bits: present={} write={} user={} reserved={} instruction_fetch={} protection_key={} shadow_stack={} sgx={}",
+        (error_code & (1 << 0)) != 0,
+        (error_code & (1 << 1)) != 0,
+        (error_code & (1 << 2)) != 0,
+        (error_code & (1 << 3)) != 0,
+        (error_code & (1 << 4)) != 0,
+        (error_code & (1 << 5)) != 0,
+        (error_code & (1 << 6)) != 0,
+        (error_code & (1 << 15)) != 0
+    );
+}
+
+fn print_page_walk(virtual_address: u64) {
+    match crate::arch::x86_64::paging::walk_kernel_page_tables(virtual_address) {
+        Some(walk) => {
+            crate::kprintln!("  cr3={:#018x}", walk.cr3);
+            crate::kprintln!(
+                "  pml4e={:#018x} pdpte={:#018x} pde={:#018x} pte={:#018x}",
+                walk.pml4e,
+                walk.pdpte,
+                walk.pde,
+                walk.pte
+            );
+            match walk.physical {
+                Some(physical) => {
+                    crate::kprintln!("  translated={:#018x}", physical);
+                }
+                None => {
+                    crate::kprintln!("  translated=<not present>");
+                }
+            }
+        }
+        None => {
+            crate::kprintln!("  page table walk unavailable");
+        }
     }
 }
 
