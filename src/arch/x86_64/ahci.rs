@@ -262,7 +262,7 @@ unsafe fn bring_up_device(
         MmioFlags::DEVICE,
     )
     .map_err(|_| "AHCI ABAR MMIO map failed")?;
-    verify_mapped(abar.virt, core::cmp::min(0x14, abar.len))
+    verify_mapped(abar.virt, core::cmp::min(0x14, abar.len), MmioFlags::DEVICE)
         .map_err(|_| "AHCI ABAR MMIO verification failed")?;
     crate::kprintln!(
         "[ahci] mapped ABAR phys={:#x} virt={:#x} len={:#x}",

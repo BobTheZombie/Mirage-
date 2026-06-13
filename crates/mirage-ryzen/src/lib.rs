@@ -861,18 +861,13 @@ const fn is_amd_vendor(vendor: [u8; 12]) -> bool {
 fn detect_input() -> Option<RyzenDetectionInput> {
     use core::arch::x86_64::__cpuid;
 
-    // SAFETY: CPUID is a serializing userspace-safe x86_64 instruction. This
-    // path only reads architectural CPU identification leaves and does not
-    // grant hardware authority or make policy decisions.
-    let vendor_leaf = unsafe { __cpuid(0) };
+    let vendor_leaf = __cpuid(0);
     let mut vendor = [0_u8; 12];
     vendor[0..4].copy_from_slice(&vendor_leaf.ebx.to_le_bytes());
     vendor[4..8].copy_from_slice(&vendor_leaf.edx.to_le_bytes());
     vendor[8..12].copy_from_slice(&vendor_leaf.ecx.to_le_bytes());
 
-    // SAFETY: See the safety note above. Leaf 1 is the architectural processor
-    // signature leaf used for family/model/stepping decoding.
-    let leaf1 = unsafe { __cpuid(1) };
+    let leaf1 = __cpuid(1);
     Some(RyzenDetectionInput::new(
         vendor,
         RyzenCpuId::from_leaf1_eax(leaf1.eax),
