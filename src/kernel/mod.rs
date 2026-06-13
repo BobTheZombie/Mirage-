@@ -15,6 +15,7 @@ pub mod futex;
 pub mod input;
 pub mod ipc;
 pub mod memory;
+pub mod mmio;
 pub mod platform;
 pub mod process;
 pub mod services;

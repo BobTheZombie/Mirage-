@@ -917,14 +917,15 @@ fn initialize_storage_hardware(
             match ahci::bring_up_first_sata_disk(platform, boot_info.hhdm_offset) {
                 ahci::AhciBootStatus::Online(info) => {
                     sata_online = true;
+                    boot_phase_detected(BootPhase::SataDisk);
                     boot_phase_start(BootPhase::SataDisk);
                     boot_phase_online(BootPhase::SataDisk);
                     boot_phase_online(BootPhase::Ahci);
                     crate::kprintln!(
-                        "[block] registered device {} kind=SataDisk blocks={} block_size={}",
+                        "[block] registered {} kind=SataDisk block_size={} blocks={}",
                         info.name,
-                        info.block_count,
-                        info.block_size
+                        info.block_size,
+                        info.block_count
                     );
                 }
                 ahci::AhciBootStatus::NoDisk => {

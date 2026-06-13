@@ -640,6 +640,74 @@ pub fn unmap_page(virt: u64) -> Result<u64, PagingError> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageTableWalk {
+    pub cr3: u64,
+    pub pml4e: u64,
+    pub pdpte: u64,
+    pub pde: u64,
+    pub pte: u64,
+    pub physical: Option<u64>,
+}
+
+pub fn walk_kernel_page_tables(virtual_address: u64) -> Option<PageTableWalk> {
+    unsafe {
+        if ACTIVE_PML4.is_null() {
+            return None;
+        }
+        let pml4e = (*ACTIVE_PML4).entries[index(virtual_address, 39)];
+        if pml4e & PRESENT == 0 {
+            return Some(PageTableWalk {
+                cr3: CURRENT_ADDRESS_SPACE_ROOT,
+                pml4e,
+                pdpte: 0,
+                pde: 0,
+                pte: 0,
+                physical: None,
+            });
+        }
+        let pdpt = table_for_physical(pml4e & ADDRESS_MASK);
+        let pdpte = (*pdpt).entries[index(virtual_address, 30)];
+        if pdpte & PRESENT == 0 {
+            return Some(PageTableWalk {
+                cr3: CURRENT_ADDRESS_SPACE_ROOT,
+                pml4e,
+                pdpte,
+                pde: 0,
+                pte: 0,
+                physical: None,
+            });
+        }
+        let pd = table_for_physical(pdpte & ADDRESS_MASK);
+        let pde = (*pd).entries[index(virtual_address, 21)];
+        if pde & PRESENT == 0 {
+            return Some(PageTableWalk {
+                cr3: CURRENT_ADDRESS_SPACE_ROOT,
+                pml4e,
+                pdpte,
+                pde,
+                pte: 0,
+                physical: None,
+            });
+        }
+        let pt = table_for_physical(pde & ADDRESS_MASK);
+        let pte = (*pt).entries[index(virtual_address, 12)];
+        let physical = if pte & PRESENT != 0 {
+            Some((pte & ADDRESS_MASK) | (virtual_address & (PAGE_SIZE - 1)))
+        } else {
+            None
+        };
+        Some(PageTableWalk {
+            cr3: CURRENT_ADDRESS_SPACE_ROOT,
+            pml4e,
+            pdpte,
+            pde,
+            pte,
+            physical,
+        })
+    }
+}
+
 pub fn translate_virt(virt: u64) -> Option<u64> {
     unsafe {
         if ACTIVE_PML4.is_null() {
