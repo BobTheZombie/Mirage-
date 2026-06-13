@@ -134,16 +134,21 @@ impl From<BlockError> for UsbError {
     fn from(error: BlockError) -> Self {
         match error {
             BlockError::InvalidBlockSize => Self::InvalidBlockSize,
-            BlockError::BufferSizeMismatch => Self::BufferSizeMismatch,
+            BlockError::BufferSizeMismatch | BlockError::BufferTooSmall => Self::BufferSizeMismatch,
             BlockError::OutOfBounds | BlockError::EmptyRange | BlockError::RangeOverflow => {
                 Self::OutOfBounds
             }
             BlockError::ReadOnly => Self::ReadOnly,
             BlockError::DeviceOffline => Self::Offline,
             BlockError::DeviceFaulted => Self::Faulted,
-            BlockError::QueueEmpty | BlockError::DeviceMismatch | BlockError::Io => {
-                Self::TransportFault
-            }
+            BlockError::QueueEmpty
+            | BlockError::DeviceMismatch
+            | BlockError::Io
+            | BlockError::NoDevice
+            | BlockError::Timeout
+            | BlockError::Unsupported
+            | BlockError::BufferMisaligned
+            | BlockError::DmaError => Self::TransportFault,
         }
     }
 }
@@ -809,7 +814,9 @@ pub mod hw_xhci {
     impl From<BlockError> for XhciError {
         fn from(error: BlockError) -> Self {
             match error {
-                BlockError::BufferSizeMismatch => Self::BufferSizeMismatch,
+                BlockError::BufferSizeMismatch | BlockError::BufferTooSmall => {
+                    Self::BufferSizeMismatch
+                }
                 BlockError::OutOfBounds | BlockError::EmptyRange | BlockError::RangeOverflow => {
                     Self::OutOfBounds
                 }

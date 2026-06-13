@@ -1095,3 +1095,44 @@ mod tests {
         assert_eq!(service.next_event(), None);
     }
 }
+
+/// Root filesystem selection parsed from the Mirage boot command line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RootFsSelection {
+    Auto,
+    BuiltInQfs,
+    Nvme0n1,
+    Sata0,
+    Named(&'static str),
+}
+
+/// Parse the storage-specific `root=` policy accepted by Mirage early boot.
+pub fn parse_rootfs_selection(value: &'static str) -> Result<RootFsSelection, StorageError> {
+    match value {
+        "auto" => Ok(RootFsSelection::Auto),
+        "builtin-qfs" => Ok(RootFsSelection::BuiltInQfs),
+        "nvme0n1" => Ok(RootFsSelection::Nvme0n1),
+        "sata0" => Ok(RootFsSelection::Sata0),
+        "" => Err(StorageError::DeviceNotFound),
+        other => Ok(RootFsSelection::Named(other)),
+    }
+}
+
+#[cfg(test)]
+mod rootfs_policy_tests {
+    use super::*;
+
+    #[test]
+    fn root_parser_accepts_required_storage_policies() {
+        assert_eq!(parse_rootfs_selection("auto"), Ok(RootFsSelection::Auto));
+        assert_eq!(
+            parse_rootfs_selection("builtin-qfs"),
+            Ok(RootFsSelection::BuiltInQfs)
+        );
+        assert_eq!(
+            parse_rootfs_selection("nvme0n1"),
+            Ok(RootFsSelection::Nvme0n1)
+        );
+        assert_eq!(parse_rootfs_selection("sata0"), Ok(RootFsSelection::Sata0));
+    }
+}

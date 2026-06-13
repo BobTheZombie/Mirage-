@@ -354,3 +354,24 @@ distclean: clean
 	else \
 		echo "Preserved $(CONFIG_FILE) (use CONFIG_CLEAN=1 to remove it)"; \
 	fi
+
+qfs-image:
+	mkdir -p $(BUILD_DIR)
+	$(CARGO) run --features qfs-std --bin qfsprogs -- mkfs $(BUILD_DIR)/qfs.img
+	$(CARGO) run --features qfs-std --bin qfsprogs -- fsck $(BUILD_DIR)/qfs.img
+
+$(BUILD_DIR)/sata-qfs.img:
+	mkdir -p $(BUILD_DIR)
+	$(CARGO) run --features qfs-std --bin qfsprogs -- mkfs $@
+
+$(BUILD_DIR)/nvme-qfs.img:
+	mkdir -p $(BUILD_DIR)
+	$(CARGO) run --features qfs-std --bin qfsprogs -- mkfs $@
+
+qemu-ahci-qfs: $(BUILD_DIR)/sata-qfs.img image
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_KERNEL_CMDLINE="root=sata0" MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(BUILD_DIR)/sata-qfs.img,if=none,id=sata0,format=raw -device ich9-ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0" tools/run-qemu.sh
+
+qemu-nvme-qfs: $(BUILD_DIR)/nvme-qfs.img image
+	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_KERNEL_CMDLINE="root=nvme0n1" MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(BUILD_DIR)/nvme-qfs.img,if=none,id=nvme0,format=raw -device nvme,drive=nvme0,serial=mirage-nvme0" tools/run-qemu.sh
+
+qemu-m2-qfs: qemu-nvme-qfs

@@ -7,8 +7,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mirage_block::{
-    BlockDevice, BlockDeviceId, BlockDeviceInfo, BlockDeviceState, BlockError, BlockRange,
-    BlockSize, Lba, SectorCount,
+    BlockDevice, BlockDeviceId, BlockDeviceInfo, BlockDeviceKind, BlockDeviceState, BlockError,
+    BlockRange, BlockSize, Lba, SectorCount,
 };
 use mirage_cap::{
     CapabilityError, CapabilityObject, CapabilityRight, CapabilityRights, CapabilitySet,
@@ -95,14 +95,21 @@ impl From<BlockError> for AhciError {
     fn from(error: BlockError) -> Self {
         match error {
             BlockError::InvalidBlockSize => Self::InvalidBlockSize,
-            BlockError::BufferSizeMismatch => Self::BufferSizeMismatch,
+            BlockError::BufferSizeMismatch | BlockError::BufferTooSmall => Self::BufferSizeMismatch,
             BlockError::OutOfBounds | BlockError::EmptyRange | BlockError::RangeOverflow => {
                 Self::OutOfBounds
             }
             BlockError::ReadOnly => Self::ReadOnly,
             BlockError::DeviceOffline => Self::Offline,
             BlockError::DeviceFaulted => Self::Faulted,
-            BlockError::QueueEmpty | BlockError::DeviceMismatch | BlockError::Io => Self::Faulted,
+            BlockError::QueueEmpty
+            | BlockError::DeviceMismatch
+            | BlockError::Io
+            | BlockError::NoDevice
+            | BlockError::Timeout
+            | BlockError::Unsupported
+            | BlockError::BufferMisaligned
+            | BlockError::DmaError => Self::Faulted,
         }
     }
 }
@@ -276,8 +283,10 @@ impl SataDevice {
     }
 
     pub const fn info(&self) -> BlockDeviceInfo {
-        BlockDeviceInfo::new(
+        BlockDeviceInfo::named(
             self.block_device_id,
+            "sata0",
+            BlockDeviceKind::SataDisk,
             self.block_size,
             self.sectors,
             self.read_only,
@@ -640,7 +649,9 @@ pub mod hw_ahci {
     impl From<BlockError> for AhciHwError {
         fn from(error: BlockError) -> Self {
             match error {
-                BlockError::BufferSizeMismatch => Self::BufferSizeMismatch,
+                BlockError::BufferSizeMismatch | BlockError::BufferTooSmall => {
+                    Self::BufferSizeMismatch
+                }
                 BlockError::OutOfBounds | BlockError::EmptyRange | BlockError::RangeOverflow => {
                     Self::OutOfBounds
                 }
@@ -871,8 +882,10 @@ pub mod hw_ahci {
     }
     impl AtaIdentifyData {
         pub const fn info(self) -> BlockDeviceInfo {
-            BlockDeviceInfo::new(
+            BlockDeviceInfo::named(
                 self.block_device_id,
+                "sata0",
+                BlockDeviceKind::SataDisk,
                 self.block_size,
                 self.sectors,
                 self.read_only,

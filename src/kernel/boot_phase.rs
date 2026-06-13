@@ -9,9 +9,9 @@
 use crate::kernel::sync::SpinLock;
 
 /// Maximum number of boot subsystem records tracked without allocation.
-pub const BOOT_PHASE_CAPACITY: usize = 48;
+pub const BOOT_PHASE_CAPACITY: usize = 64;
 /// Current number of canonical Mirage boot phases.
-pub const BOOT_PHASE_COUNT: usize = BOOT_PHASE_CAPACITY;
+pub const BOOT_PHASE_COUNT: usize = 53;
 
 /// Coarse subsystem ownership used by boot rendering and future debug queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,8 +59,13 @@ pub enum BootPhase {
     Battery,
     AmdGpuRenoir,
     AmdXhci,
+    BlockLayer,
+    M2Storage,
     Nvme,
+    NvmeNamespace,
     Ahci,
+    SataDisk,
+    Qfs,
     I8042,
     Ps2Keyboard,
     Xhci,
@@ -100,8 +105,13 @@ impl BootPhase {
             Self::AcpiTables => "ACPI Tables",
             Self::AmdGpuRenoir => "AMDGPU Renoir",
             Self::AmdXhci => "AMD xHCI",
+            Self::BlockLayer => "Block Layer",
+            Self::M2Storage => "M.2-capable storage path",
             Self::Nvme => "NVMe",
+            Self::NvmeNamespace => "NVMe Namespace",
             Self::Ahci => "AHCI",
+            Self::SataDisk => "SATA Disk",
+            Self::Qfs => "QFS",
             Self::UsbCore => "USB Core",
             Self::UsbHid => "USB HID",
             Self::UsbKeyboard => "USB Keyboard",
@@ -512,8 +522,29 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         3,
     ),
     descriptor(
+        BootPhase::BlockLayer,
+        "Block Layer",
+        SubsystemCategory::Storage,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::M2Storage,
+        "M.2-capable storage path",
+        SubsystemCategory::Storage,
+        false,
+        2,
+    ),
+    descriptor(
         BootPhase::Nvme,
         "NVMe",
+        SubsystemCategory::Storage,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::NvmeNamespace,
+        "NVMe Namespace",
         SubsystemCategory::Storage,
         false,
         3,
@@ -525,6 +556,14 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         false,
         3,
     ),
+    descriptor(
+        BootPhase::SataDisk,
+        "SATA Disk",
+        SubsystemCategory::Storage,
+        false,
+        3,
+    ),
+    descriptor(BootPhase::Qfs, "QFS", SubsystemCategory::Storage, false, 3),
     descriptor(
         BootPhase::I8042,
         "I8042",
@@ -730,10 +769,19 @@ pub fn boot_register_compiled_subsystems() {
     register_phase(BootPhase::AmdGpuRenoir);
     #[cfg(feature = "hw-xhci")]
     register_phase(BootPhase::AmdXhci);
+    register_phase(BootPhase::BlockLayer);
+    register_phase(BootPhase::M2Storage);
     #[cfg(feature = "hw-nvme")]
-    register_phase(BootPhase::Nvme);
+    {
+        register_phase(BootPhase::Nvme);
+        register_phase(BootPhase::NvmeNamespace);
+    }
     #[cfg(feature = "hw-ahci")]
-    register_phase(BootPhase::Ahci);
+    {
+        register_phase(BootPhase::Ahci);
+        register_phase(BootPhase::SataDisk);
+    }
+    register_phase(BootPhase::Qfs);
     #[cfg(feature = "hw-i8042")]
     register_phase(BootPhase::I8042);
     #[cfg(feature = "hw-ps2-keyboard")]
