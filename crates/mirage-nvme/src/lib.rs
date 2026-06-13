@@ -7,8 +7,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mirage_block::{
-    BlockDevice, BlockDeviceId, BlockDeviceInfo, BlockDeviceKind, BlockDeviceState, BlockError,
-    BlockRange, BlockSize, Lba, SectorCount,
+    BlockDevice, BlockDeviceId, BlockDeviceInfo, BlockDeviceState, BlockError, BlockRange,
+    BlockSize, Lba, SectorCount,
 };
 use mirage_cap::{
     CapabilityError, CapabilityObject, CapabilityRight, CapabilityRights, CapabilitySet,
@@ -591,6 +591,7 @@ fn check_hardware_authority(
 #[cfg(feature = "hw-nvme")]
 pub mod hw_nvme {
     use super::*;
+    use mirage_block::BlockDeviceKind;
     use mirage_pci::PciDevice;
 
     const DEFAULT_POLL_TICKS: u32 = 64;
@@ -611,6 +612,7 @@ pub mod hw_nvme {
         OutOfBounds,
         ReadOnly,
         Offline,
+        HardwareBackendIncomplete,
     }
 
     impl From<CapabilityError> for NvmeHwError {
@@ -652,6 +654,7 @@ pub mod hw_nvme {
                 NvmeHwError::OutOfBounds => Self::OutOfBounds,
                 NvmeHwError::ReadOnly => Self::ReadOnly,
                 NvmeHwError::Offline => Self::DeviceOffline,
+                NvmeHwError::HardwareBackendIncomplete => Self::Unsupported,
                 _ => Self::Io,
             }
         }
@@ -1034,16 +1037,13 @@ pub mod hw_nvme {
                     status: NvmeStatus::internal_error(),
                 },
             })?;
-            Ok(Self {
-                id,
-                resources,
-                authority,
-                registers: NvmeRegisters::new(resources.mmio_base, resources.mmio_length),
-                admin_queue: None,
-                io_queue: None,
-                namespaces: Vec::new(),
-                next_command_id: 1,
-            })
+
+            // The hardware NVMe backend must not fabricate an online controller from
+            // shadow register state. Until BAR0 is mapped through the central MMIO
+            // subsystem and real DMA queues are allocated, fail closed instead of
+            // exposing fake Identify, namespace, or I/O success paths.
+            let _ = (id, resources, authority);
+            Err(NvmeHwError::HardwareBackendIncomplete)
         }
         pub fn reset(&mut self) -> Result<(), NvmeHwError> {
             self.registers.set_enabled(false);

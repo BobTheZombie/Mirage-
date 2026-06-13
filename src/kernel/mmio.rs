@@ -53,6 +53,8 @@ pub enum MmioError {
     VirtualSpaceExhausted,
     MapFailed(PagingError),
     VerifyFailed,
+    VerifyNotWritable,
+    VerifyUserAccessible,
 }
 
 pub const fn page_align_down(address: u64) -> u64 {
@@ -97,11 +99,11 @@ pub fn map_mmio(phys: PhysAddr, len: usize, flags: MmioFlags) -> Result<MmioRegi
         ),
         len,
     };
-    verify_mapped(region.virt, region.len)?;
+    verify_mapped(region.virt, region.len, flags)?;
     Ok(region)
 }
 
-pub fn verify_mapped(virt: VirtAddr, len: usize) -> Result<(), MmioError> {
+pub fn verify_mapped(virt: VirtAddr, len: usize, flags: MmioFlags) -> Result<(), MmioError> {
     if len == 0 {
         return Err(MmioError::ZeroLength);
     }
@@ -116,8 +118,17 @@ pub fn verify_mapped(virt: VirtAddr, len: usize) -> Result<(), MmioError> {
         & !((PAGE_SIZE as u64) - 1);
     let mut current = start;
     while current < end {
-        if paging::translate_virt(current).is_none() {
+        let Some(walk) = paging::walk_kernel_page_tables(current) else {
             return Err(MmioError::VerifyFailed);
+        };
+        if walk.physical.is_none() || (walk.pte & 1) == 0 {
+            return Err(MmioError::VerifyFailed);
+        }
+        if flags.writable() && (walk.pte & (1 << 1)) == 0 {
+            return Err(MmioError::VerifyNotWritable);
+        }
+        if (walk.pte & (1 << 2)) != 0 {
+            return Err(MmioError::VerifyUserAccessible);
         }
         current = current
             .checked_add(PAGE_SIZE as u64)
