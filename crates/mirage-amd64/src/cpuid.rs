@@ -307,9 +307,7 @@ fn read_if(reader: &impl AmdCpuidReader, max_leaf: u32, leaf: u32, subleaf: u32)
 fn backend_cpuid(leaf: u32, subleaf: u32) -> CpuidLeaf {
     use core::arch::x86_64::__cpuid_count;
 
-    // SAFETY: `cpuid` is an architectural enumeration instruction on x86_64.
-    // This reader does not change CPU state or grant policy authority.
-    let result = unsafe { __cpuid_count(leaf, subleaf) };
+    let result = __cpuid_count(leaf, subleaf);
     CpuidLeaf::new(result.eax, result.ebx, result.ecx, result.edx)
 }
 
