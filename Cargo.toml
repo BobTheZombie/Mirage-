@@ -2,6 +2,7 @@
 members = [
     ".",
     "tools/mirageconfig",
+    "tools/mk-runtime-image",
     "crates/mirage-acpi",
     "crates/mirage-ahci",
     "crates/mirage-amd-chipset",
@@ -23,7 +24,6 @@ members = [
     "crates/mirage-storage",
     "crates/mirage-usb",
     "userspace/spider-rs",
-    "userspace/spider-pid1",
 ]
 resolver = "2"
 

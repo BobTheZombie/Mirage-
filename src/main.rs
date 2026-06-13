@@ -79,7 +79,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                     Ok((_runtime, fs)) => {
                         boot_phase_detected(BootPhase::BootRuntime);
                         boot_phase_online(BootPhase::BootRuntime);
-                        mirage::kprintln!("Boot Runtime Online: /bootrt/sbin/spider-rs available");
+                        mirage::kprintln!("[spider-rt] module found and RuntimeVfs mounted: /spider-rt/sbin/spider-rs available");
                         Some(fs)
                     }
                     Err(error) => {
@@ -97,7 +97,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 BootPhase::BootRuntime,
                 "Spider-rs-required Boot Runtime image missing",
             );
-            mirage::kprintln!("Boot Runtime Failed: Spider-rs-required image missing");
+            mirage::kprintln!("[spider-rt] RuntimeVfs Failed: Spider-rs-required image missing");
         }
 
         #[cfg(feature = "full-boot")]
@@ -276,7 +276,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 Ok(len) => {
                     boot_phase_online(BootPhase::UserspaceLoader);
                     mirage::kprintln!(
-                        "Userspace Loader Online: read /bootrt/sbin/spider-rs ({} bytes)",
+                        "Userspace Loader Online: read /spider-rt/sbin/spider-rs ({} bytes)",
                         len
                     );
                     Some(len)
@@ -284,14 +284,20 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 Err(error) => {
                     boot_phase_failed(
                         BootPhase::UserspaceLoader,
-                        "Boot Runtime Spider-rs read failed",
+                        "RuntimeVfs Spider-rs read failed",
                     );
-                    mirage::kprintln!("userspace loader failed to read Spider-rs: {:?}", error);
+                    mirage::kprintln!(
+                        "userspace loader failed to read Spider-rs from RuntimeVfs: {:?}",
+                        error
+                    );
                     None
                 }
             }
         } else {
-            boot_phase_stub(BootPhase::UserspaceLoader, "Boot Runtime unavailable");
+            boot_phase_stub(
+                BootPhase::UserspaceLoader,
+                "RuntimeVfs /spider-rt unavailable",
+            );
             None
         };
         boot_phase_start(BootPhase::SpiderRs);
@@ -302,10 +308,14 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         };
         match spider_launch {
             Ok(pid) => {
-                boot_phase_start(BootPhase::Userspace);
-                boot_phase_ok(BootPhase::Userspace);
-                boot_phase_online(BootPhase::SpiderRs);
-                mirage::kprintln!("Spider-rs PID 1 task created: {:?}", pid);
+                boot_phase_stub(
+                    BootPhase::Userspace,
+                    "Spider-rs task created but no confirmed ring-3 entry",
+                );
+                mirage::kprintln!(
+                    "Spider-rs PID 1 task created: {:?}; Online awaits userspace write confirmation",
+                    pid
+                );
             }
             Err(error) => {
                 boot_phase_stub(

@@ -1,8 +1,8 @@
-//! Immutable Boot Runtime RAMFS for early userspace PID 1 availability.
+//! Immutable RuntimeVfs for Spider Runtime for early userspace PID 1 availability.
 //!
 //! The image format is deliberately simple and no-heap friendly: a fixed binary
 //! header followed by file entries and byte payloads.  It is not a normal root
-//! filesystem; it is kernel-owned, read-only, and mounted at `/bootrt`.
+//! filesystem; it is kernel-owned, read-only, and mounted at `/spider-rt`.
 
 use crate::arch::x86_64::boot::{BootModules, VirtualAddress};
 use crate::kernel::block::BlockError;
@@ -14,7 +14,7 @@ pub const BOOTRT_MAX_FILES: usize = 16;
 pub const BOOTRT_ENTRY_SIZE: usize = 128;
 pub const BOOTRT_HEADER_SIZE: usize = 64;
 pub const BOOTRT_ENTRY: &str = "/sbin/spider-rs";
-pub const BOOTRT_MOUNTED_ENTRY: &str = "/bootrt/sbin/spider-rs";
+pub const BOOTRT_MOUNTED_ENTRY: &str = "/spider-rt/sbin/spider-rs";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootRuntime {
@@ -141,7 +141,9 @@ pub fn find_boot_runtime_module(modules: BootModules) -> Option<&'static [u8]> {
 }
 
 fn module_matches_bootrt(bytes: &[u8]) -> bool {
-    contains(bytes, b"bootrt") || contains(bytes, b"mirage-boot-runtime")
+    contains(bytes, b"spider-rt")
+        || contains(bytes, b"bootrt")
+        || contains(bytes, b"mirage-boot-runtime")
 }
 
 fn module_slice(base: VirtualAddress, size: u64) -> Option<&'static [u8]> {
@@ -236,7 +238,9 @@ fn find_file_in_manifest(manifest: &BootRuntimeManifest, path: &str) -> Option<B
 }
 
 fn normalize_bootrt_path(path: &str) -> &str {
-    path.strip_prefix("/bootrt").unwrap_or(path)
+    path.strip_prefix("/spider-rt")
+        .or_else(|| path.strip_prefix("/bootrt"))
+        .unwrap_or(path)
 }
 
 pub fn crc32(bytes: &[u8]) -> u32 {
