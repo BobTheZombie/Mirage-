@@ -1,18 +1,21 @@
+#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 use std::fmt;
 
-/// Unit kinds understood or reserved by Spider-rs.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// Unit kinds understood by Spider-rs v0 and reserved for later milestones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UnitKind {
     Service,
     Target,
-    Socket,
-    Timer,
     Mount,
     Device,
+    Timer,
+    Socket,
+    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
     Path,
 }
 
 impl UnitKind {
+    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
     pub fn from_name(name: &str) -> Option<Self> {
         let suffix = name.rsplit_once('.').map(|(_, suffix)| suffix)?;
         match suffix {
@@ -28,6 +31,7 @@ impl UnitKind {
     }
 }
 
+#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 impl fmt::Display for UnitKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
@@ -44,25 +48,84 @@ impl fmt::Display for UnitKind {
 }
 
 /// Runtime state tracked by Spider-rs for a loaded unit.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnitState {
-    Loaded,
     Inactive,
     Activating,
     Active,
-    /// Current milestone used StubSpawner; no Mirage process was executed.
-    Stub,
     Failed,
+    Stopping,
+    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
+    Loaded,
+    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
+    Stub,
+    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
     Skipped,
 }
 
+/// Static v0 unit descriptor. Dynamic parsers can later populate equivalent records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnitDescriptor {
+    pub name: &'static str,
+    pub kind: UnitKind,
+    pub description: &'static str,
+    pub after: &'static [&'static str],
+    pub requires: &'static [&'static str],
+    pub wants: &'static [&'static str],
+}
+
+const EMPTY: &[&str] = &[];
+const BASIC_WANTS: &[&str] = &["spider-init.service"];
+const DEFAULT_AFTER: &[&str] = &["basic.target"];
+const DEFAULT_REQUIRES: &[&str] = &["basic.target"];
+
+pub static BUILTIN_UNITS: &[UnitDescriptor] = &[
+    UnitDescriptor {
+        name: "basic.target",
+        kind: UnitKind::Target,
+        description: "Basic Spider userspace target",
+        after: EMPTY,
+        requires: EMPTY,
+        wants: BASIC_WANTS,
+    },
+    UnitDescriptor {
+        name: "default.target",
+        kind: UnitKind::Target,
+        description: "Default Mirage userspace target",
+        after: DEFAULT_AFTER,
+        requires: DEFAULT_REQUIRES,
+        wants: EMPTY,
+    },
+    UnitDescriptor {
+        name: "emergency.target",
+        kind: UnitKind::Target,
+        description: "Emergency Spider shell target placeholder",
+        after: EMPTY,
+        requires: EMPTY,
+        wants: EMPTY,
+    },
+    UnitDescriptor {
+        name: "spider-init.service",
+        kind: UnitKind::Service,
+        description: "Spider first-stage initialization hooks",
+        after: EMPTY,
+        requires: EMPTY,
+        wants: EMPTY,
+    },
+];
+
+pub fn default_units() -> &'static [UnitDescriptor] {
+    BUILTIN_UNITS
+}
+
+#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RestartPolicy {
     No,
     OnFailure,
     Always,
 }
-
+#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 impl RestartPolicy {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
@@ -73,7 +136,7 @@ impl RestartPolicy {
         }
     }
 }
-
+#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unit {
     pub name: String,
@@ -85,20 +148,20 @@ pub struct Unit {
     pub wants: Vec<String>,
     pub wanted_by: Vec<String>,
 }
-
+#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServiceUnit {
     pub exec_start: String,
     pub restart: RestartPolicy,
 }
-
+#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedUnit {
     pub unit: Unit,
     pub service: Option<ServiceUnit>,
     pub state: UnitState,
 }
-
+#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 impl LoadedUnit {
     pub fn new(unit: Unit, service: Option<ServiceUnit>) -> Self {
         Self {
