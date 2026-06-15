@@ -11,7 +11,5 @@ default = []
 hw-ryzen = ["mirage-amd64/hw-amd64"]
 hw-amd-telemetry = ["hw-ryzen"]
 
-hw-renoir = ["hw-ryzen"]
-hw-renoir-4500u = ["hw-renoir"]
 [dependencies]
 mirage-amd64 = { path = "../mirage-amd64" }

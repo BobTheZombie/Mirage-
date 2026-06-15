@@ -48,8 +48,6 @@ pub mod io;
 pub mod limine_block;
 pub mod msr;
 pub mod paging;
-pub mod platform;
-
 pub mod pic;
 #[cfg(feature = "hw-ps2-keyboard")]
 pub mod ps2_keyboard;
@@ -142,7 +140,6 @@ pub fn init_architecture(boot_info: &BootInfo) {
         let mut platform_registry = initialize_platform_probes(boot_info);
         initialize_storage_hardware(boot_info, &platform_registry);
         initialize_input_hardware(boot_info, &mut platform_registry);
-        let _renoir_boot_profile = platform::amd::renoir_kernel_boot_probe(boot_info);
     }
 }
 

@@ -15,9 +15,6 @@ use crate::kernel::services::registry::ServiceId as RegistryServiceId;
 use crate::kernel::{Kernel, KernelError, ProcessExitReport};
 use mirage_platform::{DeviceCandidateRole, DeviceDiscoveryEvent, PlatformInfo, PlatformService};
 pub mod mock_service;
-
-pub mod renoir_mtss;
-
 pub mod pid1;
 
 use crate::subkernel::{

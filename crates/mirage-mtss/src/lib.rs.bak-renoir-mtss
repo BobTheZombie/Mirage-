@@ -1,17 +1,13 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-//
-
-pub mod scheduler_modules;
-pub use scheduler_modules::{MtssCpuProfile, MtssSchedulerModuleDescriptor, MtssSchedulerModuleId};
-//Mirage Multitasking Subsystem (MTSS) primitives.
-//
-// MTSS defines the portable task/thread lifecycle model used by Mirage
-// scheduler-facing code.  Architecture-specific CPU context, selectors,
-// syscall traps, and trap-frame layouts intentionally remain outside this
-// crate; MTSS only records scheduler-visible identity, state, priority,
-// timeslice, run-queue, event, and accounting data.
+//! Mirage Multitasking Subsystem (MTSS) primitives.
+//!
+//! MTSS defines the portable task/thread lifecycle model used by Mirage
+//! scheduler-facing code.  Architecture-specific CPU context, selectors,
+//! syscall traps, and trap-frame layouts intentionally remain outside this
+//! crate; MTSS only records scheduler-visible identity, state, priority,
+//! timeslice, run-queue, event, and accounting data.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

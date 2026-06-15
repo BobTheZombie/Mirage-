@@ -17,10 +17,6 @@ use mirage_ipc::EndpointId;
 use mirage_pci::{PciAddress, PciBus, PciClassCode, PciDevice, PciDeviceId, PciVendorId};
 use mirage_ryzen::RyzenProfile;
 
-pub mod renoir;
-pub use renoir::{RenoirDeviceCandidate, RenoirPciRole, RenoirSocInventory};
-
-
 /// AMD CPU/chipset PCI vendor identifier used by host bridges, FCH devices,
 /// IOMMUs, SATA controllers, and USB controllers.
 pub const AMD_CHIPSET_VENDOR_ID: PciVendorId = PciVendorId::new(0x1022);

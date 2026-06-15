@@ -1,7 +1,5 @@
 #![no_std]
 #![cfg_attr(
-
-
     not(all(feature = "hw-ryzen", target_arch = "x86_64")),
     forbid(unsafe_code)
 )]
@@ -16,13 +14,7 @@
 //! marketing-name claims and falls back to structured unknown status instead of
 //! panicking on unmodeled AMD64 processors.
 
-use mirage_amd64::{
-    AmdCacheInfo, AmdCpuId, AmdFeatureSet, AmdTopology, AmdVendor, PrivilegeRing,
-};
-
-pub mod renoir;
-
-pub use renoir::{RenoirCpuProfile, RenoirDetectionKind};
+use mirage_amd64::{AmdCacheInfo, AmdCpuId, AmdFeatureSet, AmdTopology, AmdVendor, PrivilegeRing};
 
 /// Fixed-size CPUID brand string buffer. Bytes after the first NUL are padding.
 pub type RyzenBrandString = [u8; 48];

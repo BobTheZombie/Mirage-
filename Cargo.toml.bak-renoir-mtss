@@ -80,12 +80,6 @@ hw-ryzen-4500u = ["hw-apu-renoir"]
 # Enables host/testing QFS adapters backed by the Rust standard library.
 qfs-std = ["dep:mirage-block", "dep:mirage-storage"]
 
-# Renoir/MTSS platform bring-up features.
-hw-renoir-kernel-boot = ["hw-ryzen", "hw-amd-chipset", "hw-pci"]
-mtss-scheduler-modules = []
-mtss-sched-amd-zen2-renoir = ["mtss-scheduler-modules", "hw-renoir-kernel-boot"]
-supervisor-renoir-mtss-policy = ["mtss-sched-amd-zen2-renoir"]
-
 [dependencies]
 # The default kernel build is strictly no_std; the Mirage target builds the
 # Rust `alloc` crate from source so kernel `Box`/`Vec` users route through the

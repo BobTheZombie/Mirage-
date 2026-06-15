@@ -10,7 +10,6 @@ license = "MIT OR Apache-2.0"
 default = []
 hw-amd-chipset = ["mirage-ryzen/hw-ryzen"]
 
-hw-renoir-4500u = ["hw-amd-chipset", "mirage-ryzen/hw-renoir-4500u"]
 [dependencies]
 mirage-cap = { path = "../mirage-cap" }
 mirage-ipc = { path = "../mirage-ipc" }
