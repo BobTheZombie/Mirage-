@@ -302,26 +302,19 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         };
         boot_phase_start(BootPhase::SpiderRs);
         let spider_launch = if let Some(len) = spider_len {
-            supervisor.launch_spider_rs_pid1_via_mtss(&mut kernel, &spider_image[..len])
+            kernel.bootstrap_spider_rs_pid1_from_image(&spider_image[..len])
         } else {
-            Err(mirage::supervisor::pid1::SpiderPid1LaunchError::RuntimeUnavailable)
+            kernel.bootstrap_spider_rs_pid1()
         };
         match spider_launch {
-            Ok(report) => {
-                boot_phase_stub(
-                    BootPhase::SpiderRs,
-                    "MTSS admitted Spider-rs PID 1; ring-3 confirmation pending",
-                );
+            Ok(pid) => {
                 boot_phase_stub(
                     BootPhase::Userspace,
-                    "MTSS admitted Spider-rs PID 1; waiting for first userspace syscall confirmation",
+                    "Spider-rs task created but no confirmed ring-3 entry",
                 );
                 mirage::kprintln!(
-                    "Supervisor authorized Spider-rs PID 1 via MTSS: pid={:?} entry={:#x} bytes={} path={}",
-                    report.pid,
-                    report.entry.0,
-                    report.image_len,
-                    report.runtime_path
+                    "Spider-rs PID 1 task created: {:?}; Online awaits userspace write confirmation",
+                    pid
                 );
             }
             Err(error) => {

@@ -23,7 +23,6 @@ pub mod platform;
 pub mod process;
 pub mod root;
 pub mod services;
-pub mod spider_pid1;
 pub mod sync;
 pub mod syscall;
 pub mod thread;

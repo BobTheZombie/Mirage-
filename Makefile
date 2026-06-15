@@ -28,7 +28,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all build kernel spider-rs spider-rs-clean spider-rs-check spider-rt-tree spider-rt-image runtime-images userspace-spider-rs install-spider-rs qemu-spider qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print qemu-ahci-sata qemu-ahci-atapi qemu-ahci-gpt qemu-ahci-mbr qemu-bootrt qemu-spider-bootrt qemu-spider-rt
+.PHONY: all build kernel spider-rs spider-rs-clean spider-rs-check spider-rt-tree spider-rt-image runtime-images userspace-spider-rs install-spider-rs qemu-spider qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print qemu-ahci-sata qemu-ahci-atapi qemu-ahci-gpt qemu-ahci-mbr qemu-bootrt qemu-spider-bootrt qemu-spider-rt menuconfig nconfig olddefconfig
 
 all: iso
 
@@ -83,6 +83,12 @@ qemu-spider: install-spider-rs image
 
 mirageconfig:
 	$(MIRAGECONFIG) --menu --config $(CONFIG_FILE) --generate
+
+menuconfig: mirageconfig
+
+nconfig: mirageconfig
+
+olddefconfig: oldconfig
 
 defconfig:
 	$(MIRAGECONFIG) --defconfig --config $(CONFIG_FILE) --generate
