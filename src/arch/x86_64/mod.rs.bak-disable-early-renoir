@@ -146,13 +146,7 @@ pub fn init_architecture(boot_info: &BootInfo) {
         let mut platform_registry = initialize_platform_probes(boot_info);
         initialize_storage_hardware(boot_info, &platform_registry);
         initialize_input_hardware(boot_info, &mut platform_registry);
-    // Renoir platform probing is intentionally not executed from the early
-    // x86_64 IDT/interrupt bring-up path. CPUID/platform detection is safe,
-    // but the boot-phase/status plumbing can touch high-half state that is
-    // not guaranteed mapped while exception vectors are being installed.
-    // Re-enable from the supervisor/platform bring-up phase after IDT+PIC
-    // are marked OK.
-    // let _renoir_boot_profile = platform::amd::renoir_kernel_boot_probe(boot_info);
+        let _renoir_boot_profile = platform::amd::renoir_kernel_boot_probe(boot_info);
     }
 }
 
@@ -1255,17 +1249,7 @@ fn configure_interrupts(boot_info: &BootInfo) {
     idt::initialize();
     boot_phase_ok(BootPhase::Idt);
 
-    if let Some(madt) = {
-        // TEMP: ACPI MADT discovery is disabled during early IDT/APIC bring-up.
-        // The current page tables do not map the firmware/ACPI physical memory
-        // window yet, so acpi_madt::discover(boot_info) can fault on high-half
-        // direct-map reads before the platform-memory phase exists.
-        //
-        // Re-enable this from a later ACPI_EARLY/MADT phase after the ACPI
-        // table pages are explicitly mapped.
-        let _ = boot_info;
-        None::<acpi_madt::MadtInfo>
-    } {
+    if let Some(madt) = acpi_madt::discover(boot_info) {
         boot_phase_start(BootPhase::AcpiTables);
         boot_phase_ok(BootPhase::AcpiTables);
         if let Some(hhdm) = boot_info.hhdm_offset {

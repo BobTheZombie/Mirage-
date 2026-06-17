@@ -63,6 +63,15 @@ pub fn initialize() {
     }
 }
 
+/// Mask every legacy PIC interrupt line.
+pub fn mask_all() {
+    #[cfg(not(test))]
+    unsafe {
+        outb(PIC1_DATA, 0xff);
+        outb(PIC2_DATA, 0xff);
+    }
+}
+
 /// Notify the PIC that an interrupt vector has been handled.
 pub fn end_of_interrupt(vector: u8) {
     #[cfg(not(test))]

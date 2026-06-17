@@ -85,6 +85,9 @@ hw-renoir-kernel-boot = ["hw-ryzen", "hw-amd-chipset", "hw-pci"]
 mtss-scheduler-modules = []
 mtss-sched-amd-zen2-renoir = ["mtss-scheduler-modules", "hw-renoir-kernel-boot"]
 supervisor-renoir-mtss-policy = ["mtss-sched-amd-zen2-renoir"]
+hw-x86_64-apic = ["hw-acpi"]
+hw-ioapic = ["hw-x86_64-apic"]
+hw-renoir-baremetal-interrupts = ["hw-renoir-kernel-boot", "hw-x86_64-apic", "hw-ioapic", "mtss-sched-amd-zen2-renoir", "supervisor-renoir-mtss-policy"]
 
 [dependencies]
 # The default kernel build is strictly no_std; the Mirage target builds the

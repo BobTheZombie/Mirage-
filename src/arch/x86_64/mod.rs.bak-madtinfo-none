@@ -1264,7 +1264,7 @@ fn configure_interrupts(boot_info: &BootInfo) {
         // Re-enable this from a later ACPI_EARLY/MADT phase after the ACPI
         // table pages are explicitly mapped.
         let _ = boot_info;
-        None::<acpi_madt::MadtInfo>
+        None::<acpi_madt::MadtHeader>
     } {
         boot_phase_start(BootPhase::AcpiTables);
         boot_phase_ok(BootPhase::AcpiTables);

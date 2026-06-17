@@ -45,23 +45,23 @@ pub mod supervisor;
 /// Higher-level logging policy belongs above the kernel.
 #[macro_export]
 macro_rules! kprint {
-    ($($arg:tt)*) => {
-        $crate::arch::x86_64::early_console::write_fmt(::core::format_args!($($arg)*));
-    };
+    ($($arg:tt)*) => {{
+        $crate::arch::x86_64::early_console::write_fmt(::core::format_args!($($arg)*))
+    }};
 }
 
 /// Print a line to the x86_64 early console.
 #[macro_export]
 macro_rules! kprintln {
-    () => {
-        $crate::kprint!("\n");
-    };
-    ($fmt:expr) => {
-        $crate::kprint!(::core::concat!($fmt, "\n"));
-    };
-    ($fmt:expr, $($arg:tt)*) => {
-        $crate::kprint!(::core::concat!($fmt, "\n"), $($arg)*);
-    };
+    () => {{
+        $crate::kprint!("\\n")
+    }};
+    ($fmt:expr) => {{
+        $crate::kprint!(::core::concat!($fmt, "\\n"))
+    }};
+    ($fmt:expr, $($arg:tt)*) => {{
+        $crate::kprint!(::core::concat!($fmt, "\\n"), $($arg)*)
+    }};
 }
 
 #[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]

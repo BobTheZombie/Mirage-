@@ -59,6 +59,21 @@
     ISR_NOERR __mirage_isr_simd, 19
     ISR_NOERR __mirage_isr_virtualization, 20
     ISR_NOERR __mirage_isr_timer, 32
+    ISR_NOERR __mirage_isr_irq1, 33
+    ISR_NOERR __mirage_isr_irq2, 34
+    ISR_NOERR __mirage_isr_irq3, 35
+    ISR_NOERR __mirage_isr_irq4, 36
+    ISR_NOERR __mirage_isr_irq5, 37
+    ISR_NOERR __mirage_isr_irq6, 38
+    ISR_NOERR __mirage_isr_irq7, 39
+    ISR_NOERR __mirage_isr_irq8, 40
+    ISR_NOERR __mirage_isr_irq9, 41
+    ISR_NOERR __mirage_isr_irq10, 42
+    ISR_NOERR __mirage_isr_irq11, 43
+    ISR_NOERR __mirage_isr_irq12, 44
+    ISR_NOERR __mirage_isr_irq13, 45
+    ISR_NOERR __mirage_isr_irq14, 46
+    ISR_NOERR __mirage_isr_irq15, 47
     ISR_NOERR __mirage_isr_syscall_trap, 128
 
     .section .bss
