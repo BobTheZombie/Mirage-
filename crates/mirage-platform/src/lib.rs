@@ -20,7 +20,7 @@ pub use timer::{
     TscCalibration, TscCounter, TscTimer,
 };
 
-use mirage_amd64::{AmdCpuId, AmdFeatureSet, AmdVendor};
+use mirage_amd64::{AmdCpuId, AmdFeatureSet, AmdTopology, AmdVendor};
 use mirage_cap::{CapabilityObject, CapabilityRights, CapabilitySet};
 use mirage_ipc::EndpointId;
 use mirage_ryzen::{
@@ -30,8 +30,113 @@ use mirage_ryzen::{
 
 pub use mirage_ryzen::{
     detect_pstate_support, read_power_state_mock, read_temperature_mock, AmdPowerState,
-    AmdPstateInfo, AmdTelemetry, AmdTelemetryError, AmdThermalSensor,
+    AmdPstateInfo, AmdTelemetry, AmdTelemetryError, AmdThermalSensor, RyzenPlatformFacts,
+    RyzenProbeStatus,
 };
+
+/// Supervisor-visible CPU facts supplied by lower platform discovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SupervisorCpuFacts {
+    pub vendor: [u8; 12],
+    pub family: u16,
+    pub model: u16,
+    pub stepping: u8,
+    pub physical_cores: u16,
+    pub logical_threads: u16,
+    pub invariant_tsc: bool,
+    pub apic: bool,
+    pub x2apic: bool,
+    pub xsave: bool,
+    pub osxsave: bool,
+}
+
+/// Supervisor-visible Ryzen facts. These are observation-only policy inputs:
+/// the supervisor must not execute CPUID or read/write MSRs directly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SupervisorRyzenFacts {
+    pub generation: RyzenGeneration,
+    pub soc_kind: RyzenSocKind,
+    pub support: RyzenSupportStatus,
+    pub msr_telemetry: RyzenProbeStatus,
+    pub acpi_inventory: RyzenProbeStatus,
+    pub pci_inventory: RyzenProbeStatus,
+}
+
+/// Supervisor-visible SoC inventory summary built from platform PCI records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SupervisorSoCInventory {
+    pub devices: Vec<PlatformDevice>,
+    pub amd_soc_present: bool,
+    pub renoir_gpu_present: bool,
+    pub amd_xhci_present: bool,
+    pub amd_iommu_present: bool,
+}
+
+/// Platform facts consumed by supervisor policy without granting hardware authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SupervisorPlatformFacts {
+    pub cpu: SupervisorCpuFacts,
+    pub ryzen: SupervisorRyzenFacts,
+    pub soc_inventory: SupervisorSoCInventory,
+}
+
+impl SupervisorSoCInventory {
+    pub fn from_registry(registry: &PlatformRegistry<MAX_PLATFORM_DEVICE_EVENTS>) -> Self {
+        let mut devices = Vec::new();
+        registry.platform_iter_pci(|device| {
+            if matches!(device.vendor_id, Some(0x1022 | 0x1002)) {
+                devices.push(device);
+            }
+        });
+        Self {
+            devices,
+            amd_soc_present: registry.find_amd_soc_device().is_some(),
+            renoir_gpu_present: registry.find_amdgpu_renoir().is_some(),
+            amd_xhci_present: registry.platform_find_amd_xhci_controller().is_some(),
+            amd_iommu_present: registry.platform_iter_contains_iommu_candidate(),
+        }
+    }
+}
+
+impl SupervisorPlatformFacts {
+    pub fn from_platform_info(info: &PlatformInfo) -> Self {
+        Self {
+            cpu: SupervisorCpuFacts {
+                vendor: info.cpu.vendor.as_bytes(),
+                family: info.cpu.family,
+                model: info.cpu.model,
+                stepping: info.cpu.stepping,
+                physical_cores: AmdTopology::from_cpuid(info.cpu.cpuid).cores_per_package,
+                logical_threads: AmdTopology::from_cpuid(info.cpu.cpuid)
+                    .logical_processors_per_package,
+                invariant_tsc: info.cpu.features.invariant_tsc,
+                apic: info.cpu.features.apic,
+                x2apic: info.cpu.features.x2apic,
+                xsave: info.cpu.features.xsave,
+                osxsave: info.cpu.features.osxsave,
+            },
+            ryzen: SupervisorRyzenFacts {
+                generation: info.ryzen_generation,
+                soc_kind: info.ryzen_soc,
+                support: match info.cpu.ryzen.detection_status() {
+                    mirage_ryzen::RyzenDetectionStatus::Detected => RyzenSupportStatus::Supported,
+                    mirage_ryzen::RyzenDetectionStatus::UnsupportedVendor => {
+                        RyzenSupportStatus::Unsupported
+                    }
+                    _ => RyzenSupportStatus::Unknown,
+                },
+                msr_telemetry: RyzenProbeStatus::Skipped(
+                    "unsafe until #GP-safe MSR probe exists",
+                ),
+                acpi_inventory: RyzenProbeStatus::Pending(
+                    "requires mapped and validated ACPI tables",
+                ),
+                pci_inventory: RyzenProbeStatus::Detected,
+            },
+            soc_inventory: SupervisorSoCInventory::from_registry(&info.registry),
+        }
+    }
+}
 
 /// Hardware kind recorded by platform discovery before any driver/service binding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -518,6 +623,19 @@ impl<const CAPACITY: usize> PlatformRegistry<CAPACITY> {
             index += 1;
         }
         None
+    }
+
+    pub fn platform_iter_contains_iommu_candidate(&self) -> bool {
+        let mut found = false;
+        self.platform_iter_pci(|device| {
+            if !found
+                && device.vendor_id == Some(0x1022)
+                && (device.class_code == Some(0x08) || device.name.contains("IOMMU"))
+            {
+                found = true;
+            }
+        });
+        found
     }
 
     pub fn find_by_location(&self, location: PlatformLocation) -> Option<PlatformDevice> {

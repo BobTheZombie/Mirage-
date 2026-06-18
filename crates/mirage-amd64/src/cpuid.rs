@@ -100,6 +100,8 @@ pub struct AmdFeatureSet {
     pub sse4_2: bool,
     pub avx: bool,
     pub avx2: bool,
+    pub xsave: bool,
+    pub osxsave: bool,
     pub smep: bool,
     pub smap: bool,
     pub pat: bool,
@@ -113,6 +115,27 @@ pub struct AmdFeatureSet {
     /// Current AMD64 CPUID parsing in Mirage does not infer IOMMU presence from
     /// vendor, SVM, PCI/ACPI tables, or platform presence.
     pub iommu: bool,
+}
+
+/// Fault-tolerant CPU identity snapshot built from available CPUID leaves only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AmdCpuFacts {
+    pub vendor: [u8; 12],
+    pub family: u16,
+    pub model: u16,
+    pub stepping: u8,
+    pub brand_string: [u8; 48],
+    pub features: AmdFeatureSet,
+    pub max_standard_leaf: u32,
+    pub max_extended_leaf: u32,
+    pub physical_address_bits: u8,
+    pub virtual_address_bits: u8,
+    pub apic_id: Option<u32>,
+    pub invariant_tsc: bool,
+    pub apic: bool,
+    pub x2apic: bool,
+    pub xsave: bool,
+    pub osxsave: bool,
 }
 
 /// Snapshot of the CPUID leaves Mirage currently parses.
@@ -228,6 +251,44 @@ impl AmdCpuId {
         bytes
     }
 
+    /// Convert the guarded CPUID snapshot into stable CPU facts.
+    pub fn facts(self) -> AmdCpuFacts {
+        let (family, model, stepping) = self.family_model_stepping();
+        let features = self.features();
+        let ext8 = self.leaf(0x8000_0008);
+        let leaf1_available = self.max_basic_leaf >= 1;
+        AmdCpuFacts {
+            vendor: self.vendor().as_bytes(),
+            family: family.0,
+            model: model.0,
+            stepping: stepping.0,
+            brand_string: self.brand_string(),
+            features,
+            max_standard_leaf: self.max_basic_leaf,
+            max_extended_leaf: self.max_extended_leaf,
+            physical_address_bits: if self.max_extended_leaf >= 0x8000_0008 {
+                (ext8.eax & 0xff) as u8
+            } else {
+                0
+            },
+            virtual_address_bits: if self.max_extended_leaf >= 0x8000_0008 {
+                ((ext8.eax >> 8) & 0xff) as u8
+            } else {
+                0
+            },
+            apic_id: if leaf1_available {
+                Some((self.leaf1.ebx >> 24) & 0xff)
+            } else {
+                None
+            },
+            invariant_tsc: features.invariant_tsc,
+            apic: features.apic,
+            x2apic: features.x2apic,
+            xsave: features.xsave,
+            osxsave: features.osxsave,
+        }
+    }
+
     /// Decode AMD family/model/stepping from CPUID leaf `0x0000_0001:EAX`.
     pub const fn family_model_stepping(self) -> (AmdCpuFamily, AmdCpuModel, AmdCpuStepping) {
         let eax = self.leaf1.eax;
@@ -277,6 +338,8 @@ impl AmdCpuId {
             sse4_2: bit(self.leaf1.ecx, 20),
             avx: bit(self.leaf1.ecx, 28),
             avx2: bit(self.leaf7_0.ebx, 5),
+            xsave: bit(self.leaf1.ecx, 26),
+            osxsave: bit(self.leaf1.ecx, 27),
             smep: bit(self.leaf7_0.ebx, 7),
             smap: bit(self.leaf7_0.ebx, 20),
             pat: bit(self.leaf1.edx, 16),

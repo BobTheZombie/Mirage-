@@ -396,10 +396,29 @@ struct CpuProbe {
     vendor_ebx: u32,
     vendor_edx: u32,
     vendor_ecx: u32,
-    family: u8,
-    model: u8,
+    family: u16,
+    model: u16,
     stepping: u8,
-    max_leaf: u32,
+    max_standard_leaf: u32,
+    max_extended_leaf: u32,
+    brand_string: [u8; 48],
+    feature_ecx: u32,
+    feature_edx: u32,
+    extended_feature_ecx: u32,
+    extended_feature_edx: u32,
+    physical_address_bits: u8,
+    virtual_address_bits: u8,
+    apic_id: u32,
+    logical_threads: u16,
+    physical_cores: u16,
+    threads_per_core: u16,
+    package_id: u16,
+    core_id: Option<u16>,
+    xsave: bool,
+    osxsave: bool,
+    apic: bool,
+    x2apic: bool,
+    invariant_tsc: bool,
 }
 
 #[cfg(not(feature = "emergency-boot"))]
@@ -409,14 +428,24 @@ fn cpuid_count(leaf: u32, subleaf: u32) -> core::arch::x86_64::CpuidResult {
 
 #[cfg(not(feature = "emergency-boot"))]
 fn probe_cpu() -> CpuProbe {
+    crate::kprintln!("[ryzen 01] enter amd64 cpu probe");
     let vendor = cpuid_count(0, 0);
-    let features = cpuid_count(1, 0);
-    let family_id = ((features.eax >> 8) & 0x0f) as u8;
-    let model_id = ((features.eax >> 4) & 0x0f) as u8;
-    let ext_family = ((features.eax >> 20) & 0xff) as u8;
-    let ext_model = ((features.eax >> 16) & 0x0f) as u8;
+    let max_standard_leaf = vendor.eax;
+    let ext0 = cpuid_count(0x8000_0000, 0);
+    let max_extended_leaf = ext0.eax;
+    crate::kprintln!("[ryzen 02] cpuid max leaves read");
+
+    let features = if max_standard_leaf >= 1 {
+        cpuid_count(1, 0)
+    } else {
+        cpuid_count(0, 0)
+    };
+    let family_id = ((features.eax >> 8) & 0x0f) as u16;
+    let model_id = ((features.eax >> 4) & 0x0f) as u16;
+    let ext_family = ((features.eax >> 20) & 0xff) as u16;
+    let ext_model = ((features.eax >> 16) & 0x0f) as u16;
     let family = if family_id == 0x0f {
-        family_id.wrapping_add(ext_family)
+        family_id.saturating_add(ext_family)
     } else {
         family_id
     };
@@ -425,6 +454,85 @@ fn probe_cpu() -> CpuProbe {
     } else {
         model_id
     };
+    let apic_id = if max_standard_leaf >= 1 {
+        (features.ebx >> 24) & 0xff
+    } else {
+        0
+    };
+    let logical_threads = if max_standard_leaf >= 1 {
+        ((features.ebx >> 16) & 0xff).max(1) as u16
+    } else {
+        1
+    };
+    crate::kprintln!("[ryzen 03] vendor/family/model parsed");
+
+    let mut brand_string = [0u8; 48];
+    if max_extended_leaf >= 0x8000_0004 {
+        let leaves = [
+            cpuid_count(0x8000_0002, 0),
+            cpuid_count(0x8000_0003, 0),
+            cpuid_count(0x8000_0004, 0),
+        ];
+        let mut out = 0usize;
+        let mut index = 0usize;
+        while index < leaves.len() {
+            let leaf = leaves[index];
+            for reg in [leaf.eax, leaf.ebx, leaf.ecx, leaf.edx] {
+                brand_string[out..out + 4].copy_from_slice(&reg.to_le_bytes());
+                out += 4;
+            }
+            index += 1;
+        }
+        crate::kprintln!("[ryzen 04] brand string parsed or skipped");
+    } else {
+        crate::kprintln!("[ryzen 04] brand string parsed or skipped");
+    }
+
+    crate::kprintln!("[ryzen 05] topology probe enter");
+    let ext1 = if max_extended_leaf >= 0x8000_0001 {
+        cpuid_count(0x8000_0001, 0)
+    } else {
+        cpuid_count(0, 0)
+    };
+    let ext7 = if max_extended_leaf >= 0x8000_0007 {
+        cpuid_count(0x8000_0007, 0)
+    } else {
+        cpuid_count(0, 0)
+    };
+    let ext8 = if max_extended_leaf >= 0x8000_0008 {
+        cpuid_count(0x8000_0008, 0)
+    } else {
+        cpuid_count(0, 0)
+    };
+    let ext1e_available = max_extended_leaf >= 0x8000_001e;
+    let ext1e = if ext1e_available {
+        cpuid_count(0x8000_001e, 0)
+    } else {
+        cpuid_count(0, 0)
+    };
+    let physical_cores = if max_extended_leaf >= 0x8000_0008 {
+        ((ext8.ecx & 0xff) as u16).saturating_add(1).max(1)
+    } else {
+        logical_threads.max(1)
+    };
+    let threads_per_core = if ext1e_available && ext1e.ebx != 0 {
+        (((ext1e.ebx >> 8) & 0xff) as u16).saturating_add(1).max(1)
+    } else {
+        (logical_threads / physical_cores.max(1)).max(1)
+    };
+    let package_id = if ext1e_available {
+        (ext1e.ecx & 0xff) as u16
+    } else {
+        (apic_id as u16) / logical_threads.max(1)
+    };
+    let core_id = if ext1e_available {
+        Some((ext1e.ebx & 0xff) as u16)
+    } else {
+        None
+    };
+    crate::kprintln!("[ryzen 06] topology parsed or skipped");
+    crate::kprintln!("[ryzen 07] msr telemetry skipped/safe");
+
     CpuProbe {
         vendor_ebx: vendor.ebx,
         vendor_edx: vendor.edx,
@@ -432,7 +540,34 @@ fn probe_cpu() -> CpuProbe {
         family,
         model,
         stepping: (features.eax & 0x0f) as u8,
-        max_leaf: vendor.eax,
+        max_standard_leaf,
+        max_extended_leaf,
+        brand_string,
+        feature_ecx: features.ecx,
+        feature_edx: features.edx,
+        extended_feature_ecx: ext1.ecx,
+        extended_feature_edx: ext1.edx,
+        physical_address_bits: if max_extended_leaf >= 0x8000_0008 {
+            (ext8.eax & 0xff) as u8
+        } else {
+            0
+        },
+        virtual_address_bits: if max_extended_leaf >= 0x8000_0008 {
+            ((ext8.eax >> 8) & 0xff) as u8
+        } else {
+            0
+        },
+        apic_id,
+        logical_threads,
+        physical_cores,
+        threads_per_core,
+        package_id,
+        core_id,
+        xsave: (features.ecx & (1 << 26)) != 0,
+        osxsave: (features.ecx & (1 << 27)) != 0,
+        apic: (features.edx & (1 << 9)) != 0,
+        x2apic: (features.ecx & (1 << 21)) != 0,
+        invariant_tsc: (ext7.edx & (1 << 8)) != 0,
     }
 }
 
@@ -444,6 +579,11 @@ fn cpu_vendor_is_amd(cpu: CpuProbe) -> bool {
 #[cfg(not(feature = "emergency-boot"))]
 fn cpu_is_supported_ryzen(cpu: CpuProbe) -> bool {
     cpu_vendor_is_amd(cpu) && matches!(cpu.family, 0x17 | 0x19)
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn cpu_topology_is_complete(cpu: CpuProbe) -> bool {
+    cpu.logical_threads >= 1 && cpu.physical_cores >= 1 && cpu.threads_per_core >= 1
 }
 
 #[cfg(not(feature = "emergency-boot"))]
@@ -690,7 +830,7 @@ fn pci_probe_function(function: PciProbeFunction) -> Option<PciProbeDevice> {
     let vendor_id = pci_vendor_id(raw_id);
     let device_id = pci_device_id(raw_id);
 
-    if function.bus == 0 && function.device < 4 {
+    if ryzen_debug_pci() && function.bus == 0 && function.device < 4 {
         crate::kprintln!(
             "[pci] {:02x}:{:02x}.{} raw id=0x{:08x} vendor=0x{:04x} device=0x{:04x}",
             function.bus,
@@ -711,7 +851,7 @@ fn pci_probe_function(function: PciProbeFunction) -> Option<PciProbeDevice> {
     let class = pci_class_fields(class_reg);
     let header_type = pci_header_type(header_reg);
 
-    if function.bus == 0 && function.device < 4 {
+    if ryzen_debug_pci() && function.bus == 0 && function.device < 4 {
         crate::kprintln!(
             "[pci] {:02x}:{:02x}.{} class=0x{:02x} subclass=0x{:02x} prog_if=0x{:02x} header=0x{:02x} vendor_name=\"{}\" class_name=\"{}\"",
             function.bus,
@@ -746,7 +886,9 @@ fn pci_probe_function(function: PciProbeFunction) -> Option<PciProbeDevice> {
 fn scan_pci_devices(mut visitor: impl FnMut(PciProbeDevice)) {
     match pci_config_backend() {
         PciConfigBackend::LegacyCf8Cfc => {
-            crate::kprintln!("[pci] config access: legacy CF8/CFC");
+            if ryzen_debug_pci() {
+                crate::kprintln!("[pci] config access: legacy CF8/CFC");
+            }
         }
     }
 
@@ -780,6 +922,11 @@ fn scan_pci_devices(mut visitor: impl FnMut(PciProbeDevice)) {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
+const fn ryzen_debug_pci() -> bool {
+    option_env!("MIRAGE_DEBUG_PCI").is_some()
+}
+
+#[cfg(not(feature = "emergency-boot"))]
 fn initialize_platform_probes(
     boot_info: &BootInfo,
 ) -> mirage_platform::PlatformRegistry<{ mirage_platform::MAX_PLATFORM_DEVICE_EVENTS }> {
@@ -789,8 +936,8 @@ fn initialize_platform_probes(
         &mut registry,
         mirage_platform::PlatformDevice::amd_cpu(
             cpu_platform_name(cpu),
-            cpu.family,
-            cpu.model,
+            cpu.family.min(u8::MAX as u16) as u8,
+            cpu.model.min(u8::MAX as u16) as u8,
             cpu.stepping,
         ),
     );
@@ -824,19 +971,24 @@ fn initialize_platform_probes(
     }
 
     boot_phase_start(BootPhase::RyzenTopology);
-    if cpu_is_supported_ryzen(cpu) && cpu.max_leaf >= 0x0b {
+    if cpu_is_supported_ryzen(cpu) && cpu_topology_is_complete(cpu) {
         boot_phase_ok(BootPhase::RyzenTopology);
+    } else if cpu_is_supported_ryzen(cpu) && cpu.logical_threads >= 1 {
+        boot_phase_detected(BootPhase::RyzenTopology);
     } else {
         boot_phase_skipped(BootPhase::RyzenTopology, "CPUID topology unavailable");
     }
+    crate::kprintln!("[ryzen 08] platform facts committed");
 
+    crate::kprintln!("[ryzen 09] soc pci inventory enter");
     let amd_soc = registry.find_amd_soc_device().is_some();
     boot_phase_start(BootPhase::AmdSoc);
     if amd_soc {
-        boot_phase_ok(BootPhase::AmdSoc);
+        boot_phase_detected(BootPhase::AmdSoc);
     } else {
         boot_phase_skipped(BootPhase::AmdSoc, "AMD SoC PCI devices not present");
     }
+    crate::kprintln!("[ryzen 10] soc pci inventory complete");
 
     boot_phase_start(BootPhase::AmdIommu);
     if boot_info.rsdp.is_some() && amd_soc {
@@ -861,7 +1013,7 @@ fn initialize_platform_probes(
     let renoir_gpu = registry.find_amdgpu_renoir().is_some();
     boot_phase_start(BootPhase::AmdGpuRenoir);
     if renoir_gpu {
-        boot_phase_ok(BootPhase::AmdGpuRenoir);
+        boot_phase_detected(BootPhase::AmdGpuRenoir);
     } else {
         boot_phase_skipped(BootPhase::AmdGpuRenoir, "Renoir GPU PCI device not present");
     }
@@ -871,10 +1023,11 @@ fn initialize_platform_probes(
         .is_some_and(|device| device.vendor_id == Some(0x1022));
     boot_phase_start(BootPhase::AmdXhci);
     if amd_xhci {
-        boot_phase_ok(BootPhase::AmdXhci);
+        boot_phase_detected(BootPhase::AmdXhci);
     } else {
         boot_phase_skipped(BootPhase::AmdXhci, "AMD xHCI controller not present");
     }
+    crate::kprintln!("[ryzen 11] exit ryzen platform init");
 
     registry
 }

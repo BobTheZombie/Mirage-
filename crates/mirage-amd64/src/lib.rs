@@ -134,7 +134,7 @@ pub mod topology;
 
 pub use cache::AmdCacheInfo;
 pub use cpuid::{
-    AmdCpuFamily, AmdCpuId, AmdCpuModel, AmdCpuStepping, AmdCpuidReader, AmdFeatureSet, AmdVendor,
-    CpuidLeaf, HardwareCpuid,
+    AmdCpuFacts, AmdCpuFamily, AmdCpuId, AmdCpuModel, AmdCpuStepping, AmdCpuidReader,
+    AmdFeatureSet, AmdVendor, CpuidLeaf, HardwareCpuid,
 };
 pub use topology::{AmdCoreId, AmdPackageId, AmdThreadId, AmdTopology};
