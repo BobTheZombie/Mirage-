@@ -897,6 +897,10 @@ pub fn boot_phase_start(phase: BootPhase) {
     transition(phase, PhaseState::Started, "started");
 }
 
+pub fn boot_phase_pending(phase: BootPhase, message: &'static str) {
+    transition(phase, PhaseState::Pending, message);
+}
+
 pub fn boot_phase_ok(phase: BootPhase) {
     transition(phase, PhaseState::Ok, "ok");
 }

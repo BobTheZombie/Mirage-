@@ -54,8 +54,10 @@ pub enum DriverCategory {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriverStatus {
     Registered,
+    Started,
     Initialized,
     Online,
+    Pending,
     Skipped,
     Failed,
 }
@@ -64,6 +66,7 @@ pub enum DriverStatus {
 pub enum ModuleInitStatus {
     Online,
     Ok,
+    Pending(&'static str),
     Skipped(&'static str),
     Failed(&'static str),
 }
@@ -171,6 +174,7 @@ struct UsbDeviceRecord {
     id: u8,
     port: u8,
     endpoint_count: u8,
+    port_speed: u8,
     is_hid_boot_keyboard_candidate: bool,
 }
 
@@ -349,7 +353,7 @@ impl DriverModule for XhciHostModule {
             stack.xhci = Some(controller);
             stack
                 .registry
-                .set_status(XHCI_MODULE, DriverStatus::Initialized);
+                .set_status(XHCI_MODULE, DriverStatus::Started);
         }
         crate::kprintln!(
             "[xhci] ports={} slots={} context_size={}",
@@ -364,11 +368,14 @@ impl DriverModule for XhciHostModule {
         if USB_DRIVER_STACK.lock().xhci.is_none() {
             return Err(DriverError::NoController);
         }
+        // The lower-kernel path has halted, reset, configured rings, and started
+        // the controller.  It is not ONLINE until a command/event round trip has
+        // completed; keep the staged status honest for the boot UI.
         USB_DRIVER_STACK
             .lock()
             .registry
-            .set_status(XHCI_MODULE, DriverStatus::Online);
-        crate::kprintln!("[xhci] controller online");
+            .set_status(XHCI_MODULE, DriverStatus::Started);
+        crate::kprintln!("[xhci] controller started; event-path smoke test pending");
         Ok(())
     }
 
@@ -436,6 +443,7 @@ impl DriverModule for UsbCoreModule {
                         id: (found + 1) as u8,
                         port,
                         endpoint_count: 1,
+                        port_speed: unsafe { read_port_speed(controller, port) },
                         is_hid_boot_keyboard_candidate: false,
                     };
                     if USB_DRIVER_STACK.lock().add_device(record) {
@@ -465,7 +473,10 @@ impl DriverModule for UsbCoreModule {
     }
 
     fn start(&self) -> Result<(), DriverError> {
-        if XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Online {
+        if XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Online
+            && XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Started
+            && XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Initialized
+        {
             USB_DRIVER_STACK
                 .lock()
                 .registry
@@ -700,6 +711,9 @@ pub fn initialize_usb_driver_stack(hhdm_offset: Option<u64>) -> UsbStackBootStat
             }
         }
         DriverStatus::Failed => XhciKeyboardStatus::Failed("USB keyboard module failed"),
+        DriverStatus::Pending | DriverStatus::Started | DriverStatus::Initialized => {
+            XhciKeyboardStatus::SkippedNoKeyboard
+        }
         _ => XhciKeyboardStatus::SkippedNoKeyboard,
     };
     UsbStackBootStatus {
@@ -712,7 +726,7 @@ pub fn initialize_usb_driver_stack(hhdm_offset: Option<u64>) -> UsbStackBootStat
 
 fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> ModuleInitStatus {
     use crate::kernel::boot_phase::{
-        boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_skipped, boot_phase_start,
+        boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_pending, boot_phase_skipped, boot_phase_start,
         PhaseState,
     };
 
@@ -772,7 +786,9 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
     let status = match module.init().and_then(|_| module.start()) {
         Ok(()) => match module.status() {
             DriverStatus::Online => ModuleInitStatus::Online,
+            DriverStatus::Started => ModuleInitStatus::Pending("controller started; event path pending"),
             DriverStatus::Initialized => ModuleInitStatus::Ok,
+            DriverStatus::Pending => ModuleInitStatus::Pending("driver pending"),
             DriverStatus::Skipped => ModuleInitStatus::Skipped("module skipped"),
             DriverStatus::Failed => ModuleInitStatus::Failed("driver module failed"),
             DriverStatus::Registered => ModuleInitStatus::Skipped("driver module did not start"),
@@ -808,6 +824,7 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
     match status {
         ModuleInitStatus::Online => boot_phase_online(descriptor.phase),
         ModuleInitStatus::Ok => boot_phase_ok(descriptor.phase),
+        ModuleInitStatus::Pending(message) => boot_phase_pending(descriptor.phase, message),
         ModuleInitStatus::Skipped(message) => boot_phase_skipped(descriptor.phase, message),
         ModuleInitStatus::Failed(message) => boot_phase_failed(descriptor.phase, message),
     }
@@ -1403,6 +1420,12 @@ unsafe fn scan_and_reset_port(controller: XhciController, port: u8) -> Result<bo
     }
     reset_port(registers, port)?;
     Ok(true)
+}
+
+
+unsafe fn read_port_speed(controller: XhciController, port: u8) -> u8 {
+    let portsc = mmio_read32(controller.op as *mut u8, portsc_offset(port));
+    ((portsc >> 10) & 0x0f) as u8
 }
 
 unsafe fn reset_port(registers: XhciRegisters, port: u8) -> Result<(), UsbKbdError> {

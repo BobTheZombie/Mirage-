@@ -274,9 +274,9 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 &mut spider_image[..],
             ) {
                 Ok(len) => {
-                    boot_phase_online(BootPhase::UserspaceLoader);
+                    boot_phase_ok(BootPhase::UserspaceLoader);
                     mirage::kprintln!(
-                        "Userspace Loader Online: read /spider-rt/sbin/spider-rs ({} bytes)",
+                        "USERSPACE LOADER [STARTED]; SPIDER-RS [FOUND]: read /spider-rt/sbin/spider-rs ({} bytes)",
                         len
                     );
                     Some(len)
@@ -310,11 +310,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             Ok(report) => {
                 boot_phase_stub(
                     BootPhase::SpiderRs,
-                    "MTSS admitted Spider-rs PID 1; ring-3 confirmation pending",
+                    "SPIDER-RS [ELF OK]; PID1 [CREATED]; PID1 [RUNNABLE]; DISPATCHER [PENDING]",
                 );
                 boot_phase_stub(
                     BootPhase::Userspace,
-                    "MTSS admitted Spider-rs PID 1; waiting for first userspace syscall confirmation",
+                    "PID1 runnable; first userspace syscall confirmation pending",
                 );
                 mirage::kprintln!(
                     "Supervisor authorized Spider-rs PID 1 via MTSS: pid={:?} entry={:#x} bytes={} path={}",

@@ -17,8 +17,10 @@ use mirage_platform::{DeviceCandidateRole, DeviceDiscoveryEvent, PlatformInfo, P
 pub mod mock_service;
 
 pub mod renoir_mtss;
+pub mod renoir_xhci;
 
 pub mod pid1;
+pub mod usb;
 
 use crate::subkernel::{
     CapabilityId, CapabilityObject, CapabilityRights, CapabilitySet, Credentials, IsolationError,

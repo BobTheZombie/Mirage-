@@ -116,7 +116,7 @@ pub fn renoir_kernel_boot_probe(_boot_info: &BootInfo) -> Option<RenoirBootProfi
     boot_phase_start(BootPhase::AmdGpuRenoir);
     boot_phase_stub(BootPhase::AmdGpuRenoir, "Renoir GPU discovery only; no reset/modeset");
     boot_phase_start(BootPhase::AmdXhci);
-    boot_phase_stub(BootPhase::AmdXhci, "Renoir xHCI discovery only; USB driver service not started");
+    boot_phase_detected(BootPhase::AmdXhci);
 
     Some(RenoirBootProfile {
         cpuid: facts,
@@ -128,13 +128,15 @@ pub fn renoir_kernel_boot_probe(_boot_info: &BootInfo) -> Option<RenoirBootProfi
 }
 
 fn read_cpuid_facts() -> RenoirCpuidFacts {
-    let vendor_leaf = __cpuid_count(0, 0);
+    // SAFETY: CPUID is an architectural identification instruction on x86_64.
+    let vendor_leaf = unsafe { __cpuid_count(0, 0) };
     let mut vendor = [0u8; 12];
     vendor[0..4].copy_from_slice(&vendor_leaf.ebx.to_le_bytes());
     vendor[4..8].copy_from_slice(&vendor_leaf.edx.to_le_bytes());
     vendor[8..12].copy_from_slice(&vendor_leaf.ecx.to_le_bytes());
 
-    let leaf1 = __cpuid_count(1, 0);
+    // SAFETY: Leaf 1 is architectural on x86_64.
+    let leaf1 = unsafe { __cpuid_count(1, 0) };
     let base_family = ((leaf1.eax >> 8) & 0x0f) as u16;
     let base_model = ((leaf1.eax >> 4) & 0x0f) as u16;
     let ext_family = ((leaf1.eax >> 20) & 0xff) as u16;
@@ -152,9 +154,11 @@ fn read_cpuid_facts() -> RenoirCpuidFacts {
     let stepping = (leaf1.eax & 0x0f) as u8;
     let logical_threads = ((leaf1.ebx >> 16) & 0xff) as u16;
 
-    let ext_max = __cpuid_count(0x8000_0000, 0).eax;
+    // SAFETY: Extended maximum leaf query is a CPUID identification read.
+    let ext_max = unsafe { __cpuid_count(0x8000_0000, 0) }.eax;
     let physical_cores = if ext_max >= 0x8000_0008 {
-        let leaf = __cpuid_count(0x8000_0008, 0);
+        // SAFETY: Guarded by ext_max above; leaf 0x80000008 is available.
+        let leaf = unsafe { __cpuid_count(0x8000_0008, 0) };
         ((leaf.ecx & 0xff) as u16) + 1
     } else {
         logical_threads.max(1)
