@@ -252,21 +252,96 @@ pub fn initialize() {
             gdt::INTERRUPT_IST_INDEX,
             kernel_gate,
         );
-        set_gate(33, __mirage_isr_irq1 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(34, __mirage_isr_irq2 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(35, __mirage_isr_irq3 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(36, __mirage_isr_irq4 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(37, __mirage_isr_irq5 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(38, __mirage_isr_irq6 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(39, __mirage_isr_irq7 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(40, __mirage_isr_irq8 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(41, __mirage_isr_irq9 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(42, __mirage_isr_irq10 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(43, __mirage_isr_irq11 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(44, __mirage_isr_irq12 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(45, __mirage_isr_irq13 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(46, __mirage_isr_irq14 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
-        set_gate(47, __mirage_isr_irq15 as usize, gdt::INTERRUPT_IST_INDEX, kernel_gate);
+        set_gate(
+            33,
+            __mirage_isr_irq1 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            34,
+            __mirage_isr_irq2 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            35,
+            __mirage_isr_irq3 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            36,
+            __mirage_isr_irq4 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            37,
+            __mirage_isr_irq5 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            38,
+            __mirage_isr_irq6 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            39,
+            __mirage_isr_irq7 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            40,
+            __mirage_isr_irq8 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            41,
+            __mirage_isr_irq9 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            42,
+            __mirage_isr_irq10 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            43,
+            __mirage_isr_irq11 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            44,
+            __mirage_isr_irq12 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            45,
+            __mirage_isr_irq13 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            46,
+            __mirage_isr_irq14 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
+        set_gate(
+            47,
+            __mirage_isr_irq15 as usize,
+            gdt::INTERRUPT_IST_INDEX,
+            kernel_gate,
+        );
         set_gate(
             SYSCALL_TRAP_VECTOR,
             __mirage_isr_syscall_trap as usize,
@@ -321,9 +396,13 @@ fn dispatch_interrupt_with_context(vector: u64, error_code: u64, context: Option
         vector if vector == pic::TIMER_VECTOR => {
             TIMER_TICKS.fetch_add(1, Ordering::SeqCst);
             irq::end_of_interrupt(vector);
-        },
+        }
         vector if irq::is_external_irq_vector(vector) => {
             irq::record_external_interrupt(vector);
+            #[cfg(feature = "hw-ps2-keyboard")]
+            if vector == pic::KEYBOARD_VECTOR {
+                crate::arch::x86_64::ps2_keyboard::PS2_KEYBOARD_DRIVER.handle_irq1();
+            }
             irq::end_of_interrupt(vector);
         }
         SYSCALL_TRAP_VECTOR => {

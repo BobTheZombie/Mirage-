@@ -2,7 +2,7 @@
 
 use core::cmp::min;
 
-use crate::arch::x86_64::i8042::{I8042Controller, I8042Error};
+use crate::arch::x86_64::i8042::{I8042Controller, I8042ControllerState, I8042Error};
 use crate::kernel::device::{
     copy_input_event_to_bytes, DeviceDriver, DeviceError, DeviceKind, MirageInputEvent,
 };
@@ -24,17 +24,27 @@ pub enum Ps2ScanSet {
 #[derive(Clone, Copy)]
 struct DriverState {
     initialized: bool,
+    online: bool,
+    irq_mode: bool,
+    controller_state: I8042ControllerState,
     scan_set: Ps2ScanSet,
     decoder: Ps2Decoder,
     events: [MirageInputEvent; Ps2KeyboardDriver::QUEUE_CAPACITY],
     head: usize,
     len: usize,
+    events_received: u64,
+    decode_errors: u64,
+    first_event_logged: bool,
+    last_event: Option<KeyboardEvent>,
 }
 
 impl DriverState {
     const fn new() -> Self {
         Self {
             initialized: false,
+            online: false,
+            irq_mode: false,
+            controller_state: I8042ControllerState::Absent,
             scan_set: Ps2ScanSet::Set1Translated,
             decoder: Ps2Decoder::new(Ps2ScanSet::Set1Translated),
             events: [MirageInputEvent {
@@ -45,6 +55,10 @@ impl DriverState {
             }; Ps2KeyboardDriver::QUEUE_CAPACITY],
             head: 0,
             len: 0,
+            events_received: 0,
+            decode_errors: 0,
+            first_event_logged: false,
+            last_event: None,
         }
     }
 
@@ -86,16 +100,30 @@ impl Ps2KeyboardDriver {
 
     pub fn initialize(&self, irq_mode: bool) -> Result<(), I8042Error> {
         let init = self.controller.initialize(irq_mode, true)?;
+        crate::kprintln!("I8042 [Detected]");
+        crate::kprintln!("I8042 [Started]");
+        crate::kprintln!("I8042 [Ok]");
+        crate::kprintln!("PS/2 Keyboard [Started]");
+        crate::kprintln!("[kbd 01] reset command sent");
         self.controller.send_device_command(0xff)?;
         self.controller.wait_for_bat()?;
-        let _ = self.controller.send_device_command(0xf2);
+        match self.controller.send_device_command(0xf2) {
+            Ok(()) => crate::kprintln!("[kbd 02] identify complete"),
+            Err(_) => crate::kprintln!("[kbd 02] identify skipped"),
+        }
 
         let mut scan_set = if init.translated {
             Ps2ScanSet::Set1Translated
         } else {
             match self.controller.send_device_command_with_arg(0xf0, 0x02) {
-                Ok(()) => Ps2ScanSet::Set2,
-                Err(_) => Ps2ScanSet::Set1Translated,
+                Ok(()) => {
+                    crate::kprintln!("[kbd 03] scancode set selected");
+                    Ps2ScanSet::Set2
+                }
+                Err(_) => {
+                    crate::kprintln!("[kbd 03] scancode set detected");
+                    Ps2ScanSet::Set1Translated
+                }
             }
         };
         if init.translated {
@@ -103,12 +131,22 @@ impl Ps2KeyboardDriver {
         }
 
         self.controller.send_device_command(0xf4)?;
+        crate::kprintln!("[kbd 04] scanning enabled");
         let mut state = self.state.lock();
         state.initialized = true;
+        state.irq_mode = irq_mode;
+        state.controller_state = I8042ControllerState::Ready;
         state.scan_set = scan_set;
         state.decoder = Ps2Decoder::new(scan_set);
-        mark_source_online(InputRawSource::Ps2);
-        crate::kprintln!("PS/2 keyboard online: scan_set={:?}", scan_set);
+        if irq_mode {
+            crate::kprintln!("[kbd 05] irq mode enabled");
+        } else {
+            crate::kprintln!("[kbd 05] polling mode active");
+        }
+        crate::kprintln!(
+            "PS/2 Keyboard [Started: {} mode]",
+            if irq_mode { "irq" } else { "polling" }
+        );
         Ok(())
     }
 
@@ -129,22 +167,73 @@ impl Ps2KeyboardDriver {
                     let abi = event.to_mirage_input_event();
                     publish_keyboard_event(event);
                     state.push(abi);
-                    if event.state == KeyState::Pressed {
-                        if let Some(ascii) = event.ascii {
-                            crate::kprintln!(
-                                "ps2-keyboard0: key '{}' raw={:#x}",
-                                ascii as char,
-                                event.raw_code
-                            );
-                        } else if event.keycode == KeyCode::Escape {
-                            crate::kprintln!("ps2-keyboard0: ESC raw={:#x}", event.raw_code);
-                        }
+                    state.events_received = state.events_received.saturating_add(1);
+                    state.last_event = Some(event);
+                    if !state.first_event_logged {
+                        state.first_event_logged = true;
+                        state.online = true;
+                        mark_source_online(InputRawSource::Ps2);
+                        crate::kprintln!("[kbd 06] first key event received");
+                        crate::kprintln!("PS/2 Keyboard [Online]");
                     }
                 }
             }
             polls += 1;
         }
     }
+    pub fn handle_irq1(&self) {
+        let status = self.controller.status();
+        if status & 0x01 == 0 || I8042Controller::status_aux_data(status) {
+            return;
+        }
+        let Ok(scancode) = self.controller.read_data() else {
+            return;
+        };
+        let mut state = self.state.lock();
+        let events = state.decoder.feed(scancode);
+        for event in events.into_iter().flatten() {
+            let abi = event.to_mirage_input_event();
+            publish_keyboard_event(event);
+            state.push(abi);
+            state.events_received = state.events_received.saturating_add(1);
+            state.last_event = Some(event);
+            if !state.first_event_logged {
+                state.first_event_logged = true;
+                state.online = true;
+                mark_source_online(InputRawSource::Ps2);
+                crate::kprintln!("[kbd 06] first key event received");
+                crate::kprintln!("PS/2 Keyboard [Online]");
+            }
+        }
+    }
+
+    pub fn status_snapshot(&self) -> Ps2KeyboardSnapshot {
+        let state = self.state.lock();
+        Ps2KeyboardSnapshot {
+            initialized: state.initialized,
+            online: state.online,
+            irq_mode: state.irq_mode,
+            controller_state: state.controller_state,
+            scan_set: state.scan_set,
+            events_received: state.events_received,
+            decode_errors: state.decode_errors,
+            queue_overflows: crate::kernel::input::input_queue_overflows(),
+            last_event: state.last_event,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ps2KeyboardSnapshot {
+    pub initialized: bool,
+    pub online: bool,
+    pub irq_mode: bool,
+    pub controller_state: I8042ControllerState,
+    pub scan_set: Ps2ScanSet,
+    pub events_received: u64,
+    pub decode_errors: u64,
+    pub queue_overflows: u64,
+    pub last_event: Option<KeyboardEvent>,
 }
 
 impl DeviceDriver for Ps2KeyboardDriver {
@@ -185,6 +274,7 @@ pub struct Ps2Decoder {
     extended: bool,
     break_pending: bool,
     modifiers: KeyModifiers,
+    key_down: [bool; 512],
 }
 
 impl Ps2Decoder {
@@ -194,6 +284,7 @@ impl Ps2Decoder {
             extended: false,
             break_pending: false,
             modifiers: KeyModifiers::empty(),
+            key_down: [false; 512],
         }
     }
 
@@ -260,9 +351,21 @@ impl Ps2Decoder {
             KeyCode::LeftCtrl | KeyCode::RightCtrl => self.modifiers.ctrl = pressed,
             KeyCode::LeftAlt | KeyCode::RightAlt => self.modifiers.alt = pressed,
             KeyCode::CapsLock if pressed => self.modifiers.caps_lock = !self.modifiers.caps_lock,
+            KeyCode::NumLock if pressed => self.modifiers.num_lock = !self.modifiers.num_lock,
+            KeyCode::ScrollLock if pressed => {
+                self.modifiers.scroll_lock = !self.modifiers.scroll_lock
+            }
+            KeyCode::Meta => self.modifiers.meta = pressed,
             _ => {}
         }
-        let ascii = if pressed {
+        let idx = (raw as usize) & 0x01ff;
+        let was_down = self.key_down[idx];
+        if pressed {
+            self.key_down[idx] = true;
+        } else {
+            self.key_down[idx] = false;
+        }
+        let ascii = if pressed && !was_down {
             ascii_for_key(keycode, self.modifiers)
         } else {
             None
@@ -295,6 +398,15 @@ pub fn map_set1_raw(raw: u16) -> Option<KeyCode> {
         0x38 => KeyCode::LeftAlt,
         0x0138 => KeyCode::RightAlt,
         0x3a => KeyCode::CapsLock,
+        0x45 => KeyCode::NumLock,
+        0x46 => KeyCode::ScrollLock,
+        0x015b | 0x015c => KeyCode::Meta,
+        0x52 | 0x0152 => KeyCode::Insert,
+        0x53 | 0x0153 => KeyCode::Delete,
+        0x47 | 0x0147 => KeyCode::Home,
+        0x4f | 0x014f => KeyCode::End,
+        0x49 | 0x0149 => KeyCode::PageUp,
+        0x51 | 0x0151 => KeyCode::PageDown,
         0x48 | 0x0148 => KeyCode::ArrowUp,
         0x50 | 0x0150 => KeyCode::ArrowDown,
         0x4b | 0x014b => KeyCode::ArrowLeft,
@@ -699,8 +811,15 @@ fn set2_to_set1(byte: u8, extended: bool) -> u16 {
         0x4a => 0x35,
         0x12 => 0x2a,
         0x59 => 0x36,
-        0x14 => 0x1d,
+        0x14 => {
+            if extended {
+                0x1d
+            } else {
+                0x1d
+            }
+        }
         0x11 => 0x38,
+        0x1f if extended => 0x015b,
         0x58 => 0x3a,
         0x05 => 0x3b,
         0x06 => 0x3c,
@@ -770,5 +889,50 @@ mod tests {
         assert_eq!(ascii_for_set1_raw(0x1e, mods), Some(b'a'));
         mods.left_shift = true;
         assert_eq!(ascii_for_set1_raw(0x1e, mods), Some(b'A'));
+    }
+
+    #[test]
+    fn set2_decodes_a_press_release() {
+        let mut decoder = Ps2Decoder::new(Ps2ScanSet::Set2);
+        let press = decoder.feed(0x1c)[0].unwrap();
+        assert_eq!(press.ascii, Some(b'a'));
+        assert_eq!(press.state, KeyState::Pressed);
+        assert!(decoder.feed(0xf0)[0].is_none());
+        let release = decoder.feed(0x1c)[0].unwrap();
+        assert_eq!(release.state, KeyState::Released);
+    }
+
+    #[test]
+    fn set2_decodes_shift_a() {
+        let mut decoder = Ps2Decoder::new(Ps2ScanSet::Set2);
+        assert_eq!(decoder.feed(0x12)[0].unwrap().keycode, KeyCode::LeftShift);
+        let press = decoder.feed(0x1c)[0].unwrap();
+        assert_eq!(press.ascii, Some(b'A'));
+    }
+
+    #[test]
+    fn set2_decodes_escape_enter_backspace() {
+        let mut decoder = Ps2Decoder::new(Ps2ScanSet::Set2);
+        assert_eq!(decoder.feed(0x76)[0].unwrap().keycode, KeyCode::Escape);
+        assert_eq!(decoder.feed(0x5a)[0].unwrap().keycode, KeyCode::Enter);
+        assert_eq!(decoder.feed(0x66)[0].unwrap().keycode, KeyCode::Backspace);
+    }
+
+    #[test]
+    fn set2_caps_lock_toggles_ascii() {
+        let mut decoder = Ps2Decoder::new(Ps2ScanSet::Set2);
+        assert_eq!(decoder.feed(0x58)[0].unwrap().keycode, KeyCode::CapsLock);
+        let press = decoder.feed(0x1c)[0].unwrap();
+        assert_eq!(press.ascii, Some(b'A'));
+    }
+
+    #[test]
+    fn pause_sequence_does_not_poison_decoder() {
+        let mut decoder = Ps2Decoder::new(Ps2ScanSet::Set2);
+        for byte in [0xe1, 0x14, 0x77, 0xe1, 0xf0, 0x14, 0xf0, 0x77] {
+            let _ = decoder.feed(byte);
+        }
+        let event = decoder.feed(0x76)[0].unwrap();
+        assert_eq!(event.keycode, KeyCode::Escape);
     }
 }

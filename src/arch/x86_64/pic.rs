@@ -13,6 +13,7 @@ const PIC_EOI: u8 = 0x20;
 pub const MASTER_OFFSET: u8 = 32;
 pub const SLAVE_OFFSET: u8 = 40;
 pub const TIMER_VECTOR: u8 = MASTER_OFFSET;
+pub const KEYBOARD_VECTOR: u8 = MASTER_OFFSET + 1;
 
 #[inline(always)]
 unsafe fn outb(port: u16, value: u8) {
@@ -84,4 +85,23 @@ pub fn end_of_interrupt(vector: u8) {
 
     #[cfg(test)]
     let _ = vector;
+}
+
+/// Unmask a legacy PIC IRQ line after a lower-kernel driver has claimed it.
+pub fn unmask_irq(irq: u8) {
+    #[cfg(not(test))]
+    unsafe {
+        if irq < 8 {
+            let mask = inb(PIC1_DATA) & !(1u8 << irq);
+            outb(PIC1_DATA, mask);
+        } else if irq < 16 {
+            let mask = inb(PIC2_DATA) & !(1u8 << (irq - 8));
+            outb(PIC2_DATA, mask);
+            let master = inb(PIC1_DATA) & !(1u8 << 2);
+            outb(PIC1_DATA, master);
+        }
+    }
+
+    #[cfg(test)]
+    let _ = irq;
 }

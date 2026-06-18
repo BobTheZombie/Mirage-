@@ -28,6 +28,12 @@ pub enum KeyCode {
     Tab,
     Char(u8),
     F(u8),
+    Insert,
+    Delete,
+    Home,
+    End,
+    PageUp,
+    PageDown,
     ArrowUp,
     ArrowDown,
     ArrowLeft,
@@ -45,6 +51,9 @@ pub enum KeyCode {
     BrightnessUp,
     BrightnessDown,
     Sleep,
+    Meta,
+    NumLock,
+    ScrollLock,
     DisplaySwitch,
     Raw(u16),
 }
@@ -55,7 +64,10 @@ pub struct KeyModifiers {
     pub right_shift: bool,
     pub ctrl: bool,
     pub alt: bool,
+    pub meta: bool,
     pub caps_lock: bool,
+    pub num_lock: bool,
+    pub scroll_lock: bool,
 }
 
 impl KeyModifiers {
@@ -65,7 +77,10 @@ impl KeyModifiers {
             right_shift: false,
             ctrl: false,
             alt: false,
+            meta: false,
             caps_lock: false,
+            num_lock: false,
+            scroll_lock: false,
         }
     }
 
@@ -78,7 +93,10 @@ impl KeyModifiers {
             | ((self.right_shift as u16) << 1)
             | ((self.ctrl as u16) << 2)
             | ((self.alt as u16) << 3)
-            | ((self.caps_lock as u16) << 4)
+            | ((self.meta as u16) << 4)
+            | ((self.caps_lock as u16) << 5)
+            | ((self.num_lock as u16) << 6)
+            | ((self.scroll_lock as u16) << 7)
     }
 }
 
@@ -214,6 +232,14 @@ pub fn publish_keyboard_event(event: KeyboardEvent) {
     INPUT_QUEUE.lock().push(event);
 }
 
+pub fn input_queue_overflows() -> u64 {
+    INPUT_QUEUE.lock().dropped
+}
+
+pub fn input_queue_depth() -> usize {
+    INPUT_QUEUE.lock().len
+}
+
 pub fn pop_keyboard_event() -> Option<KeyboardEvent> {
     INPUT_QUEUE.lock().pop()
 }
@@ -292,6 +318,12 @@ pub const fn encode_keycode(keycode: KeyCode, ascii: Option<u8>) -> u16 {
             None => 0x0200,
         },
         KeyCode::F(n) => 0x0300 | n as u16,
+        KeyCode::Insert => 0x5200,
+        KeyCode::Delete => 0x5300,
+        KeyCode::Home => 0x4700,
+        KeyCode::End => 0x4f00,
+        KeyCode::PageUp => 0x4900,
+        KeyCode::PageDown => 0x5100,
         KeyCode::ArrowUp => 0x4800,
         KeyCode::ArrowDown => 0x5000,
         KeyCode::ArrowLeft => 0x4b00,
@@ -309,6 +341,9 @@ pub const fn encode_keycode(keycode: KeyCode, ascii: Option<u8>) -> u16 {
         KeyCode::BrightnessUp => 0x0404,
         KeyCode::BrightnessDown => 0x0405,
         KeyCode::Sleep => 0x0406,
+        KeyCode::Meta => 0x0408,
+        KeyCode::NumLock => 0x0045,
+        KeyCode::ScrollLock => 0x0046,
         KeyCode::DisplaySwitch => 0x0407,
         KeyCode::Raw(code) => code,
     }
