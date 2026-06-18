@@ -9,6 +9,7 @@ use mirage_fb::{BootFramebuffer, FramebufferMode, PixelFormat, PixelMasks};
 
 use crate::arch::x86_64::boot::{BootInfo, FramebufferInfo};
 use crate::kernel::sync::SpinLock;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const DEFAULT_FOREGROUND: (u8, u8, u8) = (0xff, 0xff, 0xff);
 const DEFAULT_BACKGROUND: (u8, u8, u8) = (0x00, 0x00, 0x00);
@@ -46,6 +47,7 @@ const CELL_HEIGHT: usize = 8;
 const TAB_WIDTH: usize = 4;
 
 static CONSOLE: SpinLock<Option<FramebufferConsole>> = SpinLock::new(None);
+static BOOT_UI_CLEARED: AtomicBool = AtomicBool::new(false);
 
 /// Initialize the early framebuffer console from Limine boot information.
 ///
@@ -141,6 +143,23 @@ pub fn try_write_str(text: &str) {
 pub fn write_byte(byte: u8) {
     if let Some(console) = CONSOLE.lock().as_mut() {
         console.write_byte(byte);
+    }
+}
+
+/// Prepare a live boot UI repaint without repeatedly clearing the whole framebuffer.
+///
+/// The first boot UI frame clears once so stale firmware/console text does not
+/// obscure the phase table. Later phase/status refreshes only rewind the text
+/// cursor and overwrite the fixed table cells, avoiding the slow full-screen
+/// clear/redraw loop that made bare-metal boots appear frame-by-frame.
+pub fn prepare_boot_ui_frame() {
+    if !BOOT_UI_CLEARED.swap(true, Ordering::SeqCst) {
+        clear_for_boot_ui();
+        return;
+    }
+    if let Some(console) = CONSOLE.lock().as_mut() {
+        console.cursor_column = 0;
+        console.cursor_row = 0;
     }
 }
 
