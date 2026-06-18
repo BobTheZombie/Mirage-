@@ -7,6 +7,7 @@ use crate::kernel::boot_phase::{boot_phase_snapshot, BootPhaseManager};
 #[cfg(feature = "hw-framebuffer")]
 use crate::kernel::boot_phase::{BootPhase, BootPhaseRecord, PhaseState};
 use crate::kernel::sync::SpinLock;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "hw-framebuffer")]
 const TITLE: &str = "GNU/MIRAGE";
@@ -18,6 +19,11 @@ const PROMPT: &str = "Press Esc for Debug Shell";
 const PROGRESS_BAR_WIDTH: u8 = 28;
 
 static LAST_RENDERED_PHASES: SpinLock<Option<BootPhaseManager>> = SpinLock::new(None);
+static FRAMEBUFFER_RENDERS: AtomicU64 = AtomicU64::new(0);
+
+pub fn framebuffer_render_count() -> u64 {
+    FRAMEBUFFER_RENDERS.load(Ordering::Relaxed)
+}
 
 /// Render the persistent framebuffer boot screen from the global boot phase state.
 ///
@@ -26,6 +32,9 @@ static LAST_RENDERED_PHASES: SpinLock<Option<BootPhaseManager>> = SpinLock::new(
 /// this screen refresh cannot spam COM1 and remains optional when no framebuffer
 /// is present.
 pub fn render_persistent_boot_screen() {
+    if !cfg!(feature = "bootdiag-framebuffer") {
+        return;
+    }
     let snapshot = boot_phase_snapshot();
     {
         let mut last = LAST_RENDERED_PHASES.lock();
@@ -36,7 +45,10 @@ pub fn render_persistent_boot_screen() {
     }
 
     #[cfg(feature = "hw-framebuffer")]
-    render_framebuffer(&snapshot);
+    {
+        FRAMEBUFFER_RENDERS.fetch_add(1, Ordering::Relaxed);
+        render_framebuffer(&snapshot);
+    }
 }
 
 #[cfg(feature = "hw-framebuffer")]

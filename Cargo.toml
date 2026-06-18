@@ -79,6 +79,11 @@ hw-apu-renoir = ["hw-amd64", "hw-ryzen", "hw-amd-chipset", "hw-acpi", "hw-pci"]
 hw-ryzen-4500u = ["hw-apu-renoir"]
 # Enables host/testing QFS adapters backed by the Rust standard library.
 qfs-std = ["dep:mirage-block", "dep:mirage-storage"]
+bootdiag = []
+bootdiag-verbose = ["bootdiag"]
+bootdiag-framebuffer = ["bootdiag", "hw-framebuffer"]
+bootdiag-serial = ["bootdiag"]
+bootdiag-raw-hw = ["bootdiag-verbose"]
 
 # Renoir/MTSS platform bring-up features.
 hw-renoir-kernel-boot = ["hw-ryzen", "hw-amd-chipset", "hw-pci"]
