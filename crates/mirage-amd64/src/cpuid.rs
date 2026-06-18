@@ -307,7 +307,9 @@ fn read_if(reader: &impl AmdCpuidReader, max_leaf: u32, leaf: u32, subleaf: u32)
 fn backend_cpuid(leaf: u32, subleaf: u32) -> CpuidLeaf {
     use core::arch::x86_64::__cpuid_count;
 
-    let result = __cpuid_count(leaf, subleaf);
+    // SAFETY: CPUID is a serializing CPU identification instruction.
+    // Mirage only enables this backend on x86_64 hardware builds.
+    let result = unsafe { __cpuid_count(leaf, subleaf) };
     CpuidLeaf::new(result.eax, result.ebx, result.ecx, result.edx)
 }
 
