@@ -13,23 +13,90 @@ use crate::supervisor::Supervisor;
 /// Stable path Spider-rs is expected to occupy inside RuntimeVfs.
 pub const SPIDER_RS_RUNTIME_PATH: &str = "/spider-rt/sbin/spider-rs";
 
+/// First child app declared for Spider-rs once dispatcher child launching exists.
+pub const M1_TERMINAL_PATH: &str = "/spider-rt/bin/mirage-m1-terminal";
+pub const M1_TERMINAL_OUTPUT: &str = "Mirage M1.1 System\nhello world\n";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SpiderPid1Preconditions {
+    pub root_fs_online: bool,
+    pub runtime_vfs_mounted: bool,
+    pub spider_binary_present: bool,
+    pub mtss_online: bool,
+    pub userspace_loader_ready: bool,
+}
+
 /// Successful Supervisor -> MTSS PID 1 handoff record.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct SpiderPid1LaunchReport {
     pub pid: ProcessId,
+    pub task_id: mirage_mtss::CoreTaskId,
+    pub thread_id: mirage_mtss::CoreThreadId,
     pub entry: VirtAddr,
     pub image_len: usize,
     pub runtime_path: &'static str,
     pub authorized_by_supervisor: bool,
     pub admitted_through_mtss: bool,
+    pub handoff_state: SpiderPid1HandoffState,
+    pub dispatcher_state: SpiderDispatcherState,
+    pub terminal_manifest: TerminalManifestEntry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalManifestEntry {
+    pub path: &'static str,
+    pub expected_output: &'static str,
+    pub state: TerminalLaunchState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalLaunchState {
+    PendingDispatcherChildLaunch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpiderDispatcherState {
+    Started,
+    Pending(&'static str),
+    Online,
+}
+
+/// Honest milestones in the Spider-rs PID 1 handoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpiderPid1HandoffState {
+    NotStarted,
+    RuntimeUnavailable,
+    RuntimeFound,
+    ElfValidated,
+    ProcessCreated,
+    MtssTaskCreated,
+    Runnable,
+    DispatcherStarted,
+    DispatcherPending(&'static str),
+    Failed(SpiderPid1HandoffError),
 }
 
 /// Failure points in the Spider-rs PID 1 handoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpiderPid1HandoffError {
+    RuntimeVfsUnavailable,
+    SpiderBinaryMissing,
+    InvalidElf,
+    UnsupportedElfArch,
+    SegmentMapFailed,
+    StackAllocationFailed,
+    ProcessCreateFailed,
+    SupervisorDenied,
+    MtssUnavailable,
+    MtssSpawnFailed,
+    DispatcherUnavailable,
+    UserModeTransitionUnavailable,
+}
+
 #[derive(Debug)]
 pub enum SpiderPid1LaunchError {
-    RuntimeUnavailable,
-    EmptyImage,
-    InvalidElf(LoadError),
+    Handoff(SpiderPid1HandoffError),
+    Load(LoadError),
     Kernel(KernelError),
 }
 
@@ -51,23 +118,80 @@ impl Supervisor {
         kernel: &mut Kernel<NPROC, MSG_DEPTH>,
         image: &[u8],
     ) -> Result<SpiderPid1LaunchReport, SpiderPid1LaunchError> {
+        self.launch_spider_rs_pid1_checked(
+            kernel,
+            image,
+            SpiderPid1Preconditions {
+                root_fs_online: true,
+                runtime_vfs_mounted: true,
+                spider_binary_present: !image.is_empty(),
+                mtss_online: true,
+                userspace_loader_ready: true,
+            },
+        )
+    }
+
+    pub fn launch_spider_rs_pid1_checked<const NPROC: usize, const MSG_DEPTH: usize>(
+        &self,
+        kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+        image: &[u8],
+        preconditions: SpiderPid1Preconditions,
+    ) -> Result<SpiderPid1LaunchReport, SpiderPid1LaunchError> {
         let _ = self;
+        if !preconditions.root_fs_online
+            || !preconditions.runtime_vfs_mounted
+            || !preconditions.spider_binary_present
+            || !preconditions.mtss_online
+            || !preconditions.userspace_loader_ready
+        {
+            return Err(SpiderPid1LaunchError::Handoff(
+                SpiderPid1HandoffError::SupervisorDenied,
+            ));
+        }
         if image.is_empty() {
-            return Err(SpiderPid1LaunchError::EmptyImage);
+            return Err(SpiderPid1LaunchError::Handoff(
+                SpiderPid1HandoffError::SpiderBinaryMissing,
+            ));
         }
 
-        let entry = validate_elf64(image).map_err(SpiderPid1LaunchError::InvalidElf)?;
+        let entry = validate_elf64(image).map_err(|error| match error {
+            LoadError::UnsupportedMachine => {
+                SpiderPid1LaunchError::Handoff(SpiderPid1HandoffError::UnsupportedElfArch)
+            }
+            other => SpiderPid1LaunchError::Load(other),
+        })?;
         let pid = kernel
             .bootstrap_spider_rs_pid1_via_mtss(image)
             .map_err(SpiderPid1LaunchError::Kernel)?;
+        let task = kernel
+            .mtss_pid1_task()
+            .ok_or(SpiderPid1LaunchError::Handoff(
+                SpiderPid1HandoffError::MtssSpawnFailed,
+            ))?;
+        let thread = kernel
+            .mtss_pid1_main_thread()
+            .ok_or(SpiderPid1LaunchError::Handoff(
+                SpiderPid1HandoffError::MtssSpawnFailed,
+            ))?;
 
         Ok(SpiderPid1LaunchReport {
             pid,
+            task_id: task.id,
+            thread_id: thread.id,
             entry,
             image_len: image.len(),
             runtime_path: SPIDER_RS_RUNTIME_PATH,
             authorized_by_supervisor: true,
             admitted_through_mtss: true,
+            handoff_state: SpiderPid1HandoffState::Runnable,
+            dispatcher_state: SpiderDispatcherState::Pending(
+                "user-mode transition not implemented",
+            ),
+            terminal_manifest: TerminalManifestEntry {
+                path: M1_TERMINAL_PATH,
+                expected_output: M1_TERMINAL_OUTPUT,
+                state: TerminalLaunchState::PendingDispatcherChildLaunch,
+            },
         })
     }
 }

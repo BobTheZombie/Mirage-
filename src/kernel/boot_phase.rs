@@ -11,7 +11,7 @@ use crate::kernel::sync::SpinLock;
 /// Maximum number of boot subsystem records tracked without allocation.
 pub const BOOT_PHASE_CAPACITY: usize = 64;
 /// Current number of canonical Mirage boot phases.
-pub const BOOT_PHASE_COUNT: usize = 60;
+pub const BOOT_PHASE_COUNT: usize = 63;
 
 /// Coarse subsystem ownership used by boot rendering and future debug queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,8 +87,11 @@ pub enum BootPhase {
     RootFs,
     Supervisor,
     UserspaceLoader,
-    Userspace,
     SpiderRs,
+    Pid1,
+    SystemDispatcher,
+    M1Terminal,
+    Userspace,
     BootRuntime,
     Mtss,
     BootScreen,
@@ -132,6 +135,9 @@ impl BootPhase {
             Self::RootFs => "Root FS",
             Self::UserspaceLoader => "Userspace Loader",
             Self::SpiderRs => "Spider-rs",
+            Self::Pid1 => "PID1",
+            Self::SystemDispatcher => "System Dispatcher",
+            Self::M1Terminal => "M1 Terminal",
             Self::BootRuntime => "Boot Runtime",
             Self::Mtss => "MTSS",
             _ => self.name(),
@@ -716,18 +722,39 @@ pub const DEFAULT_SUBSYSTEM_DESCRIPTORS: [SubsystemDescriptor; BOOT_PHASE_COUNT]
         3,
     ),
     descriptor(
-        BootPhase::Userspace,
-        "Userspace",
-        SubsystemCategory::Userspace,
-        false,
-        3,
-    ),
-    descriptor(
         BootPhase::SpiderRs,
         "Spider-rs",
         SubsystemCategory::Userspace,
         false,
         2,
+    ),
+    descriptor(
+        BootPhase::Pid1,
+        "PID1",
+        SubsystemCategory::Userspace,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::SystemDispatcher,
+        "System Dispatcher",
+        SubsystemCategory::Userspace,
+        false,
+        3,
+    ),
+    descriptor(
+        BootPhase::M1Terminal,
+        "M1 Terminal",
+        SubsystemCategory::Userspace,
+        false,
+        2,
+    ),
+    descriptor(
+        BootPhase::Userspace,
+        "Userspace",
+        SubsystemCategory::Userspace,
+        false,
+        3,
     ),
     descriptor(
         BootPhase::BootRuntime,
@@ -864,8 +891,11 @@ pub fn boot_register_compiled_subsystems() {
     register_phase(BootPhase::RootFs);
     register_phase(BootPhase::Supervisor);
     register_phase(BootPhase::UserspaceLoader);
-    register_phase(BootPhase::Userspace);
     register_phase(BootPhase::SpiderRs);
+    register_phase(BootPhase::Pid1);
+    register_phase(BootPhase::SystemDispatcher);
+    register_phase(BootPhase::M1Terminal);
+    register_phase(BootPhase::Userspace);
     register_phase(BootPhase::BootRuntime);
     register_phase(BootPhase::Mtss);
     register_phase(BootPhase::BootScreen);
