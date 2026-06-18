@@ -91,5 +91,11 @@ fn panic(info: &PanicInfo) -> ! {
         info.message()
     ));
 
+    crate::kernel::boot_diagnostics::boot_trace_panic("kernel panic");
+    crate::kernel::boot_diagnostics::draw_failure_screen(
+        "kernel panic",
+        crate::kernel::input::any_keyboard_online(),
+    );
+
     crate::arch::x86_64::panic_halt()
 }

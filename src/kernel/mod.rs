@@ -2,6 +2,7 @@
 //! multi-core orchestration.
 
 pub mod block;
+pub mod boot_diagnostics;
 pub mod boot_phase;
 pub mod boot_runtime;
 pub mod boot_screen;

@@ -428,12 +428,14 @@ fn cpuid_count(leaf: u32, subleaf: u32) -> core::arch::x86_64::CpuidResult {
 
 #[cfg(not(feature = "emergency-boot"))]
 fn probe_cpu() -> CpuProbe {
-    crate::kprintln!("[ryzen 01] enter amd64 cpu probe");
+    crate::boot_trace_substep!("[ryzen 01]", "enter AMD64 CPU probe");
+    crate::kprintln!("[ryzen 01] enter AMD64 CPU probe");
     let vendor = cpuid_count(0, 0);
     let max_standard_leaf = vendor.eax;
     let ext0 = cpuid_count(0x8000_0000, 0);
     let max_extended_leaf = ext0.eax;
-    crate::kprintln!("[ryzen 02] cpuid max leaves read");
+    crate::boot_trace_substep!("[ryzen 02]", "CPUID max leaves read");
+    crate::kprintln!("[ryzen 02] CPUID max leaves read");
 
     let features = if max_standard_leaf >= 1 {
         cpuid_count(1, 0)
@@ -464,6 +466,7 @@ fn probe_cpu() -> CpuProbe {
     } else {
         1
     };
+    crate::boot_trace_substep!("[ryzen 03]", "vendor/family/model parsed");
     crate::kprintln!("[ryzen 03] vendor/family/model parsed");
 
     let mut brand_string = [0u8; 48];
@@ -483,11 +486,14 @@ fn probe_cpu() -> CpuProbe {
             }
             index += 1;
         }
+        crate::boot_trace_substep!("[ryzen 04]", "brand string parsed or skipped");
         crate::kprintln!("[ryzen 04] brand string parsed or skipped");
     } else {
+        crate::boot_trace_substep!("[ryzen 04]", "brand string parsed or skipped");
         crate::kprintln!("[ryzen 04] brand string parsed or skipped");
     }
 
+    crate::boot_trace_substep!("[ryzen 05]", "topology probe enter");
     crate::kprintln!("[ryzen 05] topology probe enter");
     let ext1 = if max_extended_leaf >= 0x8000_0001 {
         cpuid_count(0x8000_0001, 0)
@@ -530,8 +536,10 @@ fn probe_cpu() -> CpuProbe {
     } else {
         None
     };
+    crate::boot_trace_substep!("[ryzen 06]", "topology parsed or skipped");
     crate::kprintln!("[ryzen 06] topology parsed or skipped");
-    crate::kprintln!("[ryzen 07] msr telemetry skipped/safe");
+    crate::boot_trace_substep!("[ryzen 07]", "MSR telemetry skipped or safe");
+    crate::kprintln!("[ryzen 07] MSR telemetry skipped or safe");
 
     CpuProbe {
         vendor_ebx: vendor.ebx,
@@ -884,6 +892,7 @@ fn pci_probe_function(function: PciProbeFunction) -> Option<PciProbeDevice> {
 
 #[cfg(not(feature = "emergency-boot"))]
 fn scan_pci_devices(mut visitor: impl FnMut(PciProbeDevice)) {
+    crate::boot_trace_substep!("[renoir 02]", "PCI scan start");
     match pci_config_backend() {
         PciConfigBackend::LegacyCf8Cfc => {
             if ryzen_debug_pci() {
@@ -902,6 +911,7 @@ fn scan_pci_devices(mut visitor: impl FnMut(PciProbeDevice)) {
             function: 0,
         };
         if let Some(device0) = pci_probe_function(function0) {
+            crate::boot_trace_substep!("[renoir 03]", "PCI device read");
             visitor(device0);
             if pci_is_multifunction(device0.header_type) {
                 let mut function = 1u8;
@@ -911,6 +921,7 @@ fn scan_pci_devices(mut visitor: impl FnMut(PciProbeDevice)) {
                         device,
                         function,
                     }) {
+                        crate::boot_trace_substep!("[renoir 03]", "PCI device read");
                         visitor(found);
                     }
                     function += 1;
@@ -923,7 +934,8 @@ fn scan_pci_devices(mut visitor: impl FnMut(PciProbeDevice)) {
 
 #[cfg(not(feature = "emergency-boot"))]
 const fn ryzen_debug_pci() -> bool {
-    option_env!("MIRAGE_DEBUG_PCI").is_some()
+    crate::kernel::boot_diagnostics::debug_pci_enabled()
+        || crate::kernel::boot_diagnostics::raw_hw_dump_enabled()
 }
 
 #[cfg(not(feature = "emergency-boot"))]
@@ -978,9 +990,12 @@ fn initialize_platform_probes(
     } else {
         boot_phase_skipped(BootPhase::RyzenTopology, "CPUID topology unavailable");
     }
+    crate::boot_trace_substep!("[ryzen 08]", "platform facts committed");
     crate::kprintln!("[ryzen 08] platform facts committed");
 
-    crate::kprintln!("[ryzen 09] soc pci inventory enter");
+    crate::boot_trace_substep!("[renoir 01]", "enter platform inventory");
+    crate::boot_trace_substep!("[renoir 02]", "PCI scan start");
+    crate::kprintln!("[renoir 01] enter platform inventory");
     let amd_soc = registry.find_amd_soc_device().is_some();
     boot_phase_start(BootPhase::AmdSoc);
     if amd_soc {
@@ -988,7 +1003,8 @@ fn initialize_platform_probes(
     } else {
         boot_phase_skipped(BootPhase::AmdSoc, "AMD SoC PCI devices not present");
     }
-    crate::kprintln!("[ryzen 10] soc pci inventory complete");
+    crate::boot_trace_substep!("[renoir 04]", "AMD device classified");
+    crate::kprintln!("[renoir 04] AMD device classified");
 
     boot_phase_start(BootPhase::AmdIommu);
     if boot_info.rsdp.is_some() && amd_soc {
@@ -1010,6 +1026,7 @@ fn initialize_platform_probes(
     boot_phase_start(BootPhase::Battery);
     boot_phase_skipped(BootPhase::Battery, "battery ACPI probe not implemented");
 
+    crate::boot_trace_substep!("[renoir 05]", "AMDGPU detection skipped/detected");
     let renoir_gpu = registry.find_amdgpu_renoir().is_some();
     boot_phase_start(BootPhase::AmdGpuRenoir);
     if renoir_gpu {
@@ -1018,6 +1035,7 @@ fn initialize_platform_probes(
         boot_phase_skipped(BootPhase::AmdGpuRenoir, "Renoir GPU PCI device not present");
     }
 
+    crate::boot_trace_substep!("[renoir 06]", "AMD xHCI detection start");
     let amd_xhci = registry
         .find_xhci()
         .is_some_and(|device| device.vendor_id == Some(0x1022));
@@ -1027,7 +1045,9 @@ fn initialize_platform_probes(
     } else {
         boot_phase_skipped(BootPhase::AmdXhci, "AMD xHCI controller not present");
     }
-    crate::kprintln!("[ryzen 11] exit ryzen platform init");
+    crate::boot_trace_substep!("[renoir 07]", "AMD xHCI detection done");
+    crate::boot_trace_substep!("[renoir 08]", "exit platform inventory");
+    crate::kprintln!("[renoir 08] exit platform inventory");
 
     registry
 }

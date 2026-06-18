@@ -894,6 +894,7 @@ pub fn boot_register_subsystem(descriptor: SubsystemDescriptor) {
 }
 
 pub fn boot_phase_start(phase: BootPhase) {
+    crate::kernel::boot_diagnostics::boot_trace_phase_started(phase.name());
     transition(phase, PhaseState::Started, "started");
 }
 
@@ -902,10 +903,14 @@ pub fn boot_phase_pending(phase: BootPhase, message: &'static str) {
 }
 
 pub fn boot_phase_ok(phase: BootPhase) {
+    crate::kernel::boot_diagnostics::boot_trace_phase_ok(phase.name());
     transition(phase, PhaseState::Ok, "ok");
 }
 
 pub fn boot_phase_online(phase: BootPhase) {
+    if phase == BootPhase::Framebuffer {
+        crate::kernel::boot_diagnostics::mark_framebuffer_online();
+    }
     transition(phase, PhaseState::Online, "online");
 }
 
@@ -914,6 +919,7 @@ pub fn boot_phase_enabled(phase: BootPhase) {
 }
 
 pub fn boot_phase_failed(phase: BootPhase, message: &'static str) {
+    crate::kernel::boot_diagnostics::boot_trace_phase_failed(phase.name(), message);
     transition(phase, PhaseState::Failed, message);
 }
 
