@@ -883,12 +883,14 @@ fn register_phase(phase: BootPhase) {
 
 pub fn boot_register_subsystem(descriptor: SubsystemDescriptor) {
     let duplicate = BOOT_PHASE_MANAGER.lock().register(descriptor);
-    if duplicate {
-        write_duplicate_registration_serial(descriptor.phase);
-    } else {
-        write_registration_serial(descriptor.phase);
+    if cfg!(feature = "bootdiag-verbose") || cfg!(feature = "bootdiag-serial") {
+        if duplicate {
+            write_duplicate_registration_serial(descriptor.phase);
+        } else {
+            write_registration_serial(descriptor.phase);
+        }
     }
-    if framebuffer_ready() {
+    if cfg!(feature = "bootdiag-framebuffer") && framebuffer_ready() {
         boot_phase_render_screen();
     }
 }
@@ -948,8 +950,10 @@ pub fn boot_phase_validate_no_unresolved() {
         let mut manager = BOOT_PHASE_MANAGER.lock();
         manager.validate_no_unresolved();
     }
-    write_validation_serial();
-    if framebuffer_ready() {
+    if cfg!(feature = "bootdiag-serial") || cfg!(feature = "bootdiag-verbose") {
+        write_validation_serial();
+    }
+    if cfg!(feature = "bootdiag-framebuffer") && framebuffer_ready() {
         boot_phase_render_screen();
     }
 }
@@ -986,9 +990,14 @@ fn transition(phase: BootPhase, state: PhaseState, message: &'static str) {
         write_unregistered_transition_serial(phase, state);
         return;
     }
-    write_transition_serial(phase, state, message);
+    if cfg!(feature = "bootdiag-serial")
+        || cfg!(feature = "bootdiag-verbose")
+        || matches!(state, PhaseState::Failed)
+    {
+        write_transition_serial(phase, state, message);
+    }
 
-    if framebuffer_ready() {
+    if cfg!(feature = "bootdiag-framebuffer") && framebuffer_ready() {
         boot_phase_render_screen();
     }
 }

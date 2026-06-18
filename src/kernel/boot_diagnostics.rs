@@ -16,13 +16,18 @@ pub const BOOT_LOG_CAPACITY: usize = 96;
 pub const BOOT_LOG_MESSAGE_BYTES: usize = 96;
 pub const DEFAULT_FREEZE_ON_FAIL: bool = true;
 pub const DEFAULT_NO_FB_CLEAR_AFTER_BOOT: bool = true;
-pub const DEFAULT_RAW_HW_DUMP: bool = false;
-pub const DEFAULT_SERIAL_DIAGNOSTICS: bool = true;
-pub const DEFAULT_FB_LOG_OVERLAY: bool = false;
+pub const DEFAULT_RAW_HW_DUMP: bool = cfg!(feature = "bootdiag-raw-hw");
+pub const DEFAULT_SERIAL_DIAGNOSTICS: bool =
+    cfg!(feature = "bootdiag-serial") || cfg!(feature = "bootdiag-verbose");
+pub const DEFAULT_FB_LOG_OVERLAY: bool = cfg!(feature = "bootdiag-framebuffer");
 
 static FRAMEBUFFER_ONLINE: AtomicBool = AtomicBool::new(false);
 static FAILURE_SCREEN_DRAWN: AtomicBool = AtomicBool::new(false);
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static EVENTS_CAPTURED: AtomicU64 = AtomicU64::new(0);
+static EVENTS_IGNORED: AtomicU64 = AtomicU64::new(0);
+static SERIAL_WRITES: AtomicU64 = AtomicU64::new(0);
+static RAW_DUMPS_SUPPRESSED: AtomicU64 = AtomicU64::new(0);
 static DIAGNOSTICS: SpinLock<BootDiagnostics> = SpinLock::new(BootDiagnostics::new());
 static BOOT_LOG: SpinLock<BootLogRing> = SpinLock::new(BootLogRing::new());
 
@@ -185,6 +190,9 @@ fn copy_message(dst: &mut [u8; BOOT_LOG_MESSAGE_BYTES], len: &mut u8, message: &
 
 pub fn mark_framebuffer_online() {
     FRAMEBUFFER_ONLINE.store(true, Ordering::SeqCst);
+    if !cfg!(feature = "bootdiag") {
+        return;
+    }
     log(
         BootLogLevel::Info,
         "Framebuffer",
@@ -204,18 +212,28 @@ pub const fn raw_hw_dump_enabled() -> bool {
     DEFAULT_RAW_HW_DUMP || option_env!("MIRAGE_DEBUG_RAW_HW_DUMP").is_some()
 }
 
+pub fn note_raw_dump_suppressed() {
+    RAW_DUMPS_SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+}
+
 pub const fn debug_pci_enabled() -> bool {
-    option_env!("MIRAGE_DEBUG_PCI").is_some()
+    cfg!(feature = "bootdiag-raw-hw") || option_env!("MIRAGE_DEBUG_PCI").is_some()
 }
 
 pub const fn debug_ryzen_enabled() -> bool {
-    option_env!("MIRAGE_DEBUG_RYZEN").is_some()
+    cfg!(feature = "bootdiag-raw-hw") || option_env!("MIRAGE_DEBUG_RYZEN").is_some()
 }
 
 pub fn log(level: BootLogLevel, phase: &'static str, message: &'static str) {
+    if !cfg!(feature = "bootdiag") && !matches!(level, BootLogLevel::Error | BootLogLevel::Fault) {
+        EVENTS_IGNORED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    EVENTS_CAPTURED.fetch_add(1, Ordering::Relaxed);
     let entry = BootLogEntry::new(level, phase, message);
     BOOT_LOG.lock().push(entry);
-    if DEFAULT_SERIAL_DIAGNOSTICS {
+    if DEFAULT_SERIAL_DIAGNOSTICS || matches!(level, BootLogLevel::Error | BootLogLevel::Fault) {
+        SERIAL_WRITES.fetch_add(1, Ordering::Relaxed);
         crate::arch::x86_64::early_console::panic_write_fmt(format_args!(
             "[bootdiag {:06}] {} {}: {}\n",
             entry.sequence,
@@ -227,6 +245,11 @@ pub fn log(level: BootLogLevel, phase: &'static str, message: &'static str) {
 }
 
 pub fn boot_trace_phase_started(name: &'static str) {
+    if !cfg!(feature = "bootdiag") {
+        let _ = name;
+        EVENTS_IGNORED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     trace_phase(
         name,
         PhaseState::Started,
@@ -238,6 +261,11 @@ pub fn boot_trace_phase_started(name: &'static str) {
 }
 
 pub fn boot_trace_phase_ok(name: &'static str) {
+    if !cfg!(feature = "bootdiag") {
+        let _ = name;
+        EVENTS_IGNORED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     trace_phase(
         name,
         PhaseState::Ok,
@@ -269,6 +297,11 @@ pub fn boot_trace_substep_at(
     source_file: &'static str,
     source_line: u32,
 ) {
+    if !cfg!(feature = "bootdiag") {
+        let _ = (id, message, source_file, source_line);
+        EVENTS_IGNORED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     let mut diag = DIAGNOSTICS.lock();
     diag.last_substep_id = id;
     diag.last_substep_message = message;
@@ -305,6 +338,27 @@ pub fn boot_failure(reason: &'static str) -> ! {
     boot_trace_phase_failed(boot_phase_current().name(), reason);
     draw_failure_screen(reason, crate::kernel::input::any_keyboard_online());
     crate::arch::x86_64::panic_halt()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootDiagCounters {
+    pub events_captured: u64,
+    pub events_ignored: u64,
+    pub framebuffer_renders: u64,
+    pub serial_writes: u64,
+    pub raw_dumps_suppressed: u64,
+    pub ring_entries_dropped: u64,
+}
+
+pub fn counters() -> BootDiagCounters {
+    BootDiagCounters {
+        events_captured: EVENTS_CAPTURED.load(Ordering::Relaxed),
+        events_ignored: EVENTS_IGNORED.load(Ordering::Relaxed),
+        framebuffer_renders: crate::kernel::boot_screen::framebuffer_render_count(),
+        serial_writes: SERIAL_WRITES.load(Ordering::Relaxed),
+        raw_dumps_suppressed: RAW_DUMPS_SUPPRESSED.load(Ordering::Relaxed),
+        ring_entries_dropped: BOOT_LOG.lock().overwritten(),
+    }
 }
 
 pub fn snapshot() -> BootDiagnostics {
@@ -433,6 +487,18 @@ impl Write for FailureWriter {
 #[macro_export]
 macro_rules! boot_trace_substep {
     ($id:expr, $message:expr) => {{
-        $crate::kernel::boot_diagnostics::boot_trace_substep_at($id, $message, file!(), line!())
+        #[cfg(feature = "bootdiag")]
+        {
+            $crate::kernel::boot_diagnostics::boot_trace_substep_at(
+                $id,
+                $message,
+                file!(),
+                line!(),
+            );
+        }
+        #[cfg(not(feature = "bootdiag"))]
+        {
+            let _ = ($id, $message);
+        }
     }};
 }
