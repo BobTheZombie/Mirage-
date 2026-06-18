@@ -144,11 +144,55 @@ pub fn write_byte(byte: u8) {
     }
 }
 
-/// Clear the framebuffer console to black and reset the text cursor.
-pub fn clear_screen() {
+/// Controlled clear for the first boot UI paint before framebuffer evidence exists.
+pub fn clear_for_boot_ui() {
+    if crate::kernel::boot_diagnostics::framebuffer_online()
+        && crate::kernel::boot_diagnostics::no_fb_clear_after_boot()
+    {
+        crate::kernel::boot_diagnostics::log(
+            crate::kernel::boot_diagnostics::BootLogLevel::Warn,
+            "Framebuffer",
+            "boot UI clear suppressed after framebuffer online",
+        );
+        return;
+    }
+    crate::kernel::boot_diagnostics::log(
+        crate::kernel::boot_diagnostics::BootLogLevel::Info,
+        "Framebuffer",
+        "clear_for_boot_ui",
+    );
     if let Some(console) = CONSOLE.lock().as_mut() {
         console.clear(DEFAULT_BACKGROUND);
     }
+}
+
+/// Controlled clear for a deliberate firmware/driver mode switch.
+pub fn clear_for_mode_switch() {
+    crate::kernel::boot_diagnostics::log(
+        crate::kernel::boot_diagnostics::BootLogLevel::Warn,
+        "Framebuffer",
+        "clear_for_mode_switch",
+    );
+    if let Some(console) = CONSOLE.lock().as_mut() {
+        console.clear(DEFAULT_BACKGROUND);
+    }
+}
+
+/// Controlled clear for explicit debug shell activation.
+pub fn clear_for_debug_shell() {
+    crate::kernel::boot_diagnostics::log(
+        crate::kernel::boot_diagnostics::BootLogLevel::Info,
+        "Framebuffer",
+        "clear_for_debug_shell",
+    );
+    if let Some(console) = CONSOLE.lock().as_mut() {
+        console.clear(DEFAULT_BACKGROUND);
+    }
+}
+
+/// Deprecated raw clear wrapper. Use an explicit clear_for_* API.
+pub fn clear_screen() {
+    clear_for_boot_ui();
 }
 
 /// Draw one pixel in the active framebuffer mode.

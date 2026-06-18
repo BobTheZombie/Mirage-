@@ -43,7 +43,7 @@ pub fn render_persistent_boot_screen() {
 fn render_framebuffer(manager: &BootPhaseManager) {
     use crate::arch::x86_64::framebuffer_console::{self, RgbColor};
 
-    framebuffer_console::clear_screen();
+    framebuffer_console::clear_for_boot_ui();
     framebuffer_console::write_colored(TITLE, RgbColor::CYAN);
     framebuffer_console::write_colored("\n\n", RgbColor::WHITE);
     framebuffer_console::write_colored("               ", RgbColor::WHITE);
