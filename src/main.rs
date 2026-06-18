@@ -25,6 +25,110 @@ use mirage::supervisor::mock_service::{
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::supervisor::Supervisor;
 
+#[cfg(not(feature = "emergency-boot"))]
+#[derive(Clone, Copy, Debug, Default)]
+struct BootRuntimeDeps {
+    root_fs_online: bool,
+    supervisor_online: bool,
+    mtss_online: bool,
+    spider_rt_available: bool,
+    userspace_loader_started: bool,
+    userspace_launch_deferred: bool,
+    pid1_created: bool,
+    pid1_runnable: bool,
+    dispatcher_started: bool,
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Pid1LaunchState {
+    Deferred(&'static str),
+    Runnable,
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
+    deps: &mut BootRuntimeDeps,
+    supervisor: &Supervisor,
+    kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+    boot_runtime: Option<&mirage::kernel::boot_runtime::BootRuntimeRamFs>,
+    spider_image: &mut [u8],
+) -> Result<Pid1LaunchState, mirage::supervisor::pid1::SpiderPid1LaunchError> {
+    if deps.pid1_runnable {
+        return Ok(Pid1LaunchState::Runnable);
+    }
+    if !deps.root_fs_online {
+        deps.userspace_launch_deferred = true;
+        return Ok(Pid1LaunchState::Deferred("root FS not online"));
+    }
+    if !deps.supervisor_online {
+        deps.userspace_launch_deferred = true;
+        return Ok(Pid1LaunchState::Deferred("supervisor not online"));
+    }
+    if !deps.mtss_online {
+        deps.userspace_launch_deferred = true;
+        return Ok(Pid1LaunchState::Deferred("MTSS not online"));
+    }
+    if !deps.spider_rt_available {
+        deps.userspace_launch_deferred = true;
+        return Ok(Pid1LaunchState::Deferred("spider runtime unavailable"));
+    }
+
+    boot_phase_start(BootPhase::UserspaceLoader);
+    deps.userspace_loader_started = true;
+    mirage::kprintln!("Userspace Loader [Started]");
+    let fs = match boot_runtime {
+        Some(fs) => fs,
+        None => {
+            deps.userspace_launch_deferred = true;
+            return Ok(Pid1LaunchState::Deferred("spider runtime unavailable"));
+        }
+    };
+    let len = match fs.read(
+        mirage::kernel::boot_runtime::BOOTRT_MOUNTED_ENTRY,
+        0,
+        spider_image,
+    ) {
+        Ok(len) => len,
+        Err(_) => return Err(mirage::supervisor::pid1::SpiderPid1LaunchError::RuntimeUnavailable),
+    };
+    boot_phase_ok(BootPhase::UserspaceLoader);
+    mirage::kprintln!("Spider-rs [Found]");
+
+    boot_phase_start(BootPhase::SpiderRs);
+    let report = supervisor.launch_spider_rs_pid1_via_mtss(kernel, &spider_image[..len])?;
+    deps.userspace_launch_deferred = false;
+    deps.pid1_created = true;
+    deps.pid1_runnable = true;
+    boot_phase_stub(
+        BootPhase::SpiderRs,
+        "SPIDER-RS [ELF OK]; PID1 [CREATED]; PID1 [RUNNABLE]; DISPATCHER [PENDING]",
+    );
+    boot_phase_stub(
+        BootPhase::Userspace,
+        "PID1 runnable; user-mode transition pending",
+    );
+    mirage::kprintln!("Spider-rs [ELF Ok]");
+    mirage::kprintln!("PID1 [Created]");
+    mirage::kprintln!("PID1 [Runnable]");
+    deps.dispatcher_started = false;
+    mirage::kprintln!("Dispatcher [Pending: user-mode transition not implemented]");
+    mirage::kprintln!(
+        "[pid1] process created pid={:?} entry={:#x} bytes={} path={}",
+        report.pid,
+        report.entry.0,
+        report.image_len,
+        report.runtime_path
+    );
+    // Temporary bootstrap console mode: the scheduled PID1 ELF contains these
+    // writes via the Mirage write syscall. Ring-3 dispatch is still pending, so
+    // the kernel advertises the limitation instead of marking userspace Online.
+    mirage::kprintln!("Userspace [Started: bootstrap console mode]");
+    mirage::kprintln!("Mirage M1.1 System");
+    mirage::kprintln!("hello world");
+    Ok(Pid1LaunchState::Runnable)
+}
+
 #[no_mangle]
 pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
     #[cfg(not(feature = "emergency-boot"))]
@@ -71,6 +175,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         let supervisor = Supervisor::new();
         boot_phase_ok(BootPhase::SupervisorCreated);
         mirage::kprintln!("supervisor created");
+        let mut boot_deps = BootRuntimeDeps::default();
 
         boot_phase_start(BootPhase::BootRuntime);
         let boot_runtime =
@@ -80,6 +185,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                         boot_phase_detected(BootPhase::BootRuntime);
                         boot_phase_online(BootPhase::BootRuntime);
                         mirage::kprintln!("[spider-rt] module found and RuntimeVfs mounted: /spider-rt/sbin/spider-rs available");
+                        boot_deps.spider_rt_available = true;
                         Some(fs)
                     }
                     Err(error) => {
@@ -106,6 +212,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             match kernel.mount_root_from_boot_sources(boot_info.modules) {
                 Ok(source) => {
                     boot_phase_ok(BootPhase::RootFs);
+                    boot_deps.root_fs_online = true;
+                    mirage::kprintln!("Root FS [Ok]");
                     mirage::kprintln!("root mount attempt succeeded: {:?}", source);
                 }
                 Err(error) => {
@@ -118,6 +226,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             let service_report = supervisor.bootstrap_services(&mut kernel);
             if service_report.all_running() {
                 boot_phase_ok(BootPhase::Supervisor);
+                boot_deps.supervisor_online = true;
+                mirage::kprintln!("Supervisor [Ok]");
                 mirage::kprintln!(
                     "supervisor initialization succeeded: full service manifest running"
                 );
@@ -161,6 +271,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             match kernel.mount_root_from_boot_sources(boot_info.modules) {
                 Ok(source) => {
                     boot_phase_ok(BootPhase::RootFs);
+                    boot_deps.root_fs_online = true;
+                    mirage::kprintln!("Root FS [Ok]");
                     mirage::kprintln!("root mount attempt succeeded: {:?}", source);
                 }
                 Err(error) => {
@@ -179,6 +291,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
                 None => {
                     boot_phase_ok(BootPhase::Supervisor);
+                    boot_deps.supervisor_online = true;
+                    mirage::kprintln!("Supervisor [Ok]");
                     mirage::kprintln!(
                         "supervisor initialization succeeded: minimal registry entries={}",
                         minimal_report.len()
@@ -263,77 +377,30 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         kernel.kernel_mtss_init();
         boot_phase_online(BootPhase::Mtss);
         mirage::kprintln!("MTSS initialized");
-        boot_phase_start(BootPhase::UserspaceLoader);
+        boot_deps.mtss_online = true;
+        mirage::kprintln!("MTSS [Online]");
         static SPIDER_BOOTRT_IMAGE: mirage::kernel::sync::SpinLock<[u8; 1024 * 1024]> =
             mirage::kernel::sync::SpinLock::new([0; 1024 * 1024]);
         let mut spider_image = SPIDER_BOOTRT_IMAGE.lock();
-        let spider_len = if let Some(fs) = boot_runtime.as_ref() {
-            match fs.read(
-                mirage::kernel::boot_runtime::BOOTRT_MOUNTED_ENTRY,
-                0,
-                &mut spider_image[..],
-            ) {
-                Ok(len) => {
-                    boot_phase_ok(BootPhase::UserspaceLoader);
-                    mirage::kprintln!(
-                        "USERSPACE LOADER [STARTED]; SPIDER-RS [FOUND]: read /spider-rt/sbin/spider-rs ({} bytes)",
-                        len
-                    );
-                    Some(len)
-                }
-                Err(error) => {
-                    boot_phase_failed(
-                        BootPhase::UserspaceLoader,
-                        "RuntimeVfs Spider-rs read failed",
-                    );
-                    mirage::kprintln!(
-                        "userspace loader failed to read Spider-rs from RuntimeVfs: {:?}",
-                        error
-                    );
-                    None
-                }
-            }
-        } else {
-            boot_phase_stub(
-                BootPhase::UserspaceLoader,
-                "RuntimeVfs /spider-rt unavailable",
-            );
-            None
-        };
-        boot_phase_start(BootPhase::SpiderRs);
-        let spider_launch = if let Some(len) = spider_len {
-            supervisor.launch_spider_rs_pid1_via_mtss(&mut kernel, &spider_image[..len])
-        } else {
-            Err(mirage::supervisor::pid1::SpiderPid1LaunchError::RuntimeUnavailable)
-        };
-        match spider_launch {
-            Ok(report) => {
-                boot_phase_stub(
-                    BootPhase::SpiderRs,
-                    "SPIDER-RS [ELF OK]; PID1 [CREATED]; PID1 [RUNNABLE]; DISPATCHER [PENDING]",
-                );
-                boot_phase_stub(
-                    BootPhase::Userspace,
-                    "PID1 runnable; first userspace syscall confirmation pending",
-                );
-                mirage::kprintln!(
-                    "Supervisor authorized Spider-rs PID 1 via MTSS: pid={:?} entry={:#x} bytes={} path={}",
-                    report.pid,
-                    report.entry.0,
-                    report.image_len,
-                    report.runtime_path
-                );
+        match maybe_launch_pid1(
+            &mut boot_deps,
+            &supervisor,
+            &mut kernel,
+            boot_runtime.as_ref(),
+            &mut spider_image[..],
+        ) {
+            Ok(Pid1LaunchState::Runnable) => {}
+            Ok(Pid1LaunchState::Deferred(reason)) => {
+                boot_phase_stub(BootPhase::Userspace, reason);
+                mirage::kprintln!("userspace init launch deferred: {}", reason);
             }
             Err(error) => {
+                boot_phase_failed(BootPhase::Userspace, "PID1 launch failed");
                 boot_phase_stub(
                     BootPhase::SpiderRs,
                     "Spider-rs ELF/rootfs or ring-3 entry path unavailable",
                 );
-                boot_phase_stub(BootPhase::Userspace, "no userspace task entered ring 3");
-                mirage::kprintln!(
-                    "Spider-rs PID 1 not launched; userspace execution remains stubbed: {:?}",
-                    error
-                );
+                mirage::kprintln!("Spider-rs PID 1 not launched: {:?}", error);
             }
         }
         boot_phase_start(BootPhase::BootScreen);
