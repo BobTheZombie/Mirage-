@@ -32,7 +32,7 @@ pub fn framebuffer_render_count() -> u64 {
 /// this screen refresh cannot spam COM1 and remains optional when no framebuffer
 /// is present.
 pub fn render_persistent_boot_screen() {
-    if !cfg!(feature = "bootdiag-framebuffer") {
+    if !cfg!(feature = "hw-framebuffer") {
         return;
     }
     let snapshot = boot_phase_snapshot();
@@ -55,7 +55,7 @@ pub fn render_persistent_boot_screen() {
 fn render_framebuffer(manager: &BootPhaseManager) {
     use crate::arch::x86_64::framebuffer_console::{self, RgbColor};
 
-    framebuffer_console::clear_for_boot_ui();
+    framebuffer_console::prepare_boot_ui_frame();
     framebuffer_console::write_colored(TITLE, RgbColor::CYAN);
     framebuffer_console::write_colored("\n\n", RgbColor::WHITE);
     framebuffer_console::write_colored("               ", RgbColor::WHITE);
@@ -210,7 +210,7 @@ fn status_color(state: PhaseState) -> crate::arch::x86_64::framebuffer_console::
         PhaseState::Ok => RgbColor::GREEN,
         PhaseState::Online | PhaseState::Running => RgbColor::BRIGHT_GREEN,
         PhaseState::Enabled => RgbColor::CYAN,
-        PhaseState::Detected => RgbColor::BLUE,
+        PhaseState::Detected | PhaseState::Found => RgbColor::BLUE,
         PhaseState::Started => RgbColor::WHITE,
         PhaseState::Pending => RgbColor::YELLOW,
         PhaseState::Stub => RgbColor::MAGENTA,

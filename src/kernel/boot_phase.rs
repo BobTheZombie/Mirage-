@@ -151,6 +151,7 @@ pub enum PhaseState {
     Pending,
     Started,
     Detected,
+    Found,
     Ok,
     Online,
     Enabled,
@@ -168,13 +169,14 @@ impl PhaseState {
             Self::Pending => "Pending",
             Self::Started => "Started",
             Self::Detected => "Detected",
+            Self::Found => "Found",
             Self::Ok => "Ok",
             Self::Online => "Online",
             Self::Enabled => "Enabled",
             Self::Stub => "Stub",
             Self::Skipped => "Skipped",
             Self::Failed => "Failed",
-            Self::Running => "Running",
+            Self::Running => "Runnable",
         }
     }
 
@@ -182,7 +184,7 @@ impl PhaseState {
         let weight = weight as u16;
         match self {
             Self::Ok | Self::Online | Self::Enabled | Self::Running => weight,
-            Self::Skipped | Self::Detected | Self::Stub => {
+            Self::Skipped | Self::Detected | Self::Found | Self::Stub => {
                 if required {
                     weight / 2
                 } else {
@@ -890,9 +892,9 @@ pub fn boot_register_subsystem(descriptor: SubsystemDescriptor) {
             write_registration_serial(descriptor.phase);
         }
     }
-    if cfg!(feature = "bootdiag-framebuffer") && framebuffer_ready() {
-        boot_phase_render_screen();
-    }
+    // Registration is intentionally silent on the framebuffer in the default
+    // fast live mode. The first live paint happens on meaningful phase state
+    // transitions so boot registration does not become framebuffer spam.
 }
 
 pub fn boot_phase_start(phase: BootPhase) {
@@ -933,6 +935,10 @@ pub fn boot_phase_detected(phase: BootPhase) {
     transition(phase, PhaseState::Detected, "detected");
 }
 
+pub fn boot_phase_found(phase: BootPhase) {
+    transition(phase, PhaseState::Found, "found");
+}
+
 pub fn boot_phase_stub(phase: BootPhase, message: &'static str) {
     transition(phase, PhaseState::Stub, message);
 }
@@ -953,7 +959,7 @@ pub fn boot_phase_validate_no_unresolved() {
     if cfg!(feature = "bootdiag-serial") || cfg!(feature = "bootdiag-verbose") {
         write_validation_serial();
     }
-    if cfg!(feature = "bootdiag-framebuffer") && framebuffer_ready() {
+    if cfg!(feature = "hw-framebuffer") && framebuffer_ready() {
         boot_phase_render_screen();
     }
 }
@@ -997,7 +1003,7 @@ fn transition(phase: BootPhase, state: PhaseState, message: &'static str) {
         write_transition_serial(phase, state, message);
     }
 
-    if cfg!(feature = "bootdiag-framebuffer") && framebuffer_ready() {
+    if cfg!(feature = "hw-framebuffer") && framebuffer_ready() {
         boot_phase_render_screen();
     }
 }
