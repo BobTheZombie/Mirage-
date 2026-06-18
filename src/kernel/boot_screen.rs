@@ -125,11 +125,14 @@ const AMD_RYZEN_SCREEN_PHASES: [BootPhase; 7] = [
 ];
 
 #[cfg(feature = "hw-framebuffer")]
-const SERVICE_SCREEN_PHASES: [BootPhase; 6] = [
+const SERVICE_SCREEN_PHASES: [BootPhase; 9] = [
     BootPhase::Supervisor,
     BootPhase::Mtss,
     BootPhase::UserspaceLoader,
     BootPhase::SpiderRs,
+    BootPhase::Pid1,
+    BootPhase::SystemDispatcher,
+    BootPhase::M1Terminal,
     BootPhase::Userspace,
     BootPhase::IdleLoop,
 ];

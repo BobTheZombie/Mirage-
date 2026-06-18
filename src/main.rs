@@ -76,7 +76,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
 
     boot_phase_start(BootPhase::UserspaceLoader);
     deps.userspace_loader_started = true;
-    mirage::kprintln!("Userspace Loader [Started]");
+    mirage::kprintln!("USERSPACE LOADER [STARTED]");
     let fs = match boot_runtime {
         Some(fs) => fs,
         None => {
@@ -90,29 +90,52 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         spider_image,
     ) {
         Ok(len) => len,
-        Err(_) => return Err(mirage::supervisor::pid1::SpiderPid1LaunchError::RuntimeUnavailable),
+        Err(_) => {
+            return Err(mirage::supervisor::pid1::SpiderPid1LaunchError::Handoff(
+                mirage::supervisor::pid1::SpiderPid1HandoffError::SpiderBinaryMissing,
+            ))
+        }
     };
     boot_phase_ok(BootPhase::UserspaceLoader);
-    mirage::kprintln!("Spider-rs [Found]");
+    boot_phase_ok(BootPhase::SpiderRs);
+    mirage::kprintln!("SPIDER-RS [FOUND]");
 
     boot_phase_start(BootPhase::SpiderRs);
-    let report = supervisor.launch_spider_rs_pid1_via_mtss(kernel, &spider_image[..len])?;
+    let report = supervisor.launch_spider_rs_pid1_checked(
+        kernel,
+        &spider_image[..len],
+        mirage::supervisor::pid1::SpiderPid1Preconditions {
+            root_fs_online: deps.root_fs_online,
+            runtime_vfs_mounted: boot_runtime.is_some(),
+            spider_binary_present: len > 0,
+            mtss_online: deps.mtss_online,
+            userspace_loader_ready: deps.userspace_loader_started,
+        },
+    )?;
     deps.userspace_launch_deferred = false;
     deps.pid1_created = true;
     deps.pid1_runnable = true;
+    boot_phase_ok(BootPhase::SpiderRs);
+    boot_phase_ok(BootPhase::Pid1);
+    boot_phase_start(BootPhase::SystemDispatcher);
     boot_phase_stub(
-        BootPhase::SpiderRs,
-        "SPIDER-RS [ELF OK]; PID1 [CREATED]; PID1 [RUNNABLE]; DISPATCHER [PENDING]",
+        BootPhase::SystemDispatcher,
+        "PENDING: user-mode transition not implemented",
+    );
+    boot_phase_stub(
+        BootPhase::M1Terminal,
+        "PENDING: dispatcher child launch not implemented",
     );
     boot_phase_stub(
         BootPhase::Userspace,
         "PID1 runnable; user-mode transition pending",
     );
-    mirage::kprintln!("Spider-rs [ELF Ok]");
-    mirage::kprintln!("PID1 [Created]");
-    mirage::kprintln!("PID1 [Runnable]");
+    mirage::kprintln!("SPIDER-RS [ELF OK]");
+    mirage::kprintln!("PID1 [CREATED]");
+    mirage::kprintln!("PID1 [RUNNABLE]");
     deps.dispatcher_started = false;
-    mirage::kprintln!("Dispatcher [Pending: user-mode transition not implemented]");
+    mirage::kprintln!("SYSTEM DISPATCHER [PENDING: user-mode transition not implemented]");
+    mirage::kprintln!("M1 TERMINAL [PENDING: dispatcher child launch not implemented]");
     mirage::kprintln!(
         "[pid1] process created pid={:?} entry={:#x} bytes={} path={}",
         report.pid,
@@ -120,12 +143,10 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         report.image_len,
         report.runtime_path
     );
-    // Temporary bootstrap console mode: the scheduled PID1 ELF contains these
-    // writes via the Mirage write syscall. Ring-3 dispatch is still pending, so
-    // the kernel advertises the limitation instead of marking userspace Online.
-    mirage::kprintln!("Userspace [Started: bootstrap console mode]");
-    mirage::kprintln!("Mirage M1.1 System");
-    mirage::kprintln!("hello world");
+    // Ring-3 dispatch is still pending. Do not print the terminal payload here;
+    // mirage-m1-terminal must be launched by Spider-rs once dispatcher child
+    // launch and the console ABI exist.
+    mirage::kprintln!("Userspace [Started: bootstrap dispatcher mode]");
     Ok(Pid1LaunchState::Runnable)
 }
 
@@ -254,15 +275,13 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
             boot_phase_stub(
                 BootPhase::Userspace,
-                "userspace PID 1 launch deferred until MTSS is online",
+                "PID1 handoff pending: waiting for MTSS online",
             );
             boot_phase_stub(
                 BootPhase::SpiderRs,
-                "Spider-rs waits for MTSS/userspace loader handoff",
+                "Spider-rs PID1 handoff pending: userspace loader not started",
             );
-            mirage::kprintln!(
-                "userspace init launch deferred: root FS and supervisor are online; MTSS handoff not reached yet"
-            );
+            mirage::kprintln!("PID1 handoff pending: waiting for MTSS online");
         }
 
         #[cfg(not(feature = "full-boot"))]
@@ -302,15 +321,13 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
             boot_phase_stub(
                 BootPhase::Userspace,
-                "minimal boot milestone uses supervisor-only skeleton",
+                "PID1 handoff pending: waiting for MTSS online",
             );
             boot_phase_stub(
                 BootPhase::SpiderRs,
-                "Spider-rs pending real userspace init launch",
+                "Spider-rs PID1 handoff pending: userspace loader not started",
             );
-            mirage::kprintln!(
-            "userspace init attempt skipped: minimal boot milestone uses supervisor-only skeleton"
-        );
+            mirage::kprintln!("PID1 handoff pending: waiting for MTSS online");
 
             mirage::kprintln!("loading boot manifest");
             // Temporary compiled-in manifest fixture: replace this with Limine module
