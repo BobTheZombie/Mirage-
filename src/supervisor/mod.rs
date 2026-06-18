@@ -14,6 +14,8 @@ use crate::kernel::process::{
 use crate::kernel::services::registry::ServiceId as RegistryServiceId;
 use crate::kernel::{Kernel, KernelError, ProcessExitReport};
 use mirage_platform::{DeviceCandidateRole, DeviceDiscoveryEvent, PlatformInfo, PlatformService};
+pub mod i8042;
+pub mod input;
 pub mod mock_service;
 
 pub mod renoir_mtss;

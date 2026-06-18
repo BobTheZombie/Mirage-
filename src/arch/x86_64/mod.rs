@@ -17,8 +17,8 @@ use crate::arch::x86_64::xhci_keyboard::{
     DriverStatus, XhciKeyboardStatus, USB_HID_KEYBOARD_DRIVER,
 };
 use crate::kernel::boot_phase::{
-    boot_phase_detected, boot_phase_failed, boot_phase_ok, boot_phase_online,
-    boot_phase_skipped, boot_phase_start, boot_phase_stub, BootPhase,
+    boot_phase_detected, boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_skipped,
+    boot_phase_start, boot_phase_stub, BootPhase,
 };
 use crate::kernel::cpu::MAX_CORES;
 #[cfg(not(feature = "emergency-boot"))]
@@ -30,11 +30,11 @@ use crate::kernel::thread::{
 
 #[cfg(feature = "hw-laptop-hotkeys")]
 pub mod acpi_ec;
+pub mod acpi_madt;
 #[cfg(feature = "hw-ahci")]
 pub mod ahci;
-pub mod boot;
-pub mod acpi_madt;
 pub mod apic;
+pub mod boot;
 pub mod clock;
 pub mod device;
 pub mod early_console;
@@ -146,13 +146,13 @@ pub fn init_architecture(boot_info: &BootInfo) {
         let mut platform_registry = initialize_platform_probes(boot_info);
         initialize_storage_hardware(boot_info, &platform_registry);
         initialize_input_hardware(boot_info, &mut platform_registry);
-    // Renoir platform probing is intentionally not executed from the early
-    // x86_64 IDT/interrupt bring-up path. CPUID/platform detection is safe,
-    // but the boot-phase/status plumbing can touch high-half state that is
-    // not guaranteed mapped while exception vectors are being installed.
-    // Re-enable from the supervisor/platform bring-up phase after IDT+PIC
-    // are marked OK.
-    // let _renoir_boot_profile = platform::amd::renoir_kernel_boot_probe(boot_info);
+        // Renoir platform probing is intentionally not executed from the early
+        // x86_64 IDT/interrupt bring-up path. CPUID/platform detection is safe,
+        // but the boot-phase/status plumbing can touch high-half state that is
+        // not guaranteed mapped while exception vectors are being installed.
+        // Re-enable from the supervisor/platform bring-up phase after IDT+PIC
+        // are marked OK.
+        // let _renoir_boot_profile = platform::amd::renoir_kernel_boot_probe(boot_info);
     }
 }
 
@@ -1173,10 +1173,10 @@ fn initialize_input_hardware(
     #[cfg(feature = "hw-ps2-keyboard")]
     {
         boot_phase_start(BootPhase::Ps2Keyboard);
-        match PS2_KEYBOARD_DRIVER.initialize(false) {
+        match PS2_KEYBOARD_DRIVER.initialize(true) {
             Ok(()) => {
+                crate::arch::x86_64::pic::unmask_irq(1);
                 boot_phase_ok(BootPhase::Ps2Keyboard);
-                any_online = true;
             }
             Err(error) => {
                 boot_phase_failed(
@@ -1424,19 +1424,54 @@ fn configure_interrupts(boot_info: &BootInfo) {
         if let Some(hhdm) = boot_info.hhdm_offset {
             pic::mask_all();
             match apic::initialize(madt.local_apic_address, hhdm) {
-                apic::LocalApicStatus::Enabled { physical_base, apic_id } => crate::kprintln!("x86_64: local APIC enabled phys={:#x} apic_id={}", physical_base, apic_id),
-                apic::LocalApicStatus::Unavailable => boot_phase_failed(BootPhase::Interrupts, "local APIC unavailable"),
+                apic::LocalApicStatus::Enabled {
+                    physical_base,
+                    apic_id,
+                } => crate::kprintln!(
+                    "x86_64: local APIC enabled phys={:#x} apic_id={}",
+                    physical_base,
+                    apic_id
+                ),
+                apic::LocalApicStatus::Unavailable => {
+                    boot_phase_failed(BootPhase::Interrupts, "local APIC unavailable")
+                }
             }
             match ioapic::initialize_from_madt(&madt, hhdm) {
-                ioapic::IoApicStatus::Enabled { physical_base, gsi_base, max_redirection_entries } => {
+                ioapic::IoApicStatus::Enabled {
+                    physical_base,
+                    gsi_base,
+                    max_redirection_entries,
+                } => {
                     irq::select_apic();
                     boot_phase_skipped(BootPhase::Pic, "legacy PIC masked; APIC/IOAPIC active");
-                    crate::kprintln!("x86_64: IOAPIC enabled phys={:#x} gsi_base={} entries={}", physical_base, gsi_base, max_redirection_entries);
+                    crate::kprintln!(
+                        "x86_64: IOAPIC enabled phys={:#x} gsi_base={} entries={}",
+                        physical_base,
+                        gsi_base,
+                        max_redirection_entries
+                    );
                 }
-                ioapic::IoApicStatus::Unavailable => { irq::select_pic(); pic::initialize(); boot_phase_ok(BootPhase::Pic); crate::kprintln!("x86_64: MADT present but IOAPIC unavailable; using legacy PIC"); }
+                ioapic::IoApicStatus::Unavailable => {
+                    irq::select_pic();
+                    pic::initialize();
+                    boot_phase_ok(BootPhase::Pic);
+                    crate::kprintln!(
+                        "x86_64: MADT present but IOAPIC unavailable; using legacy PIC"
+                    );
+                }
             }
-        } else { irq::select_pic(); pic::initialize(); boot_phase_ok(BootPhase::Pic); crate::kprintln!("x86_64: missing HHDM; using legacy PIC interrupt path"); }
-    } else { boot_phase_skipped(BootPhase::AcpiTables, "MADT unavailable; using legacy PIC"); irq::select_pic(); pic::initialize(); boot_phase_ok(BootPhase::Pic); }
+        } else {
+            irq::select_pic();
+            pic::initialize();
+            boot_phase_ok(BootPhase::Pic);
+            crate::kprintln!("x86_64: missing HHDM; using legacy PIC interrupt path");
+        }
+    } else {
+        boot_phase_skipped(BootPhase::AcpiTables, "MADT unavailable; using legacy PIC");
+        irq::select_pic();
+        pic::initialize();
+        boot_phase_ok(BootPhase::Pic);
+    }
     interrupts::enable();
     boot_phase_online(BootPhase::Interrupts);
     crate::kprintln!("interrupts enabled");
