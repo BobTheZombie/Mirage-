@@ -84,7 +84,10 @@ use crate::subkernel::{
 };
 use core::cmp::min;
 use core::ptr::NonNull;
-use mirage_mtss::{MtssThreadScheduleRecord, RunQueue};
+use mirage_mtss::{
+    CoreMtss, CoreMtssError, CoreTask, CoreTaskId, CoreThread, MtssThreadScheduleRecord, RunQueue,
+    StackRange, UserProgramImage,
+};
 
 pub type KernelThreadScheduleRecord =
     MtssThreadScheduleRecord<ThreadId, ProcessId, ProcessPriority>;
@@ -717,6 +720,7 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     process_table: [Option<ProcessControlBlock<MAX_OPEN_FILES>>; MAX_PROC],
     ipc_queues: [MessageQueue<MSG_DEPTH>; MAX_PROC],
     scheduler: RunQueue<KernelThreadScheduleRecord, MAX_THREADS>,
+    mtss_core: CoreMtss<MAX_PROCESSES, MAX_THREADS, MAX_THREADS>,
     mtss_initialized: bool,
     mtss_ticks: u64,
     security: SecurityKernel<MAX_PROC>,
@@ -752,6 +756,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             process_table: [None; MAX_PROC],
             ipc_queues: [MessageQueue::new(); MAX_PROC],
             scheduler: RunQueue::new(),
+            mtss_core: CoreMtss::new(),
             mtss_initialized: false,
             mtss_ticks: 0,
             security: SecurityKernel::new(),
@@ -790,6 +795,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         framebuffer: Option<FramebufferInfo>,
     ) {
         self.scheduler.reset();
+        self.mtss_core = CoreMtss::new();
         self.mtss_initialized = false;
         self.mtss_ticks = 0;
         self.security.reset();
@@ -958,8 +964,14 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     /// Initialize the kernel-facing MTSS integration without installing a
     /// CPU-specific context-switching backend for this milestone.
     pub fn kernel_mtss_init(&mut self) {
-        self.mtss_initialized = true;
-        self.mtss_ticks = 0;
+        self.mtss_core = CoreMtss::new();
+        let kernel_stack_top = x86_64::kernel_stack_top(0);
+        let kernel_stack =
+            StackRange::new(kernel_stack_top.saturating_sub(0x4000), kernel_stack_top);
+        if self.mtss_core.init_with_idle(kernel_stack).is_ok() {
+            self.mtss_initialized = true;
+            self.mtss_ticks = 0;
+        }
     }
 
     /// Let MTSS observe the timer tick before kernel-owned timer, wakeup, and
@@ -1001,12 +1013,50 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         }
         let entry = crate::kernel::userspace::validate_elf64(image)
             .map_err(|_| KernelError::Filesystem(VfsError::InvalidInput))?;
-        self.spawn_task(SpawnTaskRequest {
+        self.admit_pid1_through_mtss(entry.0)
+    }
+
+    fn admit_pid1_through_mtss(&mut self, entry_point: u64) -> KernelResult<ProcessId> {
+        let address_space = mirage_mtss::AddressSpaceId::new(CoreTaskId::FIRST_USERSPACE.raw());
+        let user_stack = StackRange::new(0x0000_7fff_fee0_0000, 0x0000_7fff_ff00_0000);
+        let kernel_stack_top = x86_64::kernel_stack_top(0).saturating_sub(0x4000);
+        let mtss_task = self
+            .mtss_core
+            .spawn_userspace(
+                "spider-rs",
+                UserProgramImage {
+                    entry: entry_point,
+                    address_space,
+                    user_stack,
+                    cr3: address_space.raw(),
+                },
+                StackRange::new(kernel_stack_top.saturating_sub(0x4000), kernel_stack_top),
+            )
+            .map_err(map_core_mtss_error)?;
+
+        let pid = self.spawn_task(SpawnTaskRequest {
             parent: None,
-            entry_point: entry.0,
+            entry_point,
             priority: ProcessPriority::Normal,
             credentials: Credentials::system(),
-        })
+        })?;
+        if pid.raw() != mtss_task.raw() {
+            return Err(KernelError::InvalidArgument);
+        }
+        let index = self.locate_process(pid)?;
+        if let Some(pcb) = self.process_table[index].as_mut() {
+            pcb.address_space_root = address_space.raw();
+        }
+        Ok(pid)
+    }
+
+    pub fn mtss_pid1_task(&self) -> Option<CoreTask> {
+        self.mtss_core.task(CoreTaskId::FIRST_USERSPACE)
+    }
+
+    pub fn mtss_pid1_main_thread(&self) -> Option<CoreThread> {
+        let task = self.mtss_pid1_task()?;
+        self.mtss_core.thread(task.main_thread)
     }
 
     /// Return the current micro-thread to MTSS after a cooperative yield or the
@@ -5446,5 +5496,18 @@ fn wait_selector_matches(
         child_pid.raw() == selector as u64
     } else {
         child_pgid.raw() == (-selector) as u64
+    }
+}
+
+fn map_core_mtss_error(error: CoreMtssError) -> KernelError {
+    match error {
+        CoreMtssError::TaskTableFull => KernelError::ProcessTableFull,
+        CoreMtssError::ThreadTableFull => KernelError::ThreadTableFull,
+        CoreMtssError::ReadyQueueFull => KernelError::SchedulerFull,
+        CoreMtssError::InvalidAddressSpace
+        | CoreMtssError::InvalidEntry
+        | CoreMtssError::InvalidStack => KernelError::InvalidArgument,
+        CoreMtssError::UnknownTask => KernelError::UnknownProcess,
+        CoreMtssError::UnknownThread | CoreMtssError::ReadyQueueEmpty => KernelError::UnknownThread,
     }
 }
