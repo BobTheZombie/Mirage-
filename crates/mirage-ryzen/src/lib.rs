@@ -43,6 +43,68 @@ pub struct RyzenPlatformInfo {
     pub has_svm: bool,
 }
 
+/// Boot-safe Ryzen platform facts separated by source and safety boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RyzenPlatformFacts {
+    pub cpu_identity: RyzenPlatformInfo,
+    pub topology: RyzenTopology,
+    pub cache: AmdCacheInfo,
+    pub classification: RenoirDetectionKind,
+    pub msr_telemetry_status: RyzenProbeStatus,
+    pub acpi_inventory_status: RyzenProbeStatus,
+    pub soc_pci_inventory_status: RyzenProbeStatus,
+}
+
+/// Honest status for each Ryzen fact source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum RyzenProbeStatus {
+    Ok,
+    Detected,
+    Skipped(&'static str),
+    Failed(&'static str),
+    Pending(&'static str),
+}
+
+impl RyzenPlatformFacts {
+    /// Build platform facts from CPUID-only data. No MSRs, ACPI, PCI MMIO, SMU,
+    /// PSP, GPU, xHCI, or IOMMU initialization is performed.
+    pub fn cpuid_only() -> Self {
+        let cpuid = AmdCpuId::read();
+        Self::from_cpuid(cpuid)
+    }
+
+    pub fn from_cpuid(cpuid: AmdCpuId) -> Self {
+        let cpu_identity = RyzenPlatformInfo::from_cpuid(cpuid);
+        let cache = AmdCacheInfo::from_cpuid(cpuid);
+        let topology = AmdTopology::from_cpuid(cpuid);
+        let ryzen_topology = RyzenTopology::new(
+            1,
+            topology.cores_per_package.max(1),
+            topology.threads_per_core.max(1),
+        );
+        let classification = RenoirCpuProfile::from_parts(
+            RyzenCpuId::new(cpu_identity.family, cpu_identity.model, cpu_identity.stepping),
+            ryzen_topology,
+        )
+        .detection;
+        Self {
+            cpu_identity,
+            topology: ryzen_topology,
+            cache,
+            classification,
+            msr_telemetry_status: RyzenProbeStatus::Skipped(
+                "unsafe until #GP-safe MSR probe exists",
+            ),
+            acpi_inventory_status: RyzenProbeStatus::Pending(
+                "requires mapped and validated ACPI tables",
+            ),
+            soc_pci_inventory_status: RyzenProbeStatus::Pending(
+                "requires PCI config inventory phase",
+            ),
+        }
+    }
+}
+
 impl RyzenPlatformInfo {
     pub fn discover() -> Self {
         Self::from_cpuid(AmdCpuId::read())
