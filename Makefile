@@ -63,6 +63,7 @@ userspace-spider-rs: rust-src check-rust-src $(TARGET_JSON)
 		-Z build-std-features=compiler-builtins-mem
 
 install-spider-rs: spider-rs
+	rm -rf $(BUILD_DIR)/rootfs/spider-rt
 	mkdir -p $(BUILD_DIR)/rootfs/usr/bin $(BUILD_DIR)/rootfs/etc/spider/units $(BUILD_DIR)/rootfs/usr/lib/spider/units
 	cp $(BUILD_DIR)/userspace/m1-terminal $(BUILD_DIR)/rootfs/usr/bin/m1-terminal
 	cp userspace/spider-rs/units/default.target userspace/spider-rs/units/basic.target userspace/spider-rs/units/m1-terminal.service $(BUILD_DIR)/rootfs/etc/spider/units/
@@ -249,7 +250,7 @@ iso: config-generate qemu-kernel runtime-images install-spider-rs limine
 	cp $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT)/EFI/BOOT/BOOTX64.EFI
 	cp $(LIMINE_DIR)/BOOTIA32.EFI $(ISO_ROOT)/EFI/BOOT/BOOTIA32.EFI
-	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
+	xorriso -as mkisofs -r -J -b boot/limine/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
@@ -267,7 +268,7 @@ qemu-seed-image: seed-rs-kernel limine
 	cp $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT)/EFI/BOOT/BOOTX64.EFI
 	cp $(LIMINE_DIR)/BOOTIA32.EFI $(ISO_ROOT)/EFI/BOOT/BOOTIA32.EFI
-	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin \
+	xorriso -as mkisofs -r -J -b boot/limine/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot boot/limine/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \

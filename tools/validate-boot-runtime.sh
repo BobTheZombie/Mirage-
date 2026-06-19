@@ -8,6 +8,7 @@ cd "$repo_root"
 iso_image=${MIRAGE_ISO_IMAGE:-build/mirage.iso}
 runtime_image=${MIRAGE_BOOT_RUNTIME_IMAGE:-build/spider-rt.img}
 iso_root=${MIRAGE_ISO_ROOT:-build/iso_root}
+rootfs_staging=${MIRAGE_ROOTFS_STAGING:-build/rootfs}
 
 fail=0
 err() { printf 'error: %s\n' "$*" >&2; fail=1; }
@@ -34,10 +35,15 @@ check_runtime_path /spider-rt/sbin/spider-rsd
 
 check_root_path_in_tree() {
     path=$1
-    [ -f "$iso_root$path" ] || err "rootfs staging '$iso_root' is missing $path"
-    [ ! -e "$iso_root/spider-rt${path#/usr}" ] || err "normal userspace app appears under /spider-rt: /spider-rt${path#/usr}"
-    [ ! -e "$iso_root/spider-rt/sbin/m1-terminal" ] || err "m1-terminal must not be packaged under /spider-rt"
-    [ -f "$iso_root$path" ] && printf 'found rootfs staging: %s\n' "$path"
+    tree_root=$iso_root
+    if [ ! -f "$tree_root$path" ] && [ -f "$rootfs_staging$path" ]; then
+        tree_root=$rootfs_staging
+    fi
+
+    [ -f "$tree_root$path" ] || err "rootfs staging '$tree_root' is missing $path"
+    [ ! -e "$tree_root/spider-rt${path#/usr}" ] || err "normal userspace app appears under /spider-rt: /spider-rt${path#/usr}"
+    [ ! -e "$tree_root/spider-rt/sbin/m1-terminal" ] || err "m1-terminal must not be packaged under /spider-rt"
+    [ -f "$tree_root$path" ] && printf 'found rootfs staging: %s\n' "$path"
 }
 
 check_root_path_in_iso() {
