@@ -51,7 +51,7 @@ spider-rs-check: rust-src check-rust-src $(TARGET_JSON)
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
 		$(UNSTABLE_OPTIONS_FLAG) \
-		-Z build-std=core,compiler_builtins \
+		-Z build-std=core,alloc,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
 
 userspace-spider-rs: rust-src check-rust-src $(TARGET_JSON)
@@ -59,7 +59,7 @@ userspace-spider-rs: rust-src check-rust-src $(TARGET_JSON)
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
 		$(UNSTABLE_OPTIONS_FLAG) \
-		-Z build-std=core,compiler_builtins \
+		-Z build-std=core,alloc,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
 
 install-spider-rs: spider-rs
