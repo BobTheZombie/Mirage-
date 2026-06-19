@@ -425,29 +425,43 @@ impl<const MAX: usize> DeviceManager<MAX> {
         }
     }
 
-    pub fn install_core_devices(&mut self) {
-        self.install_core_devices_with_boot_info(None);
+    pub fn install_core_devices(&mut self) -> Result<(), DeviceError> {
+        self.install_core_devices_with_boot_info(None)
     }
 
-    pub fn install_core_devices_with_framebuffer(&mut self, framebuffer: Option<FramebufferInfo>) {
-        configure_graphics_devices(framebuffer);
-        self.install_core_devices_after_graphics(None);
+    pub fn install_core_devices_with_framebuffer(
+        &mut self,
+        framebuffer: Option<FramebufferInfo>,
+    ) -> Result<(), DeviceError> {
+        configure_graphics_devices(framebuffer)?;
+        self.install_core_devices_after_graphics(None)
     }
 
-    pub fn install_core_devices_with_boot_info(&mut self, boot_info: Option<&BootInfo>) {
-        configure_graphics_devices(boot_info.and_then(|info| info.framebuffer));
-        self.install_core_devices_after_graphics(boot_info);
+    pub fn install_core_devices_with_boot_info(
+        &mut self,
+        boot_info: Option<&BootInfo>,
+    ) -> Result<(), DeviceError> {
+        configure_graphics_devices(boot_info.and_then(|info| info.framebuffer))?;
+        self.install_core_devices_after_graphics(boot_info)
     }
 
-    fn install_core_devices_after_graphics(&mut self, boot_info: Option<&BootInfo>) {
-        let _ = crate::arch::x86_64::device::register_real_drivers(self, boot_info);
-        let _ = self.register_driver(&SYSTEM_TIMER_DRIVER);
-        let _ = self.register_driver(&FRAMEBUFFER_DRIVER);
-        let _ = self.register_driver(&GPU_CAPABILITY_DRIVER);
-        let _ = self.register_driver(&LOOPBACK_NETWORK_DRIVER);
-        let _ = self.register_driver(&BLOCK_STORAGE_DRIVER);
-        let _ = self.register_driver(&SERIAL_CONSOLE_DRIVER);
-        let _ = self.register_driver(&INPUT_CONTROLLER_DRIVER);
+    fn install_core_devices_after_graphics(
+        &mut self,
+        boot_info: Option<&BootInfo>,
+    ) -> Result<(), DeviceError> {
+        // This logical table rebuild must only re-register driver objects whose
+        // hardware state was already discovered by architecture bring-up. In
+        // particular, AHCI/ATAPI registration below is lookup-only and must not
+        // probe ports or wait on media/input state from the boot-info apply path.
+        crate::arch::x86_64::device::register_real_drivers(self, boot_info)?;
+        self.register_driver(&SYSTEM_TIMER_DRIVER)?;
+        self.register_driver(&FRAMEBUFFER_DRIVER)?;
+        self.register_driver(&GPU_CAPABILITY_DRIVER)?;
+        self.register_driver(&LOOPBACK_NETWORK_DRIVER)?;
+        self.register_driver(&BLOCK_STORAGE_DRIVER)?;
+        self.register_driver(&SERIAL_CONSOLE_DRIVER)?;
+        self.register_driver(&INPUT_CONTROLLER_DRIVER)?;
+        Ok(())
     }
 
     pub fn register_driver(
@@ -844,11 +858,12 @@ impl FramebufferDriver {
         }
     }
 
-    fn configure(&self, framebuffer: Option<FramebufferInfo>) {
-        let mut descriptor = self.descriptor.lock();
+    fn configure(&self, framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
+        let mut descriptor = self.descriptor.try_lock().ok_or(DeviceError::Busy)?;
         *descriptor = framebuffer
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
+        Ok(())
     }
 }
 
@@ -882,12 +897,13 @@ impl GpuCapabilityDriver {
         }
     }
 
-    fn configure(&self, framebuffer: Option<FramebufferInfo>) {
+    fn configure(&self, framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
         let framebuffer = framebuffer
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
-        let mut descriptor = self.descriptor.lock();
+        let mut descriptor = self.descriptor.try_lock().ok_or(DeviceError::Busy)?;
         *descriptor = MirageGpuCapabilityDescriptor::from_framebuffer(framebuffer);
+        Ok(())
     }
 }
 
@@ -966,9 +982,10 @@ impl DeviceDriver for InputControllerDriver {
     }
 }
 
-pub fn configure_graphics_devices(framebuffer: Option<FramebufferInfo>) {
-    FRAMEBUFFER_DRIVER.configure(framebuffer);
-    GPU_CAPABILITY_DRIVER.configure(framebuffer);
+pub fn configure_graphics_devices(framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
+    FRAMEBUFFER_DRIVER.configure(framebuffer)?;
+    GPU_CAPABILITY_DRIVER.configure(framebuffer)?;
+    Ok(())
 }
 
 static SERIAL_CONSOLE_DRIVER: SerialConsoleDriver = SerialConsoleDriver::new();

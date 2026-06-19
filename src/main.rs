@@ -253,7 +253,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
         mirage::kprintln!("[bootdiag] boot info apply starting");
         boot_phase_start(BootPhase::BootInfoApplied);
-        kernel.bootstrap_with_boot_info(&boot_info);
+        if let Err(error) = kernel.bootstrap_with_boot_info(&boot_info) {
+            boot_phase_failed(BootPhase::BootInfoApplied, "kernel boot-info apply failed");
+            mirage::kprintln!("boot info apply failed: {:?}", error);
+            mirage::arch::x86_64::panic_halt();
+        }
         #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
         mirage::kprintln!("[bootdiag] boot info apply returned");
         boot_phase_ok(BootPhase::BootInfoApplied);
