@@ -69,18 +69,18 @@ install-spider-rs: spider-rs
 
 spider-rt-tree: spider-rs
 	rm -rf $(BUILD_DIR)/spider-rt
-	mkdir -p $(BUILD_DIR)/spider-rt/sbin
-	cp $(BUILD_DIR)/userspace/spider-rs $(BUILD_DIR)/spider-rt/sbin/spider-rs
-	cp $(BUILD_DIR)/userspace/spider-rsd $(BUILD_DIR)/spider-rt/sbin/spider-rsd
-	printf 'name=spider-rt\nentry=/sbin/spider-rs\n' > $(BUILD_DIR)/spider-rt/manifest
+	mkdir -p $(BUILD_DIR)/spider-rt/spider-rt/sbin
+	cp $(BUILD_DIR)/userspace/spider-rs $(BUILD_DIR)/spider-rt/spider-rt/sbin/spider-rs
+	cp $(BUILD_DIR)/userspace/spider-rsd $(BUILD_DIR)/spider-rt/spider-rt/sbin/spider-rsd
+	printf 'name=spider-rt\nentry=/spider-rt/sbin/spider-rs\n' > $(BUILD_DIR)/spider-rt/manifest
 
 spider-rt-image: spider-rt-tree
-	$(CARGO) run -q -p mk-runtime-image -- $(BUILD_DIR)/spider-rt $(BUILD_DIR)/spider-rt.img --name spider-rt --entry /sbin/spider-rs
+	$(CARGO) run -q -p mk-runtime-image -- $(BUILD_DIR)/spider-rt $(BUILD_DIR)/spider-rt.img --name spider-rt --entry /spider-rt/sbin/spider-rs
 
 runtime-images: spider-rt-image
 
 qemu-spider: install-spider-rs image
-	@echo "Spider Runtime staged in $(BUILD_DIR)/spider-rt; m1-terminal staged at $(BUILD_DIR)/rootfs/usr/bin/m1-terminal; boot remains honest until ring-3 entry is wired."
+	@echo "Spider Runtime staged in $(BUILD_DIR)/spider-rt at /spider-rt/sbin/spider-rs; m1-terminal staged at /usr/bin/m1-terminal; PENDING: user-mode transition not implemented."
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
 mirageconfig:
@@ -416,16 +416,17 @@ EXT4_ROOT_SIZE ?= 128M
 
 ext4-image: spider-rs
 	@set -eu; \
-	mkdir -p $(BUILD_DIR)/ext4-staging/sbin $(BUILD_DIR)/ext4-staging/etc/spider/system $(BUILD_DIR)/ext4-staging/bin; \
-	cp $(BUILD_DIR)/rootfs/sbin/spider-rs $(BUILD_DIR)/ext4-staging/sbin/spider-rs; \
-	cp userspace/spider-rs/units/* $(BUILD_DIR)/ext4-staging/etc/spider/system/; \
-	printf '#!/bin/sh\necho hello from GNU/Mirage ext4 rootfs\n' > $(BUILD_DIR)/ext4-staging/bin/hello; \
-	chmod +x $(BUILD_DIR)/ext4-staging/bin/hello; \
+	mkdir -p $(BUILD_DIR)/ext4-staging/spider-rt/sbin $(BUILD_DIR)/ext4-staging/etc/spider/units $(BUILD_DIR)/ext4-staging/usr/lib/spider/units $(BUILD_DIR)/ext4-staging/usr/bin; \
+	cp $(BUILD_DIR)/userspace/spider-rs $(BUILD_DIR)/ext4-staging/spider-rt/sbin/spider-rs; \
+	cp $(BUILD_DIR)/userspace/spider-rsd $(BUILD_DIR)/ext4-staging/spider-rt/sbin/spider-rsd; \
+	cp userspace/spider-rs/units/* $(BUILD_DIR)/ext4-staging/etc/spider/units/; \
+	printf '#!/bin/sh\necho hello from GNU/Mirage ext4 rootfs\n' > $(BUILD_DIR)/ext4-staging/usr/bin/hello; \
+	chmod +x $(BUILD_DIR)/ext4-staging/usr/bin/hello; \
 	truncate -s $(EXT4_ROOT_SIZE) $(EXT4_ROOT_IMAGE); \
 	if command -v mkfs.ext4 >/dev/null 2>&1; then mkfs.ext4 -F -O '^has_journal' -d $(BUILD_DIR)/ext4-staging $(EXT4_ROOT_IMAGE); \
 	elif command -v mke2fs >/dev/null 2>&1; then mke2fs -t ext4 -F -O '^has_journal' -d $(BUILD_DIR)/ext4-staging $(EXT4_ROOT_IMAGE); \
 	else echo 'mkfs.ext4 or mke2fs is required to create $(EXT4_ROOT_IMAGE)' >&2; exit 1; fi; \
-	echo 'Created $(EXT4_ROOT_IMAGE) with /sbin/spider-rs, Spider units, and /bin/hello (non-journaled for Mirage-safe rw experiments).'
+	echo 'Created $(EXT4_ROOT_IMAGE) with /spider-rt/sbin/spider-rs, Spider units in /etc/spider/units, and /usr/bin/hello (non-journaled for Mirage-safe rw experiments).'
 
 qemu-ahci-ext4: ext4-image image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) MIRAGE_KERNEL_CMDLINE="root=ext4:sata0" MIRAGE_QEMU_EXTRA_ARGS="-drive file=$(EXT4_ROOT_IMAGE),if=none,id=sata0,format=raw -device ich9-ahci,id=ahci -device ide-hd,drive=sata0,bus=ahci.0" tools/run-qemu.sh
@@ -464,7 +465,7 @@ qemu-bootrt: image
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
 qemu-spider-bootrt: install-spider-rs image
-	@echo "Expected: Spider Runtime module is staged, RuntimeVfs mounts /spider-rt, and Spider-rs remains Started/Stub until ring-3 output is confirmed."
+	@echo "Expected: Spider Runtime module is staged, RuntimeVfs mounts /spider-rt, and Spider-rs reports PID1 [RUNNABLE] or PENDING: user-mode transition not implemented until ring-3 output is confirmed."
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
 qemu-spider-rt: runtime-images image
