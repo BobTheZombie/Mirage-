@@ -6,7 +6,7 @@ use crate::kernel::device::{DeviceError, DeviceManager};
 #[cfg(feature = "hw-laptop-hotkeys")]
 use super::acpi_ec::ACPI_EC_HOTKEY_DRIVER;
 #[cfg(feature = "hw-ahci")]
-use super::ahci::AHCI_SATA0_DRIVER;
+use super::ahci::{AHCI_ATAPI0_DRIVER, AHCI_SATA0_DRIVER};
 use super::limine_block::LIMINE_MODULE_BLOCK_DRIVER;
 #[cfg(feature = "hw-ps2-keyboard")]
 use super::ps2_keyboard::PS2_KEYBOARD_DRIVER;
@@ -35,6 +35,10 @@ pub fn register_real_drivers<const MAX: usize>(
     #[cfg(feature = "hw-ahci")]
     if super::ahci::lookup_by_name("sata0").is_some() {
         manager.register_driver(&AHCI_SATA0_DRIVER)?;
+    }
+    #[cfg(feature = "hw-ahci")]
+    if super::ahci::lookup_by_name("atapi0").is_some() {
+        manager.register_driver(&AHCI_ATAPI0_DRIVER)?;
     }
 
     Ok(())

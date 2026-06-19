@@ -48,9 +48,12 @@ const TFD_DRQ: u32 = 1 << 3;
 const TFD_ERR: u32 = 1 << 0;
 const ATA_IDENTIFY_DEVICE: u8 = 0xec;
 const ATA_READ_DMA_EXT: u8 = 0x25;
-const ATA_WRITE_DMA_EXT: u8 = 0x35;
 const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
 const ATA_IDENTIFY_PACKET_DEVICE: u8 = 0xa1;
+const ATA_PACKET: u8 = 0xa0;
+const SCSI_INQUIRY: u8 = 0x12;
+const SCSI_READ_CAPACITY_10: u8 = 0x25;
+const SCSI_READ_10: u8 = 0x28;
 const SATA_SIG_ATA: u32 = 0x0000_0101;
 const SATA_SIG_ATAPI: u32 = 0xeb14_0101;
 const SATA_SIG_SEMB: u32 = 0xc33c_0101;
@@ -69,8 +72,8 @@ pub struct RegisteredBlockInfo {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AhciBootStatus {
-    Online(RegisteredBlockInfo),
-    NoDisk { atapi_detected: bool },
+    Online(AhciScanResult),
+    NoDisk(AhciScanResult),
     Failed(&'static str),
 }
 
@@ -206,11 +209,15 @@ struct AhciDiskState {
 }
 
 static SATA0: SpinLock<Option<AhciDiskState>> = SpinLock::new(None);
+static ATAPI0: SpinLock<Option<AhciDiskState>> = SpinLock::new(None);
 pub static AHCI_SATA0_DRIVER: AhciSataBlockDriver = AhciSataBlockDriver;
+pub static AHCI_ATAPI0_DRIVER: AhciAtapiBlockDriver = AhciAtapiBlockDriver;
 
 pub fn lookup_by_name(name: &str) -> Option<RegisteredBlockInfo> {
     if name == "sata0" {
         SATA0.lock().map(|d| d.info)
+    } else if name == "atapi0" {
+        ATAPI0.lock().map(|d| d.info)
     } else {
         None
     }
@@ -221,28 +228,31 @@ pub fn bring_up_first_sata_disk(
     hhdm_offset: Option<u64>,
 ) -> AhciBootStatus {
     let Some(device) = platform.platform_find_ahci_controller() else {
-        return AhciBootStatus::NoDisk {
+        return AhciBootStatus::NoDisk(AhciScanResult {
+            sata_disk: None,
             atapi_detected: false,
-        };
+            atapi_media: None,
+            atapi_probe_error: None,
+        });
     };
     let Some(hhdm) = hhdm_offset else {
         return AhciBootStatus::Failed("HHDM unavailable for AHCI DMA buffer access");
     };
     match unsafe { bring_up_device(device, hhdm) } {
-        Ok(scan) => match scan.sata_disk {
-            Some(info) => AhciBootStatus::Online(info),
-            None => AhciBootStatus::NoDisk {
-                atapi_detected: scan.atapi_detected,
-            },
-        },
+        Ok(scan) if scan.sata_disk.is_some() || scan.atapi_media.is_some() => {
+            AhciBootStatus::Online(scan)
+        }
+        Ok(scan) => AhciBootStatus::NoDisk(scan),
         Err(reason) => AhciBootStatus::Failed(reason),
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AhciScanResult {
-    sata_disk: Option<RegisteredBlockInfo>,
-    atapi_detected: bool,
+pub struct AhciScanResult {
+    pub sata_disk: Option<RegisteredBlockInfo>,
+    pub atapi_detected: bool,
+    pub atapi_media: Option<RegisteredBlockInfo>,
+    pub atapi_probe_error: Option<&'static str>,
 }
 
 unsafe fn bring_up_device(
@@ -305,7 +315,7 @@ unsafe fn bring_up_device(
         wait_clear(hba.base(), HBA_GHC, GHC_HR, "AHCI controller reset timeout")?;
     }
 
-    let mut atapi_detected = false;
+    let atapi_detected = false;
     let mut port = 0u8;
     while port < 32 {
         if (pi & (1u32 << port)) != 0 {
@@ -325,10 +335,37 @@ unsafe fn bring_up_device(
                 return Ok(AhciScanResult {
                     sata_disk: Some(info),
                     atapi_detected,
+                    atapi_media: None,
+                    atapi_probe_error: None,
                 });
             } else if sata_device_present(ssts) && kind == PortSignature::Atapi {
-                atapi_detected = true;
-                crate::kprintln!("[ahci] port {} ATAPI device detected; packet media probing not yet enabled in this boot path", port);
+                crate::kprintln!(
+                    "[ahci] port {} ATAPI device detected; probing packet media",
+                    port
+                );
+                match init_port_and_probe_atapi(hba.base(), hhdm, port) {
+                    Ok(info) => {
+                        return Ok(AhciScanResult {
+                            sata_disk: None,
+                            atapi_detected: true,
+                            atapi_media: Some(info),
+                            atapi_probe_error: None,
+                        });
+                    }
+                    Err(reason) => {
+                        crate::kprintln!(
+                            "[ahci] port {} ATAPI media probe failed: {}",
+                            port,
+                            reason
+                        );
+                        return Ok(AhciScanResult {
+                            sata_disk: None,
+                            atapi_detected: true,
+                            atapi_media: None,
+                            atapi_probe_error: Some(reason),
+                        });
+                    }
+                }
             }
         }
         port += 1;
@@ -342,6 +379,8 @@ unsafe fn bring_up_device(
     Ok(AhciScanResult {
         sata_disk: None,
         atapi_detected,
+        atapi_media: None,
+        atapi_probe_error: None,
     })
 }
 
@@ -422,6 +461,91 @@ unsafe fn init_port_and_identify(
     Ok(info)
 }
 
+unsafe fn init_port_and_probe_atapi(
+    mmio: usize,
+    hhdm: u64,
+    port: u8,
+) -> Result<RegisteredBlockInfo, &'static str> {
+    let cl = alloc_frame()?;
+    let fis = alloc_frame()?;
+    let ct = alloc_frame()?;
+    let buf = alloc_frame()?;
+    zero_frame(hhdm, cl);
+    zero_frame(hhdm, fis);
+    zero_frame(hhdm, ct);
+    zero_frame(hhdm, buf);
+    let p = port_base(port);
+    stop_port(mmio, p)?;
+    mmio_write32(mmio, p + PX_CLB, cl as u32);
+    mmio_write32(mmio, p + PX_CLBU, (cl >> 32) as u32);
+    mmio_write32(mmio, p + PX_FB, fis as u32);
+    mmio_write32(mmio, p + PX_FBU, (fis >> 32) as u32);
+    mmio_write32(mmio, p + PX_SERR, u32::MAX);
+    mmio_write32(mmio, p + PX_IS, u32::MAX);
+    start_port(mmio, p);
+
+    issue_command(
+        mmio,
+        hhdm,
+        p,
+        cl,
+        ct,
+        buf,
+        ATA_IDENTIFY_PACKET_DEVICE,
+        0,
+        1,
+        512,
+    )?;
+
+    zero_frame(hhdm, buf);
+    issue_packet_command(mmio, hhdm, p, cl, ct, buf, scsi_inquiry_cdb(36), 36)?;
+    let inquiry = core::slice::from_raw_parts((hhdm + buf) as *const u8, 36);
+    if (inquiry[0] & 0x1f) != 5 {
+        return Err("ATAPI device is not optical/direct CD/DVD media");
+    }
+    if (inquiry[0] & 0xe0) == 0x20 {
+        return Err("ATAPI media not present");
+    }
+
+    zero_frame(hhdm, buf);
+    issue_packet_command(mmio, hhdm, p, cl, ct, buf, scsi_read_capacity_10_cdb(), 8)?;
+    let cap = core::slice::from_raw_parts((hhdm + buf) as *const u8, 8);
+    let last_lba = u32::from_be_bytes([cap[0], cap[1], cap[2], cap[3]]) as u64;
+    let block_size = u32::from_be_bytes([cap[4], cap[5], cap[6], cap[7]]);
+    if block_size == 0 {
+        return Err("ATAPI READ CAPACITY returned zero block size");
+    }
+    let block_count = last_lba
+        .checked_add(1)
+        .ok_or("ATAPI READ CAPACITY overflow")?;
+    if block_count == 0 {
+        return Err("ATAPI READ CAPACITY returned zero blocks");
+    }
+    crate::kprintln!(
+        "[ahci] port {} ATAPI media ready block_size={} blocks={}",
+        port,
+        block_size,
+        block_count
+    );
+    let info = RegisteredBlockInfo {
+        name: "atapi0",
+        block_count,
+        block_size,
+        readonly: true,
+    };
+    *ATAPI0.lock() = Some(AhciDiskState {
+        mmio,
+        hhdm,
+        port,
+        command_list_phys: cl,
+        _fis_phys: fis,
+        command_table_phys: ct,
+        dma_buffer_phys: buf,
+        info,
+    });
+    Ok(info)
+}
+
 pub fn read_blocks(lba: u64, count: u16, buffer: &mut [u8]) -> Result<(), &'static str> {
     let disk = SATA0.lock().ok_or("sata0 not registered")?;
     validate_read_request(disk.info, lba, count, buffer.len())?;
@@ -441,6 +565,35 @@ pub fn read_blocks(lba: u64, count: u16, buffer: &mut [u8]) -> Result<(), &'stat
             ATA_READ_DMA_EXT,
             lba,
             count,
+            bytes as u32,
+        )?;
+        let src =
+            core::slice::from_raw_parts((disk.hhdm + disk.dma_buffer_phys) as *const u8, bytes);
+        buffer.copy_from_slice(src);
+    }
+    Ok(())
+}
+
+pub fn read_atapi_blocks(lba: u64, count: u16, buffer: &mut [u8]) -> Result<(), &'static str> {
+    let disk = ATAPI0.lock().ok_or("atapi0 not registered")?;
+    validate_read_request(disk.info, lba, count, buffer.len())?;
+    if lba > u32::MAX as u64 {
+        return Err("ATAPI READ(10) LBA out of range");
+    }
+    let bytes = count as usize * disk.info.block_size as usize;
+    if bytes > 4096 {
+        return Err("read too large for AHCI bounce buffer");
+    }
+    unsafe {
+        zero_frame(disk.hhdm, disk.dma_buffer_phys);
+        issue_packet_command(
+            disk.mmio,
+            disk.hhdm,
+            port_base(disk.port),
+            disk.command_list_phys,
+            disk.command_table_phys,
+            disk.dma_buffer_phys,
+            scsi_read_10_cdb(lba as u32, count),
             bytes as u32,
         )?;
         let src =
@@ -558,6 +711,98 @@ unsafe fn write_fis(ptr: *mut u8, command: u8, lba: u64, sectors: u16) {
         write_volatile(ptr.add(i), fis[i]);
         i += 1;
     }
+}
+
+unsafe fn issue_packet_command(
+    mmio: usize,
+    hhdm: u64,
+    p: usize,
+    cl: u64,
+    ct: u64,
+    data: u64,
+    packet: [u8; 16],
+    bytes: u32,
+) -> Result<(), &'static str> {
+    if bytes == 0 {
+        return Err("ATAPI packet command has zero transfer length");
+    }
+    wait_clear(mmio, p + PX_TFD, TFD_BSY | TFD_DRQ, "AHCI task file busy")?;
+    zero_frame(hhdm, ct);
+    let clv = (hhdm + cl) as *mut u8;
+    write_volatile(clv.add(0) as *mut u16, 5 | (1 << 5));
+    write_volatile(clv.add(2) as *mut u16, 1);
+    write_volatile(clv.add(4) as *mut u32, 0);
+    write_volatile(clv.add(8) as *mut u32, ct as u32);
+    write_volatile(clv.add(12) as *mut u32, (ct >> 32) as u32);
+    let ctv = (hhdm + ct) as *mut u8;
+    write_packet_fis(ctv, bytes);
+    let acmd = ctv.add(0x40);
+    let mut i = 0usize;
+    while i < packet.len() {
+        write_volatile(acmd.add(i), packet[i]);
+        i += 1;
+    }
+    let prdt = ctv.add(0x80);
+    write_volatile(prdt as *mut u32, data as u32);
+    write_volatile(prdt.add(4) as *mut u32, (data >> 32) as u32);
+    write_volatile(prdt.add(8) as *mut u32, 0);
+    write_volatile(prdt.add(12) as *mut u32, (bytes - 1) | (1 << 31));
+    mmio_write32(mmio, p + PX_IS, u32::MAX);
+    mmio_write32(mmio, p + PX_CI, 1);
+    wait_clear(mmio, p + PX_CI, 1, "AHCI packet command completion")?;
+    let is = mmio_read32(mmio, p + PX_IS);
+    let tfd = mmio_read32(mmio, p + PX_TFD);
+    if (tfd & TFD_ERR) != 0 || (is & 0x4000_0000) != 0 {
+        return Err("AHCI packet command failed");
+    }
+    Ok(())
+}
+
+fn ata_packet_fis(bytes: u32) -> [u8; 20] {
+    let bounded = core::cmp::min(bytes, u16::MAX as u32) as u16;
+    let mut fis = [0u8; 20];
+    fis[0] = 0x27;
+    fis[1] = 0x80;
+    fis[2] = ATA_PACKET;
+    fis[3] = 1;
+    fis[5] = bounded as u8;
+    fis[6] = (bounded >> 8) as u8;
+    fis[7] = 1 << 6;
+    fis
+}
+
+unsafe fn write_packet_fis(ptr: *mut u8, bytes: u32) {
+    let fis = ata_packet_fis(bytes);
+    let mut i = 0usize;
+    while i < fis.len() {
+        write_volatile(ptr.add(i), fis[i]);
+        i += 1;
+    }
+}
+
+pub const fn scsi_inquiry_cdb(allocation_len: u8) -> [u8; 16] {
+    let mut cdb = [0u8; 16];
+    cdb[0] = SCSI_INQUIRY;
+    cdb[4] = allocation_len;
+    cdb
+}
+
+pub const fn scsi_read_capacity_10_cdb() -> [u8; 16] {
+    let mut cdb = [0u8; 16];
+    cdb[0] = SCSI_READ_CAPACITY_10;
+    cdb
+}
+
+pub const fn scsi_read_10_cdb(lba: u32, blocks: u16) -> [u8; 16] {
+    let mut cdb = [0u8; 16];
+    cdb[0] = SCSI_READ_10;
+    cdb[2] = (lba >> 24) as u8;
+    cdb[3] = (lba >> 16) as u8;
+    cdb[4] = (lba >> 8) as u8;
+    cdb[5] = lba as u8;
+    cdb[7] = (blocks >> 8) as u8;
+    cdb[8] = blocks as u8;
+    cdb
 }
 
 unsafe fn stop_port(mmio: usize, p: usize) -> Result<(), &'static str> {
@@ -784,6 +1029,7 @@ unsafe fn probe_bar_size(
 }
 
 pub struct AhciSataBlockDriver;
+pub struct AhciAtapiBlockDriver;
 
 impl DeviceDriver for AhciSataBlockDriver {
     fn kind(&self) -> DeviceKind {
@@ -826,6 +1072,54 @@ impl BlockStorageDevice for AhciSataBlockDriver {
     }
     fn flush(&self) -> Result<(), DeviceError> {
         flush().map_err(|_| DeviceError::Unsupported)
+    }
+    fn discard(&self, _first_sector: u64, _sector_count: u64) -> Result<(), DeviceError> {
+        Err(DeviceError::Unsupported)
+    }
+}
+
+impl DeviceDriver for AhciAtapiBlockDriver {
+    fn kind(&self) -> DeviceKind {
+        DeviceKind::BlockStorage
+    }
+    fn name(&self) -> &'static str {
+        "atapi0"
+    }
+    fn security(&self) -> DeviceSecurity {
+        DeviceSecurity::new(SecurityClass::Confidential, true)
+    }
+    fn as_block_storage(&self) -> Option<&dyn BlockStorageDevice> {
+        Some(self)
+    }
+}
+
+impl BlockStorageDevice for AhciAtapiBlockDriver {
+    fn sector_size(&self) -> usize {
+        lookup_by_name("atapi0")
+            .map(|i| i.block_size as usize)
+            .unwrap_or(2048)
+    }
+    fn sector_count(&self) -> u64 {
+        lookup_by_name("atapi0").map(|i| i.block_count).unwrap_or(0)
+    }
+    fn read_sectors(&self, first_sector: u64, buffer: &mut [u8]) -> Result<usize, DeviceError> {
+        let info = lookup_by_name("atapi0").ok_or(DeviceError::NotFound)?;
+        if buffer.len() % info.block_size as usize != 0 {
+            return Err(DeviceError::BufferTooSmall);
+        }
+        let count = buffer.len() / info.block_size as usize;
+        if count == 0 || count > u16::MAX as usize {
+            return Err(DeviceError::Unsupported);
+        }
+        read_atapi_blocks(first_sector, count as u16, buffer)
+            .map_err(|_| DeviceError::Unsupported)?;
+        Ok(buffer.len())
+    }
+    fn write_sectors(&self, _first_sector: u64, _data: &[u8]) -> Result<usize, DeviceError> {
+        Err(DeviceError::Unsupported)
+    }
+    fn flush(&self) -> Result<(), DeviceError> {
+        Ok(())
     }
     fn discard(&self, _first_sector: u64, _sector_count: u64) -> Result<(), DeviceError> {
         Err(DeviceError::Unsupported)
@@ -903,9 +1197,38 @@ mod tests {
     }
 
     #[test]
+    fn atapi_packet_fis_uses_packet_command_and_byte_count() {
+        let fis = ata_packet_fis(2048);
+        assert_eq!(fis[0], 0x27);
+        assert_eq!(fis[1], 0x80);
+        assert_eq!(fis[2], ATA_PACKET);
+        assert_eq!(fis[3], 1);
+        assert_eq!(fis[5], 0x00);
+        assert_eq!(fis[6], 0x08);
+        assert_eq!(fis[7], 1 << 6);
+    }
+
+    #[test]
+    fn scsi_packet_cdb_construction() {
+        let inquiry = scsi_inquiry_cdb(36);
+        assert_eq!(inquiry[0], SCSI_INQUIRY);
+        assert_eq!(inquiry[4], 36);
+
+        let cap = scsi_read_capacity_10_cdb();
+        assert_eq!(cap[0], SCSI_READ_CAPACITY_10);
+
+        let read = scsi_read_10_cdb(0x1234_5678, 7);
+        assert_eq!(read[0], SCSI_READ_10);
+        assert_eq!(&read[2..6], &[0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(&read[7..9], &[0, 7]);
+    }
+
+    #[test]
     fn block_device_registration_state_reports_absent_by_default() {
         *SATA0.lock() = None;
+        *ATAPI0.lock() = None;
         assert_eq!(lookup_by_name("sata0"), None);
+        assert_eq!(lookup_by_name("atapi0"), None);
         let mut buffer = [0u8; 512];
         assert_eq!(read_blocks(0, 1, &mut buffer), Err("sata0 not registered"));
     }

@@ -1109,31 +1109,65 @@ fn initialize_storage_hardware(
         #[cfg(feature = "hw-ahci")]
         {
             match ahci::bring_up_first_sata_disk(platform, boot_info.hhdm_offset) {
-                ahci::AhciBootStatus::Online(info) => {
-                    sata_online = true;
-                    boot_phase_detected(BootPhase::SataDisk);
-                    boot_phase_start(BootPhase::SataDisk);
-                    boot_phase_online(BootPhase::SataDisk);
-                    boot_phase_online(BootPhase::Ahci);
-                    crate::kprintln!(
-                        "[block] registered {} kind=SataDisk block_size={} blocks={}",
-                        info.name,
-                        info.block_size,
-                        info.block_count
-                    );
-                }
-                ahci::AhciBootStatus::NoDisk { atapi_detected } => {
-                    boot_phase_ok(BootPhase::Ahci);
-                    boot_phase_skipped(BootPhase::SataDisk, "no SATA disk detected");
-                    if atapi_detected {
+                ahci::AhciBootStatus::Online(scan) => {
+                    if let Some(info) = scan.sata_disk {
+                        sata_online = true;
+                        boot_phase_detected(BootPhase::SataDisk);
+                        boot_phase_start(BootPhase::SataDisk);
+                        boot_phase_online(BootPhase::SataDisk);
+                        crate::kprintln!(
+                            "[block] registered {} kind=SataDisk block_size={} blocks={}",
+                            info.name,
+                            info.block_size,
+                            info.block_count
+                        );
+                    } else {
+                        boot_phase_skipped(BootPhase::SataDisk, "no SATA disk detected");
+                    }
+                    if let Some(info) = scan.atapi_media {
+                        boot_phase_detected(BootPhase::Atapi);
+                        boot_phase_start(BootPhase::Atapi);
+                        boot_phase_online(BootPhase::Atapi);
+                        boot_phase_detected(BootPhase::OpticalDisk);
+                        boot_phase_start(BootPhase::OpticalDisk);
+                        boot_phase_online(BootPhase::OpticalDisk);
+                        crate::kprintln!(
+                            "[block] registered {} kind=OpticalDisk block_size={} blocks={}",
+                            info.name,
+                            info.block_size,
+                            info.block_count
+                        );
+                    } else if scan.atapi_detected {
                         boot_phase_detected(BootPhase::Atapi);
                         boot_phase_skipped(
                             BootPhase::Atapi,
-                            "ATAPI packet media probing not enabled",
+                            scan.atapi_probe_error.unwrap_or("ATAPI media probe failed"),
                         );
                         boot_phase_skipped(
                             BootPhase::OpticalDisk,
-                            "IDENTIFY PACKET DEVICE, SCSI INQUIRY, READ CAPACITY(10), and READ(10) not implemented; atapi0 not registered",
+                            scan.atapi_probe_error.unwrap_or("ATAPI media probe failed"),
+                        );
+                    } else {
+                        boot_phase_skipped(BootPhase::Atapi, "no ATAPI device detected");
+                        boot_phase_skipped(
+                            BootPhase::OpticalDisk,
+                            "no ATAPI optical device detected",
+                        );
+                    }
+                    boot_phase_online(BootPhase::Ahci);
+                }
+                ahci::AhciBootStatus::NoDisk(scan) => {
+                    boot_phase_ok(BootPhase::Ahci);
+                    boot_phase_skipped(BootPhase::SataDisk, "no SATA disk detected");
+                    if scan.atapi_detected {
+                        boot_phase_detected(BootPhase::Atapi);
+                        boot_phase_skipped(
+                            BootPhase::Atapi,
+                            scan.atapi_probe_error.unwrap_or("ATAPI media probe failed"),
+                        );
+                        boot_phase_skipped(
+                            BootPhase::OpticalDisk,
+                            scan.atapi_probe_error.unwrap_or("ATAPI media probe failed"),
                         );
                     } else {
                         boot_phase_skipped(BootPhase::Atapi, "no ATAPI device detected");
