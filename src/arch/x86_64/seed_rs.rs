@@ -5,9 +5,8 @@
 //! uses only raw COM1 port I/O and stack locals so it can report progress before
 //! the normal console, allocator, framebuffer, supervisor, or MTSS paths exist.
 //!
-//! TODO: Gate the temporary `[seed-rs NN]` serial markers behind
-//! CONFIG_MIRAGE_VERBOSE_BOOT or a `verbose-boot` feature once mirageconfig is
-//! complete enough to drive that boot-time policy.
+//! The raw `[seed-rs NN]` serial breadcrumbs are gated behind the `boot-trace`
+//! feature so default boots keep only concise failure diagnostics.
 
 use core::arch::asm;
 
@@ -36,23 +35,34 @@ pub unsafe fn x86_64_handoff() -> ! {
     boot::clear_bss();
     boot_register_compiled_subsystems();
     boot_phase_start(BootPhase::SeedRs);
-    seed_com1_write_str("[seed-rs 01] entered seed entry\r\n");
-    seed_com1_write_str("[seed-rs 02] bss cleared\r\n");
+    seed_trace("[seed-rs 01] entered seed entry\r\n");
+    seed_trace("[seed-rs 02] bss cleared\r\n");
 
     let sections = KernelSections::from_linker();
-    seed_com1_write_str("[seed-rs 03] linker sections captured\r\n");
+    seed_trace("[seed-rs 03] linker sections captured\r\n");
 
     let raw_boot = limine::snapshot();
-    seed_com1_write_str("[seed-rs 04] limine snapshot captured\r\n");
+    seed_trace("[seed-rs 04] limine snapshot captured\r\n");
 
     boot_phase_start(BootPhase::BootInfo);
     let boot_info = BootInfo::from_limine(raw_boot, sections);
     boot_phase_ok(BootPhase::BootInfo);
-    seed_com1_write_str("[seed-rs 05] bootinfo constructed\r\n");
+    seed_trace("[seed-rs 05] bootinfo constructed\r\n");
 
     boot_phase_ok(BootPhase::SeedRs);
-    seed_com1_write_str("[seed-rs 06] calling kernel_main\r\n");
+    seed_trace("[seed-rs 06] calling kernel_main\r\n");
     kernel_main(boot_info)
+}
+
+#[inline(always)]
+fn seed_trace(message: &str) {
+    if cfg!(feature = "boot-trace") {
+        unsafe {
+            seed_com1_write_str(message);
+        }
+    } else {
+        let _ = message;
+    }
 }
 
 /// Initialize COM1 defensively for seed-rs raw serial diagnostics.

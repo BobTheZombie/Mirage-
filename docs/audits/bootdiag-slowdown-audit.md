@@ -22,7 +22,7 @@ framebuffer path.
 - `boot_trace_substep` is off by default and returns before locks, copies, ring
   writes, serial output, or framebuffer work.
 - Framebuffer live milestone rendering is enabled with `hw-framebuffer` and is triggered only by phase/status changes.
-- Serial phase/substep logging requires `bootdiag-serial` or `bootdiag-verbose`.
+- Serial phase/substep logging requires `bootdiag-serial` or `bootdiag-verbose`; raw seed-rs/BootInfo COM1 breadcrumbs require `boot-trace` (included by `bootdiag-verbose`).
 - Raw hardware dumps require `bootdiag-raw-hw` or targeted environment debug
   overrides already used by the platform code.
 
@@ -35,6 +35,7 @@ framebuffer path.
 | Failed phase reporting | must remain always-on and concise |
 | Substep tracing | debug-only / capture-only when `bootdiag` is enabled |
 | Serial verbose logs | serial-verbose only |
+| Raw seed-rs/BootInfo breadcrumbs | `boot-trace` only |
 | Framebuffer live UI redraws | default live milestone UI; phase/status changes only |
 | Raw PCI/Ryzen/hardware dumps | raw-hardware debug only |
 | Panic/fault failure screen | always available failure diagnostic |

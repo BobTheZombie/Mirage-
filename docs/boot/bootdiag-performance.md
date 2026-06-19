@@ -45,7 +45,8 @@ Verbose diagnostics require explicit opt-in Cargo features:
 
 ```text
 bootdiag              capture diagnostics ring entries
-bootdiag-verbose      verbose phase/substep diagnostics
+boot-trace           raw seed-rs/BootInfo COM1 breadcrumbs
+bootdiag-verbose      verbose phase/substep diagnostics plus boot-trace
 bootdiag-serial       serial diagnostic writes
 bootdiag-framebuffer  optional framebuffer diagnostic overlays/log fanout
 bootdiag-raw-hw       raw hardware dumps

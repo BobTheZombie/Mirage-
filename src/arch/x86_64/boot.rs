@@ -71,14 +71,24 @@ pub unsafe fn clear_bss() {
     }
 }
 
-#[cfg(all(not(test), not(feature = "qfs-std"), target_os = "none"))]
+#[cfg(all(
+    not(test),
+    not(feature = "qfs-std"),
+    target_os = "none",
+    feature = "boot-trace"
+))]
 fn bootinfo_marker(message: &str) {
     unsafe {
         crate::arch::x86_64::seed_rs::seed_com1_write_str(message);
     }
 }
 
-#[cfg(any(test, feature = "qfs-std", not(target_os = "none")))]
+#[cfg(any(
+    test,
+    feature = "qfs-std",
+    not(target_os = "none"),
+    not(feature = "boot-trace")
+))]
 fn bootinfo_marker(_message: &str) {}
 
 const BOOT_CSTRING_SCAN_LIMIT: usize = 256;

@@ -29,27 +29,21 @@ MIRAGE_QEMU_DEBUG_ARGS="-d int,cpu_reset -D build/qemu.log"
 
 ## Expected serial output
 
-After Limine has loaded the kernel and transferred control to Mirage, the serial
-stream should contain boot markers in increasing order. A successful emergency
-boot should include output like:
+After Limine has loaded the kernel and transferred control to Mirage, a default
+successful emergency boot should include concise output like:
 
 ```text
-[seed-rs 01] entered seed entry
-[seed-rs 02] bss cleared
-[seed-rs 03] linker sections captured
-[seed-rs 04] limine snapshot captured
-[seed-rs 05] bootinfo constructed
-[seed-rs 06] calling kernel_main
 Mirage emergency boot reached idle loop
 ```
 
-Limine may print its own bootloader diagnostics before the Mirage markers. Treat
-`[seed-rs 01] entered seed entry` as the first line emitted by Mirage itself.
+Limine may print its own bootloader diagnostics before Mirage output. The
+`[seed-rs NN]` and `[bootinfo NN]` success breadcrumbs are emitted only in
+`boot-trace` (or `bootdiag-verbose`) builds.
 
 ## Interpreting the last printed marker
 
-When the VM stops, resets, triple-faults, or appears to hang, find the last
-`[seed-rs NN]` line printed on the serial console. The next stage after that
+When a `boot-trace` build stops, resets, triple-faults, or appears to hang, find
+the last `[seed-rs NN]` line printed on the serial console. The next stage after that
 line is the most likely failing boundary. For example:
 
 - Last line is `[seed-rs 01]`: Limine reached Mirage `_start` and `_start`
@@ -75,7 +69,7 @@ Always interpret the marker as "the previous boundary completed" rather than
 "the marker itself failed." The fault is usually in the stage immediately after
 the last printed marker.
 
-## Marker map
+## `boot-trace` marker map
 
 | Marker | Boundary completed | Meaning |
 | --- | --- | --- |

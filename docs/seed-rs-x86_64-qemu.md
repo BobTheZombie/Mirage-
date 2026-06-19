@@ -34,10 +34,10 @@ construction path. Normal `make build`, `make image`, `make qemu`,
 Use `make qemu-emergency` or `QEMU_FEATURES=emergency-boot make qemu` when the
 post-`BootInfo` emergency idle loop is desired.
 
-The `[seed-rs 01]` through `[seed-rs 06]` serial markers intentionally remain
-enabled in normal builds while the default path settles. They should later be
-gated behind `CONFIG_MIRAGE_VERBOSE_BOOT` or a `verbose-boot` feature once
-mirageconfig owns that policy.
+The `[seed-rs 01]` through `[seed-rs 06]` serial markers are debug-only
+breadcrumbs. Normal builds suppress them; enable the `boot-trace` feature
+(or `bootdiag-verbose`, which includes it) when raw handoff breadcrumbs are
+needed on COM1.
 
 ## What seed-rs is
 
@@ -68,10 +68,11 @@ or filesystem initialization.
 ## Raw COM1 diagnostics
 
 The seed path uses raw x86_64 port I/O against COM1 (`0x3f8`) so progress is
-visible through QEMU `-serial stdio` without heap allocation, formatting macros,
-interrupts, framebuffer output, or the normal Mirage console.
+available through QEMU `-serial stdio` without heap allocation, formatting macros,
+interrupts, framebuffer output, or the normal Mirage console. These success
+breadcrumbs are emitted only when the kernel is built with `boot-trace`.
 
-Seed markers identify the last completed handoff stage:
+With `boot-trace`, seed markers identify the last completed handoff stage:
 
 | Marker | Meaning |
 | --- | --- |
@@ -92,8 +93,8 @@ optional bootloader data and avoid depending on the allocator, framebuffer,
 interrupts, supervisor, MTSS, or formatted logging while it builds the kernel's
 first typed boot handoff.
 
-The constructor emits raw COM1 markers before and after each bounded parsing
-step:
+With `boot-trace`, the constructor emits raw COM1 markers before and after each
+bounded parsing step:
 
 | Marker | Meaning |
 | --- | --- |
@@ -135,8 +136,8 @@ framebuffer pointer, or unaligned pointer returns `None`. The wrapper preserves
 the 64-bit framebuffer address, copies Limine's pitch directly, and deliberately
 does not inspect mode lists or EDID data during BootInfo construction.
 
-When a boot hangs or stops before `[seed-rs 05] bootinfo constructed`, compare
-the last `[bootinfo ..]` or helper marker on serial with the tables above. A stop
+When a `boot-trace` build hangs or stops before `[seed-rs 05] bootinfo constructed`,
+compare the last `[bootinfo ..]` or helper marker on serial with the tables above. A stop
 between a helper's pointer/count marker and its return marker usually indicates a
 malformed Limine response in that helper. Valid malformed optional responses
 should now degrade to `None`, an empty `BootString`, or `BootModules::empty()` so
@@ -151,17 +152,14 @@ enter the x86_64 halt loop before normal architecture initialization or
 heap-dependent work. The legacy `seed-rs-qemu-emergency` feature is retained as
 an alias for `emergency-boot`.
 
-Expected serial output after Limine output:
+Expected serial output after Limine output in a normal non-trace emergency build:
 
 ```text
-[seed-rs 01] entered seed entry
-[seed-rs 02] bss cleared
-[seed-rs 03] linker sections captured
-[seed-rs 04] limine snapshot captured
-[seed-rs 05] bootinfo constructed
-[seed-rs 06] calling kernel_main
 Mirage emergency boot reached idle loop
 ```
+
+A `boot-trace` emergency build also includes the seed-rs and BootInfo breadcrumbs
+before the emergency line.
 
 ## Run
 
