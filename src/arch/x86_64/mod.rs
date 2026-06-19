@@ -76,6 +76,7 @@ pub struct SyscallTrap {
 pub enum ThreadRunOutcome {
     TimeSliceComplete,
     TimerPreempted,
+    UserEntryInvalid,
     Syscall(SyscallTrap),
 }
 
@@ -199,6 +200,13 @@ fn initialize_framebuffer_console(_boot_info: &BootInfo) {
 /// trap frame in the thread context before invoking the scheduler.
 pub fn run_thread_slice(core_index: usize, thread: &mut ThreadControlBlock) -> ThreadRunOutcome {
     let timer_epoch = idt::timer_ticks();
+
+    #[cfg(not(test))]
+    if thread.context.privilege_mode == crate::kernel::thread::PrivilegeMode::User
+        && thread.context.sanitize_user_return_frame().is_none()
+    {
+        return ThreadRunOutcome::UserEntryInvalid;
+    }
 
     enter_thread_slice(core_index, thread);
 
