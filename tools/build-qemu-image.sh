@@ -51,6 +51,7 @@ esac
 
 iso_image=${MIRAGE_ISO_IMAGE:-build/mirage.iso}
 [ -f "$iso_image" ] || error "ISO was not created: $iso_image"
+MIRAGE_ISO_IMAGE=$iso_image "$script_dir/validate-boot-runtime.sh"
 
 for artifact in \
     build/limine/limine \

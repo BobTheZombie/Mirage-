@@ -561,3 +561,49 @@ If a change improves POSIX compatibility without violating Mirage internals, pre
 ## One-Sentence Definition
 
 Mirage is a Rust-based hybrid service kernel for GNU/POSIX software, using a small mechanism-focused kernel, a privileged supervisor, capability-secured IPC, restartable driver services, signed modules, and QFS as its native indexed journaling filesystem.
+
+---
+
+## Mirage Non-Negotiable Boot Contract
+
+1. Never produce or test a Mirage ISO/runtime image that is missing /spider-rt/sbin/spider-rs.
+
+2. /spider-rt/sbin/spider-rs is mandatory. It is the PID1/init bootstrap binary launched by the kernel/userspace loader through MTSS.
+
+3. /spider-rt/sbin/spider-rsd is mandatory. It is the system dispatcher daemon spawned by spider-rs.
+
+4. /usr/bin/m1-terminal is a normal userspace app and must not be placed under /spider-rt.
+
+5. Normal apps belong in rootfs paths such as /usr/bin. Bootstrap runtime binaries belong in /spider-rt/sbin.
+
+6. The build/package pipeline must validate required runtime files before QEMU/VirtualBox testing.
+
+7. A boot image missing spider-rs is a build failure, not an acceptable runtime state.
+
+8. The live Mirage milestone boot UI must remain the default display when framebuffer is online.
+
+9. BOOTDIAG raw text is fallback/debug only and must not replace the live milestone UI unless the milestone UI cannot initialize.
+
+10. Do not mark Spider-rs, Spider-rsd, PID1, System Dispatcher, Userspace Loader, M1 Terminal, or IdleLoop as OK/ONLINE/RUNNING unless the real code path has executed.
+
+11. Do not fake userspace output from the kernel.
+
+12. Do not open a PR unless a clean image build proves the required runtime files are present and QEMU reaches the stated acceptance markers.
+
+13. Always test with MIRAGE_REUSE_IMAGE=0 before using cached/reused images.
+
+14. If a stage cannot be implemented, report the exact blocker and leave the status FAILED/PENDING with a reason. Do not stub success.
+
+Required image layout:
+
+```text
+Required bootstrap runtime:
+/spider-rt/sbin/spider-rs
+/spider-rt/sbin/spider-rsd
+
+Required rootfs userland:
+/usr/bin/m1-terminal
+/etc/spider/units/default.target
+/etc/spider/units/basic.target
+/etc/spider/units/m1-terminal.service
+```

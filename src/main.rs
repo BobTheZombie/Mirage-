@@ -8,7 +8,7 @@ use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
-    boot_phase_detected, boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_running,
+    boot_phase_failed, boot_phase_found, boot_phase_ok, boot_phase_online, boot_phase_running,
     boot_phase_skipped, boot_phase_start, boot_phase_stub, boot_phase_validate_no_unresolved,
     BootPhase,
 };
@@ -282,9 +282,13 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             mirage::kernel::boot_runtime::find_boot_runtime_module(boot_info.modules).and_then(
                 |image| match mirage::kernel::boot_runtime::BootRuntimeRamFs::mount(image) {
                     Ok((_runtime, fs)) => {
-                        boot_phase_detected(BootPhase::BootRuntime);
-                        boot_phase_online(BootPhase::BootRuntime);
-                        mirage::kprintln!("[spider-rt] module found and RuntimeVfs mounted: /spider-rt/sbin/spider-rs available");
+                        boot_phase_ok(BootPhase::BootRuntime);
+                        boot_phase_found(BootPhase::SpiderRs);
+                        boot_phase_found(BootPhase::SystemDispatcher);
+                        mirage::kprintln!("BOOT RUNTIME [OK]");
+                        mirage::kprintln!("SPIDER-RS IMAGE [FOUND]");
+                        mirage::kprintln!("SPIDER-RSD IMAGE [FOUND]");
+                        mirage::kprintln!("[spider-rt] module found and RuntimeVfs mounted: /spider-rt/sbin/spider-rs and /spider-rt/sbin/spider-rsd available");
                         boot_deps.spider_rt_available = true;
                         Some(fs)
                     }
@@ -303,6 +307,13 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 BootPhase::BootRuntime,
                 "Spider-rs-required Boot Runtime image missing",
             );
+            boot_phase_failed(BootPhase::SpiderRs, "missing from Boot Runtime image");
+            boot_phase_skipped(BootPhase::RootFs, "boot runtime invalid");
+            boot_phase_skipped(BootPhase::UserspaceLoader, "boot runtime invalid");
+            mirage::kprintln!(
+                "[BOOTDIAG] ERROR BOOT RUNTIME: BOOT RUNTIME IMAGE VALIDATION FAILED"
+            );
+            mirage::kprintln!("[BOOTDIAG] ERROR BOOT RUNTIME: /spider-rt/sbin/spider-rs missing");
             mirage::kprintln!("[spider-rt] RuntimeVfs Failed: Spider-rs-required image missing");
         }
 
@@ -310,21 +321,27 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         {
             #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
             mirage::kprintln!("[bootdiag] rootfs mount starting");
-            boot_phase_start(BootPhase::RootFs);
-            match kernel.mount_root_from_boot_sources(boot_info.modules) {
-                Ok(source) => {
-                    boot_phase_ok(BootPhase::RootFs);
-                    boot_deps.root_fs_resolved = true;
-                    boot_deps.root_fs_online = true;
-                    mirage::kprintln!("ROOT FS [OK]");
-                    mirage::kprintln!("root mount attempt succeeded: {:?}", source);
+            if boot_runtime.is_some() {
+                boot_phase_start(BootPhase::RootFs);
+                match kernel.mount_root_from_boot_sources(boot_info.modules) {
+                    Ok(source) => {
+                        boot_phase_ok(BootPhase::RootFs);
+                        boot_deps.root_fs_resolved = true;
+                        boot_deps.root_fs_online = true;
+                        mirage::kprintln!("ROOT FS [OK]");
+                        mirage::kprintln!("root mount attempt succeeded: {:?}", source);
+                    }
+                    Err(error) => {
+                        boot_deps.root_fs_resolved = true;
+                        boot_phase_failed(BootPhase::RootFs, "no root source configured");
+                        mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
+                        mirage::kprintln!("root mount attempt failed: {:?}", error);
+                    }
                 }
-                Err(error) => {
-                    boot_deps.root_fs_resolved = true;
-                    boot_phase_failed(BootPhase::RootFs, "no root source configured");
-                    mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
-                    mirage::kprintln!("root mount attempt failed: {:?}", error);
-                }
+            } else {
+                boot_deps.root_fs_resolved = true;
+                boot_phase_skipped(BootPhase::RootFs, "boot runtime invalid");
+                mirage::kprintln!("ROOT FS [SKIPPED: boot runtime invalid]");
             }
             // Start L2 first, then L1-supervised device-facing daemons.
             #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
@@ -374,21 +391,27 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         {
             #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
             mirage::kprintln!("[bootdiag] rootfs mount starting");
-            boot_phase_start(BootPhase::RootFs);
-            match kernel.mount_root_from_boot_sources(boot_info.modules) {
-                Ok(source) => {
-                    boot_phase_ok(BootPhase::RootFs);
-                    boot_deps.root_fs_resolved = true;
-                    boot_deps.root_fs_online = true;
-                    mirage::kprintln!("ROOT FS [OK]");
-                    mirage::kprintln!("root mount attempt succeeded: {:?}", source);
+            if boot_runtime.is_some() {
+                boot_phase_start(BootPhase::RootFs);
+                match kernel.mount_root_from_boot_sources(boot_info.modules) {
+                    Ok(source) => {
+                        boot_phase_ok(BootPhase::RootFs);
+                        boot_deps.root_fs_resolved = true;
+                        boot_deps.root_fs_online = true;
+                        mirage::kprintln!("ROOT FS [OK]");
+                        mirage::kprintln!("root mount attempt succeeded: {:?}", source);
+                    }
+                    Err(error) => {
+                        boot_deps.root_fs_resolved = true;
+                        boot_phase_failed(BootPhase::RootFs, "no root source configured");
+                        mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
+                        mirage::kprintln!("root mount attempt failed: {:?}", error);
+                    }
                 }
-                Err(error) => {
-                    boot_deps.root_fs_resolved = true;
-                    boot_phase_failed(BootPhase::RootFs, "no root source configured");
-                    mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
-                    mirage::kprintln!("root mount attempt failed: {:?}", error);
-                }
+            } else {
+                boot_deps.root_fs_resolved = true;
+                boot_phase_skipped(BootPhase::RootFs, "boot runtime invalid");
+                mirage::kprintln!("ROOT FS [SKIPPED: boot runtime invalid]");
             }
             #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
             mirage::kprintln!("[bootdiag] supervisor bootstrap starting");

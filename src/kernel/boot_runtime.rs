@@ -14,7 +14,9 @@ pub const BOOTRT_MAX_FILES: usize = 16;
 pub const BOOTRT_ENTRY_SIZE: usize = 128;
 pub const BOOTRT_HEADER_SIZE: usize = 64;
 pub const BOOTRT_ENTRY: &str = "/sbin/spider-rs";
+pub const BOOTRT_DISPATCHER: &str = "/sbin/spider-rsd";
 pub const BOOTRT_MOUNTED_ENTRY: &str = "/spider-rt/sbin/spider-rs";
+pub const BOOTRT_MOUNTED_DISPATCHER: &str = "/spider-rt/sbin/spider-rsd";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootRuntime {
@@ -72,7 +74,10 @@ impl BootRuntimeRamFs {
     pub fn mount(image: &'static [u8]) -> Result<(BootRuntime, Self), BlockError> {
         let manifest = parse_manifest(image)?;
         let entry = manifest.entry_path();
-        if find_file_in_manifest(&manifest, entry).is_none() {
+        if find_file_in_manifest(&manifest, entry).is_none()
+            || find_file_in_manifest(&manifest, BOOTRT_MOUNTED_ENTRY).is_none()
+            || find_file_in_manifest(&manifest, BOOTRT_MOUNTED_DISPATCHER).is_none()
+        {
             return Err(BlockError::NotFound);
         }
         Ok((
@@ -230,7 +235,7 @@ pub fn parse_manifest(image: &[u8]) -> Result<BootRuntimeManifest, BlockError> {
 fn find_file_in_manifest(manifest: &BootRuntimeManifest, path: &str) -> Option<BootRuntimeFile> {
     let normalized = normalize_bootrt_path(path);
     for file in manifest.files.iter().flatten() {
-        if file.path() == normalized {
+        if file.path() == path || normalize_bootrt_path(file.path()) == normalized {
             return Some(*file);
         }
     }
