@@ -41,7 +41,7 @@ pub fn parse_unit(name: &str, source: &str) -> Result<LoadedUnit, UnitParseError
         if line.starts_with('[') && line.ends_with(']') {
             section = line[1..line.len() - 1].to_string();
             match section.as_str() {
-                "Unit" | "Service" | "Install" => {}
+                "Unit" | "Service" | "Target" | "Install" => {}
                 _ => {
                     return Err(UnitParseError::UnknownSection {
                         line: line_no,
@@ -60,6 +60,7 @@ pub fn parse_unit(name: &str, source: &str) -> Result<LoadedUnit, UnitParseError
         let key = key.trim();
         let value = value.trim();
         match (section.as_str(), key) {
+            ("Unit", "Name") => { if unit.description.is_empty() { unit.description = value.to_string(); } }
             ("Unit", "Description") => unit.description = value.to_string(),
             ("Unit", "After") => unit.after = split_unit_list(value),
             ("Unit", "Before") => unit.before = split_unit_list(value),

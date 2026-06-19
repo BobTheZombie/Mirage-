@@ -1,4 +1,7 @@
 [Unit]
-Description=Mirage default userspace target
-Requires=multi-user.target
-After=multi-user.target
+Name=Default Target
+Description=Mirage default boot target
+Wants=basic.target m1-terminal.service
+After=basic.target
+
+[Target]

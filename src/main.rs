@@ -116,7 +116,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     boot_phase_start(BootPhase::SpiderRs);
     boot_phase_ok(BootPhase::SpiderRs);
     deps.spider_found = true;
-    mirage::kprintln!("SPIDER-RS [FOUND]");
+    mirage::kprintln!("SPIDER-RS IMAGE [FOUND]");
 
     let report = supervisor.launch_spider_rs_pid1_checked(
         kernel,
@@ -142,19 +142,20 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     );
     boot_phase_stub(
         BootPhase::M1Terminal,
-        "PENDING: dispatcher child launch not implemented",
+        "PENDING: dispatcher not online",
     );
     boot_phase_stub(
         BootPhase::Userspace,
         "PID1 runnable; user-mode transition pending",
     );
-    mirage::kprintln!("SPIDER-RS [ELF OK]");
-    mirage::kprintln!("PID1 [CREATED]");
-    mirage::kprintln!("PID1 [RUNNABLE]");
+    mirage::kprintln!("SPIDER-RS ELF [OK]");
+    mirage::kprintln!("SPIDER-RS PID1 [CREATED]");
+    mirage::kprintln!("SPIDER-RS PID1 [RUNNABLE]");
     deps.dispatcher_started = false;
     deps.dispatcher_pending = true;
+    mirage::kprintln!("SPIDER-RSD [PENDING: user-mode transition not implemented]");
     mirage::kprintln!("SYSTEM DISPATCHER [PENDING: user-mode transition not implemented]");
-    mirage::kprintln!("M1 TERMINAL [PENDING: dispatcher child launch not implemented]");
+    mirage::kprintln!("M1 TERMINAL [PENDING: dispatcher not online]");
     mirage::kprintln!(
         "[pid1] process created pid={:?} entry={:#x} bytes={} path={}",
         report.pid,
@@ -163,7 +164,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         report.runtime_path
     );
     // Ring-3 dispatch is still pending. Do not print the terminal payload here;
-    // mirage-m1-terminal must be launched by Spider-rs once dispatcher child
+    // m1-terminal must be launched by spider-rsd once dispatcher child
     // launch and the console ABI exist.
     mirage::kprintln!("Userspace [Started: bootstrap dispatcher mode]");
     Ok(Pid1LaunchState::Runnable)
@@ -189,7 +190,7 @@ fn continue_after_mtss_online<const NPROC: usize, const MSG_DEPTH: usize>(
         boot_phase_stub(BootPhase::SystemDispatcher, "PENDING: rootfs unavailable");
         boot_phase_stub(BootPhase::Userspace, "SKIPPED: rootfs unavailable");
         mirage::kprintln!("USERSPACE LOADER [SKIPPED: rootfs unavailable]");
-        mirage::kprintln!("SPIDER-RS [SKIPPED: rootfs unavailable]");
+        mirage::kprintln!("SPIDER-RS IMAGE [SKIPPED: rootfs unavailable]");
         mirage::kprintln!("SYSTEM DISPATCHER [PENDING: rootfs unavailable]");
         return BootContinueResult::RootFsUnavailable("rootfs unavailable");
     }

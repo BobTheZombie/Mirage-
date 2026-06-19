@@ -1,2 +1,5 @@
 [Unit]
-Description=Mirage basic userspace services
+Name=Basic Target
+Description=Mirage basic system target
+
+[Target]

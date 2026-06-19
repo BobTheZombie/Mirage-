@@ -17,3 +17,15 @@ name = "spider-rs"
 path = "src/main.rs"
 test = false
 bench = false
+
+[[bin]]
+name = "spider-rsd"
+path = "src/bin_spider_rsd.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "m1-terminal"
+path = "src/bin_m1_terminal.rs"
+test = false
+bench = false
