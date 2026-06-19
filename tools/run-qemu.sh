@@ -42,6 +42,7 @@ fi
 case "$reuse_image" in
     1)
         [ -f "$iso_image" ] || error "MIRAGE_REUSE_IMAGE=1 requires existing QEMU image '$iso_image' (run tools/build-qemu-image.sh or unset MIRAGE_REUSE_IMAGE)"
+        MIRAGE_ISO_IMAGE=$iso_image "$script_dir/validate-boot-runtime.sh"
         ;;
     0|'')
         "$script_dir/build-qemu-image.sh"

@@ -1060,7 +1060,7 @@ fn should_render_framebuffer_transition(_phase: BootPhase, state: PhaseState) ->
 
 #[cfg(feature = "hw-framebuffer")]
 fn framebuffer_milestone_render_enabled() -> bool {
-    cfg!(feature = "bootdiag-framebuffer")
+    true
 }
 
 #[cfg(not(feature = "hw-framebuffer"))]

@@ -30,7 +30,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all build kernel spider-rs spider-rs-clean spider-rs-check spider-rt-tree spider-rt-image runtime-images userspace-spider-rs install-spider-rs qemu-spider qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print qemu-ahci-sata qemu-ahci-atapi qemu-ahci-gpt qemu-ahci-mbr qemu-bootrt qemu-spider-bootrt qemu-spider-rt menuconfig nconfig olddefconfig
+.PHONY: all build kernel spider-rs spider-rs-clean spider-rs-check spider-rt-tree spider-rt-image validate-boot-runtime runtime-images userspace-spider-rs install-spider-rs qemu-spider qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print qemu-ahci-sata qemu-ahci-atapi qemu-ahci-gpt qemu-ahci-mbr qemu-bootrt qemu-spider-bootrt qemu-spider-rt menuconfig nconfig olddefconfig
 
 all: iso
 
@@ -76,6 +76,9 @@ spider-rt-tree: spider-rs
 
 spider-rt-image: spider-rt-tree
 	$(CARGO) run -q -p mk-runtime-image -- $(BUILD_DIR)/spider-rt $(BUILD_DIR)/spider-rt.img --name spider-rt --entry /spider-rt/sbin/spider-rs
+
+validate-boot-runtime: spider-rt-image install-spider-rs
+	tools/validate-boot-runtime.sh
 
 runtime-images: spider-rt-image
 
@@ -252,6 +255,7 @@ iso: config-generate qemu-kernel runtime-images install-spider-rs limine
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		-o $(ISO_IMAGE) $(ISO_ROOT)
 	$(LIMINE_BIN) bios-install $(ISO_IMAGE)
+	tools/validate-boot-runtime.sh
 
 qemu-seed-image: seed-rs-kernel limine
 	rm -rf $(ISO_ROOT)
