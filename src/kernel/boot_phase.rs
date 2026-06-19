@@ -923,8 +923,8 @@ pub fn boot_register_subsystem(descriptor: SubsystemDescriptor) {
         }
     }
     // Registration is intentionally silent on the framebuffer in the default
-    // fast live mode. The first live paint happens on meaningful phase state
-    // transitions so boot registration does not become framebuffer spam.
+    // fast live mode. Framebuffer milestone painting is debug-only so normal
+    // boot transitions do not synchronously repaint the boot UI.
 }
 
 pub fn boot_phase_start(phase: BootPhase) {
@@ -1061,7 +1061,6 @@ fn should_render_framebuffer_transition(_phase: BootPhase, state: PhaseState) ->
 #[cfg(feature = "hw-framebuffer")]
 fn framebuffer_milestone_render_enabled() -> bool {
     cfg!(feature = "bootdiag-framebuffer")
-        || crate::arch::x86_64::framebuffer_console::milestone_ui_active()
 }
 
 #[cfg(not(feature = "hw-framebuffer"))]
