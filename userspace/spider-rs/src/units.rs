@@ -1,3 +1,5 @@
+#[cfg(target_os = "none")]
+use alloc::{string::String, vec::Vec};
 #[cfg(all(feature = "host-tools", not(target_os = "none")))]
 use std::fmt;
 
@@ -10,12 +12,10 @@ pub enum UnitKind {
     Device,
     Timer,
     Socket,
-    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
     Path,
 }
 
 impl UnitKind {
-    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
     pub fn from_name(name: &str) -> Option<Self> {
         let suffix = name.rsplit_once('.').map(|(_, suffix)| suffix)?;
         match suffix {
@@ -129,14 +129,12 @@ pub fn default_units() -> &'static [UnitDescriptor] {
     BUILTIN_UNITS
 }
 
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RestartPolicy {
     No,
     OnFailure,
     Always,
 }
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 impl RestartPolicy {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
@@ -147,7 +145,6 @@ impl RestartPolicy {
         }
     }
 }
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unit {
     pub name: String,
@@ -159,20 +156,17 @@ pub struct Unit {
     pub wants: Vec<String>,
     pub wanted_by: Vec<String>,
 }
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServiceUnit {
     pub exec_start: String,
     pub restart: RestartPolicy,
 }
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedUnit {
     pub unit: Unit,
     pub service: Option<ServiceUnit>,
     pub state: UnitState,
 }
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 impl LoadedUnit {
     pub fn new(unit: Unit, service: Option<ServiceUnit>) -> Self {
         Self {

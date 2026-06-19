@@ -1,3 +1,9 @@
+#[cfg(target_os = "none")]
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+
 use crate::units::{LoadedUnit, RestartPolicy, ServiceUnit, Unit, UnitKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,7 +66,11 @@ pub fn parse_unit(name: &str, source: &str) -> Result<LoadedUnit, UnitParseError
         let key = key.trim();
         let value = value.trim();
         match (section.as_str(), key) {
-            ("Unit", "Name") => { if unit.description.is_empty() { unit.description = value.to_string(); } }
+            ("Unit", "Name") => {
+                if unit.description.is_empty() {
+                    unit.description = value.to_string();
+                }
+            }
             ("Unit", "Description") => unit.description = value.to_string(),
             ("Unit", "After") => unit.after = split_unit_list(value),
             ("Unit", "Before") => unit.before = split_unit_list(value),
