@@ -3,6 +3,7 @@ use crate::units::LoadedUnit;
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 #[cfg(not(target_os = "none"))]
