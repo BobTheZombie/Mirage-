@@ -1606,7 +1606,29 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             SyscallNumber::Futex => self.syscall_futex(context),
             SyscallNumber::SetThreadArea => self.syscall_set_thread_area(context),
             SyscallNumber::ArchPrctl => self.syscall_arch_prctl(context),
+            SyscallNumber::Yield => self.syscall_yield(context),
         }
+    }
+
+    fn syscall_yield(&mut self, context: SyscallContext) -> KernelResult<u64> {
+        self.ensure_process_exists(context.caller)?;
+        let thread = context.thread.ok_or(KernelError::UnknownThread)?;
+        let thread_index = self.locate_thread(thread)?;
+        let tcb = self.thread_table[thread_index]
+            .as_mut()
+            .ok_or(KernelError::UnknownThread)?;
+        if tcb.process != context.caller {
+            return Err(KernelError::SecurityViolation(
+                IsolationError::PolicyViolation,
+            ));
+        }
+        if tcb.state == ThreadState::Terminated {
+            return Err(KernelError::UnknownThread);
+        }
+        if tcb.state == ThreadState::Running {
+            tcb.mark_ready();
+        }
+        Ok(0)
     }
 
     fn syscall_fork(&mut self, context: SyscallContext) -> KernelResult<u64> {
