@@ -7,8 +7,8 @@ use crate::kernel::device::{
     copy_input_event_to_bytes, DeviceDriver, DeviceError, DeviceKind, MirageInputEvent,
 };
 use crate::kernel::input::{
-    mark_source_online, publish_keyboard_event, InputRawSource, KeyCode, KeyModifiers, KeyState,
-    KeyboardEvent,
+    mark_source_online, publish_keyboard_event, try_publish_keyboard_event, InputRawSource, KeyCode,
+    KeyModifiers, KeyState, KeyboardEvent,
 };
 use crate::kernel::sync::SpinLock;
 use crate::subkernel::{DeviceSecurity, SecurityClass};
@@ -32,8 +32,10 @@ struct DriverState {
     events: [MirageInputEvent; Ps2KeyboardDriver::QUEUE_CAPACITY],
     head: usize,
     len: usize,
+    bytes_received: u64,
     events_received: u64,
     decode_errors: u64,
+    irq_drops: u64,
     first_event_logged: bool,
     last_event: Option<KeyboardEvent>,
 }
@@ -55,8 +57,10 @@ impl DriverState {
             }; Ps2KeyboardDriver::QUEUE_CAPACITY],
             head: 0,
             len: 0,
+            bytes_received: 0,
             events_received: 0,
             decode_errors: 0,
+            irq_drops: 0,
             first_event_logged: false,
             last_event: None,
         }
@@ -99,50 +103,53 @@ impl Ps2KeyboardDriver {
     }
 
     pub fn initialize(&self, irq_mode: bool) -> Result<(), I8042Error> {
-        let init = self.controller.initialize(irq_mode, true)?;
         crate::kprintln!("I8042 [Detected]");
+        let init = self.controller.initialize(irq_mode, true)?;
         crate::kprintln!("I8042 [Started]");
         crate::kprintln!("I8042 [Ok]");
-        crate::kprintln!("PS/2 Keyboard [Started]");
-        crate::kprintln!("[kbd 01] reset command sent");
-        self.controller.send_device_command(0xff)?;
-        self.controller.wait_for_bat()?;
-        match self.controller.send_device_command(0xf2) {
-            Ok(()) => crate::kprintln!("[kbd 02] identify complete"),
-            Err(_) => crate::kprintln!("[kbd 02] identify skipped"),
-        }
 
         let mut scan_set = if init.translated {
             Ps2ScanSet::Set1Translated
         } else {
+            Ps2ScanSet::Set2
+        };
+
+        // The PS/2 command path is best-effort during early boot.  Controller
+        // failure is reported by returning Err above, but keyboard command
+        // timeouts are not allowed to block or abort the post-kernel boot path:
+        // QEMU, VirtualBox, firmware, and real laptops differ in when BAT and
+        // identify bytes are delivered.  If scan bytes arrive later, the
+        // polling/IRQ paths will decode them in degraded mode.
+        if let Err(error) = self.controller.send_device_command(0xf5) {
+            crate::kprintln!("PS/2 Keyboard [Failed: disable scanning {:?}]", error);
+        }
+        if let Err(error) = self.controller.send_device_command(0xff) {
+            crate::kprintln!("PS/2 Keyboard [Failed: reset {:?}]", error);
+        } else if let Err(error) = self.controller.wait_for_bat() {
+            crate::kprintln!("PS/2 Keyboard [Failed: BAT {:?}]", error);
+        }
+        if let Err(error) = self.controller.send_device_command(0xf2) {
+            crate::kprintln!("PS/2 Keyboard [Failed: identify {:?}]", error);
+        }
+        if !init.translated {
             match self.controller.send_device_command_with_arg(0xf0, 0x02) {
-                Ok(()) => {
-                    crate::kprintln!("[kbd 03] scancode set selected");
-                    Ps2ScanSet::Set2
-                }
-                Err(_) => {
-                    crate::kprintln!("[kbd 03] scancode set detected");
-                    Ps2ScanSet::Set1Translated
+                Ok(()) => scan_set = Ps2ScanSet::Set2,
+                Err(error) => {
+                    crate::kprintln!("PS/2 Keyboard [Failed: set scancode {:?}]", error);
+                    scan_set = Ps2ScanSet::Set2;
                 }
             }
-        };
-        if init.translated {
-            scan_set = Ps2ScanSet::Set1Translated;
+        }
+        if let Err(error) = self.controller.send_device_command(0xf4) {
+            crate::kprintln!("PS/2 Keyboard [Failed: enable scanning {:?}]", error);
         }
 
-        self.controller.send_device_command(0xf4)?;
-        crate::kprintln!("[kbd 04] scanning enabled");
         let mut state = self.state.lock();
         state.initialized = true;
         state.irq_mode = irq_mode;
         state.controller_state = I8042ControllerState::Ready;
         state.scan_set = scan_set;
         state.decoder = Ps2Decoder::new(scan_set);
-        if irq_mode {
-            crate::kprintln!("[kbd 05] irq mode enabled");
-        } else {
-            crate::kprintln!("[kbd 05] polling mode active");
-        }
         crate::kprintln!(
             "PS/2 Keyboard [Started: {} mode]",
             if irq_mode { "irq" } else { "polling" }
@@ -158,9 +165,10 @@ impl Ps2KeyboardDriver {
             if status & 0x01 == 0 {
                 break;
             }
-            let Ok(scancode) = self.controller.read_data() else {
+            let Ok(Some(scancode)) = self.controller.read_data_nonblocking() else {
                 break;
             };
+            state.bytes_received = state.bytes_received.saturating_add(1);
             if !I8042Controller::status_aux_data(status) {
                 let events = state.decoder.feed(scancode);
                 for event in events.into_iter().flatten() {
@@ -182,28 +190,40 @@ impl Ps2KeyboardDriver {
         }
     }
     pub fn handle_irq1(&self) {
-        let status = self.controller.status();
-        if status & 0x01 == 0 || I8042Controller::status_aux_data(status) {
-            return;
-        }
-        let Ok(scancode) = self.controller.read_data() else {
-            return;
-        };
-        let mut state = self.state.lock();
-        let events = state.decoder.feed(scancode);
-        for event in events.into_iter().flatten() {
-            let abi = event.to_mirage_input_event();
-            publish_keyboard_event(event);
-            state.push(abi);
-            state.events_received = state.events_received.saturating_add(1);
-            state.last_event = Some(event);
-            if !state.first_event_logged {
-                state.first_event_logged = true;
-                state.online = true;
-                mark_source_online(InputRawSource::Ps2);
-                crate::kprintln!("[kbd 06] first key event received");
-                crate::kprintln!("PS/2 Keyboard [Online]");
+        let mut drained = 0usize;
+        while drained < MAX_POLL_BYTES {
+            let status = self.controller.status();
+            if status & 0x01 == 0 {
+                break;
             }
+            let Ok(Some(scancode)) = self.controller.read_data_nonblocking() else {
+                break;
+            };
+            if !I8042Controller::status_aux_data(status) {
+                let Some(mut state) = self.state.try_lock() else {
+                    // Do not spin in IRQ context.  Dropping one raw byte is
+                    // safer than deadlocking the boot CPU while a normal path
+                    // owns the decoder state.
+                    break;
+                };
+                state.bytes_received = state.bytes_received.saturating_add(1);
+                let events = state.decoder.feed(scancode);
+                for event in events.into_iter().flatten() {
+                    let abi = event.to_mirage_input_event();
+                    if !try_publish_keyboard_event(event) {
+                        state.irq_drops = state.irq_drops.saturating_add(1);
+                    }
+                    state.push(abi);
+                    state.events_received = state.events_received.saturating_add(1);
+                    state.last_event = Some(event);
+                    if !state.first_event_logged {
+                        state.first_event_logged = true;
+                        state.online = true;
+                        mark_source_online(InputRawSource::Ps2);
+                    }
+                }
+            }
+            drained += 1;
         }
     }
 
@@ -215,8 +235,10 @@ impl Ps2KeyboardDriver {
             irq_mode: state.irq_mode,
             controller_state: state.controller_state,
             scan_set: state.scan_set,
+            bytes_received: state.bytes_received,
             events_received: state.events_received,
             decode_errors: state.decode_errors,
+            irq_drops: state.irq_drops,
             queue_overflows: crate::kernel::input::input_queue_overflows(),
             last_event: state.last_event,
         }
@@ -230,8 +252,10 @@ pub struct Ps2KeyboardSnapshot {
     pub irq_mode: bool,
     pub controller_state: I8042ControllerState,
     pub scan_set: Ps2ScanSet,
+    pub bytes_received: u64,
     pub events_received: u64,
     pub decode_errors: u64,
+    pub irq_drops: u64,
     pub queue_overflows: u64,
     pub last_event: Option<KeyboardEvent>,
 }

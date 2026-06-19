@@ -6,6 +6,7 @@
 //! phase manager diagnostics, or normal device reads.
 
 use core::cmp::min;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::kernel::device::{MirageInputEvent, MIRAGE_DEVICE_KIND_INPUT_CONTROLLER};
 use crate::kernel::sync::SpinLock;
@@ -226,14 +227,28 @@ impl InputRegistry {
 }
 
 static INPUT_QUEUE: SpinLock<InputQueue> = SpinLock::new(InputQueue::new());
+static INPUT_QUEUE_BUSY_DROPS: AtomicU64 = AtomicU64::new(0);
 static INPUT_REGISTRY: SpinLock<InputRegistry> = SpinLock::new(InputRegistry::new());
 
 pub fn publish_keyboard_event(event: KeyboardEvent) {
     INPUT_QUEUE.lock().push(event);
 }
 
+/// IRQ-safe producer path.  It never spins on the queue lock; if a normal
+/// consumer temporarily owns the queue, the interrupt drops the event and
+/// accounts the loss instead of risking an interrupt-time deadlock.
+pub fn try_publish_keyboard_event(event: KeyboardEvent) -> bool {
+    if let Some(mut queue) = INPUT_QUEUE.try_lock() {
+        queue.push(event);
+        true
+    } else {
+        INPUT_QUEUE_BUSY_DROPS.fetch_add(1, Ordering::Relaxed);
+        false
+    }
+}
+
 pub fn input_queue_overflows() -> u64 {
-    INPUT_QUEUE.lock().dropped
+    INPUT_QUEUE.lock().dropped.saturating_add(INPUT_QUEUE_BUSY_DROPS.load(Ordering::Relaxed))
 }
 
 pub fn input_queue_depth() -> usize {

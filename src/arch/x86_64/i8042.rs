@@ -181,8 +181,18 @@ impl I8042Controller {
     }
 
     pub fn read_data(&self) -> Result<u8, I8042Error> {
-        self.wait_output_full()?;
+        self.read_data_timeout(WAIT_LIMIT)
+    }
+
+    /// Read one byte only if the output buffer is already full.
+    ///
+    /// This is the only data read helper used by IRQ context; it performs no
+    /// waits and therefore cannot stall boot or an interrupt return path.
+    pub fn read_data_nonblocking(&self) -> Result<Option<u8>, I8042Error> {
         let status = self.parsed_status();
+        if !status.output_full {
+            return Ok(None);
+        }
         if status.timeout_error {
             return Err(I8042Error::ControllerTimeout);
         }
@@ -190,7 +200,7 @@ impl I8042Controller {
             return Err(I8042Error::ControllerParity);
         }
         // SAFETY: the output-buffer-full bit was observed, and the i8042 data port is owned by this driver.
-        Ok(unsafe { inb(DATA_PORT) })
+        Ok(Some(unsafe { inb(DATA_PORT) }))
     }
 
     pub fn write_data(&self, value: u8) -> Result<(), I8042Error> {

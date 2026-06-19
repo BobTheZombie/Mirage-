@@ -1,29 +1,69 @@
-# i8042 / AT PS/2 Keyboard Input Path
+# i8042 / PS/2 keyboard bring-up
 
-Mirage treats the internal laptop keyboard as a lower-kernel hardware device: the x86_64 i8042 driver owns ports `0x60` and `0x64`, IRQ1, controller commands, bounded command waits, and raw scan-code reads. The supervisor owns policy: debug-shell routing, kernel-console routing, future userspace visibility, and recovery decisions.
+Mirage treats the i8042 controller as a lower-kernel mechanism and exposes only
+facts and decoded input events upward.  The supervisor must not read or write the
+`0x60/0x64` ports directly.
 
-## Controller initialization
+## Boot-safety rule
 
-The controller path disables PS/2 ports, flushes stale output bytes, reads the configuration byte, disables controller IRQ bits during setup, requests raw Set 2 by clearing translation when possible, optionally tests the controller and keyboard port, enables the first PS/2 port, and enables IRQ1 when IRQ mode is selected. Missing aux/mouse support is non-fatal.
+Keyboard input is never a boot dependency.  The driver may report:
 
-Every hardware wait is bounded. Timeout, parity, self-test, port-test, device-response, and RESEND-exhaustion failures are represented as typed errors.
+- `PS/2 Keyboard [Started: polling mode]`
+- `PS/2 Keyboard [Started: irq mode]`
+- `PS/2 Keyboard [Failed: reason]`
+- `Input [Skipped: reason]`
 
-## Keyboard protocol
+but post-kernel phases must continue to `boot info applied`, supervisor creation,
+root mount, supervisor initialization, and MTSS online.  `Online` is only emitted
+after a real decoded key event, never merely because initialization completed.
 
-The AT keyboard driver sends reset (`0xff`), identify (`0xf2`), Set 2 selection (`0xf0 0x02`) when the controller is not translating, and enable scanning (`0xf4`). ACK (`0xfa`), RESEND (`0xfe`), and BAT OK (`0xaa`) are handled with bounded retries and timeouts.
+## Controller sequence
+
+The i8042 path uses the standard ports:
+
+- data: `0x60`
+- status: `0x64`
+- command: `0x64`
+
+Initialization disables both PS/2 ports, flushes bounded pending output, reads
+and rewrites the controller configuration with IRQs disabled during setup, tests
+the controller and first port, intentionally disables translation when Set 2 is
+preferred, then enables the first port.  IRQ1 is only enabled when the caller
+requests IRQ mode; current early architecture bring-up uses polling mode so the
+keyboard cannot interrupt the post-kernel boot pipeline.
+
+All waits are bounded.  Timeouts and controller parity/timeout status bits return
+typed errors instead of panicking.
+
+## PS/2 command path
+
+Keyboard commands (`reset`, `identify`, `disable scanning`, `set scancode set`,
+`enable scanning`) are normal-thread setup transactions only.  The command helper
+retries `RESEND` a bounded number of times and never runs from IRQ context.
+During early boot these commands are best-effort: a VirtualBox/QEMU timing quirk
+or missing response is logged honestly, but the driver still starts in degraded
+polling mode so later scan bytes can be decoded.
 
 ## IRQ and polling
 
-Polling mode is used during early boot and as fallback. IRQ mode installs IDT vector 33 and unmasks PIC IRQ1 only after the lower-kernel driver has initialized. The IRQ handler reads at most the available controller byte, ignores aux bytes, decodes or queues the event, and sends EOI through the existing interrupt-controller abstraction. It never runs command transactions.
+The IRQ1 handler performs only non-blocking data reads, decoder state updates,
+fixed-queue publishing, and PIC/APIC EOI through the common interrupt dispatcher.
+It never waits for ACK/BAT/RESEND, never allocates, never logs per scancode, and
+uses `try_lock` so an interrupt cannot spin on a lock held by boot code.
 
-## Structured events
+Polling mode reads only already-available bytes and drains a bounded number per
+call.  It is used before interrupts are a dependency and by the debug-shell
+hotkey path.
 
-Raw Set 2 bytes decode to `KeyboardEvent` with `KeyCode`, `KeyState`, modifiers, optional ASCII, raw source, and raw code. Events are published into a bounded no-heap queue with overflow accounting and can be consumed by the debug shell, kernel device reads, or a future Spider-rs/PID1 input service boundary.
+## Scancode decoding
 
-## Status semantics
+The driver supports translated Set 1 and native Set 2.  Native Set 2 handles
+make/break (`0xf0`), extended (`0xe0`), and basic Pause-prefix poisoning
+avoidance (`0xe1`).  Events include physical key code, press/release state,
+modifiers, and optional US ASCII.
 
-`Online` means real hardware scan bytes have decoded into a structured key event. Successful command initialization without a decoded event remains `Started`/`Ok`, not `Online`.
+## Verbose debug
 
-## Known limitations
-
-The current layout is US keyboard only. Arrow-key history in the debug shell is pending. Userspace ABI export is defined as a registration point but not yet a full input service. Touchpad support is separate and is expected to arrive through ACPI/I2C-HID, not the i8042 keyboard path.
+Default boot does not dump raw scancodes or redraw on every event.  Future command
+line switches should use the reserved names `mirage.debug.keyboard=1` and
+`mirage.debug.scancode=1` for opt-in verbose input diagnostics.
