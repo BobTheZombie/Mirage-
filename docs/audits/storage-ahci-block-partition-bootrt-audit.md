@@ -49,7 +49,7 @@ Current working path inspected: `/workspace/Mirage-`.
 4. Implement multi-sector READ DMA EXT splitting through bounce buffers, preserving read-only default behavior for writes.
 5. Implement WRITE DMA EXT and FLUSH CACHE EXT only behind explicit kernel write-enable and mount-rw policy.
 6. For ATAPI devices, reuse the per-port DMA setup, issue IDENTIFY PACKET, SCSI INQUIRY, READ CAPACITY(10), and READ(10); register `atapi0` read-only only when media is present.
-7. If ATAPI exists without media, mark ATAPI Detected/Online but Optical Disk Skipped with a no-media reason.
+7. If ATAPI exists before packet media probing is implemented, mark ATAPI Detected and then Skipped with an explicit packet-probing-disabled reason; keep Optical Disk Skipped until IDENTIFY PACKET DEVICE, SCSI INQUIRY, READ CAPACITY(10), and READ(10) are implemented and a read-only `atapi0` device is registered.
 
 ## Exact plan to mount Spider Runtime RuntimeVfs
 
