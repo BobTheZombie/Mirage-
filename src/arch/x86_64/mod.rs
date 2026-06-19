@@ -1127,10 +1127,13 @@ fn initialize_storage_hardware(
                     boot_phase_skipped(BootPhase::SataDisk, "no SATA disk detected");
                     if atapi_detected {
                         boot_phase_detected(BootPhase::Atapi);
-                        boot_phase_online(BootPhase::Atapi);
+                        boot_phase_skipped(
+                            BootPhase::Atapi,
+                            "ATAPI packet media probing not enabled",
+                        );
                         boot_phase_skipped(
                             BootPhase::OpticalDisk,
-                            "ATAPI media probing not enabled",
+                            "IDENTIFY PACKET DEVICE, SCSI INQUIRY, READ CAPACITY(10), and READ(10) not implemented; atapi0 not registered",
                         );
                     } else {
                         boot_phase_skipped(BootPhase::Atapi, "no ATAPI device detected");
