@@ -140,10 +140,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         BootPhase::SystemDispatcher,
         "PENDING: user-mode transition not implemented",
     );
-    boot_phase_stub(
-        BootPhase::M1Terminal,
-        "PENDING: dispatcher not online",
-    );
+    boot_phase_stub(BootPhase::M1Terminal, "PENDING: dispatcher not online");
     boot_phase_stub(
         BootPhase::Userspace,
         "PID1 runnable; user-mode transition pending",
@@ -253,8 +250,12 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
         boot_phase_ok(BootPhase::KernelConstructed);
         mirage::kprintln!("kernel constructed");
+        #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+        mirage::kprintln!("[bootdiag] boot info apply starting");
         boot_phase_start(BootPhase::BootInfoApplied);
         kernel.bootstrap_with_boot_info(&boot_info);
+        #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+        mirage::kprintln!("[bootdiag] boot info apply returned");
         boot_phase_ok(BootPhase::BootInfoApplied);
         mirage::kprintln!("boot info applied");
 
@@ -262,8 +263,12 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             kernel.bring_up_secondary_cores(cpu::MAX_CORES - 1);
         }
 
+        #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+        mirage::kprintln!("[bootdiag] supervisor creation starting");
         boot_phase_start(BootPhase::SupervisorCreated);
         let supervisor = Supervisor::new();
+        #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+        mirage::kprintln!("[bootdiag] supervisor creation returned");
         boot_phase_ok(BootPhase::SupervisorCreated);
         mirage::kprintln!("supervisor created");
         let mut boot_deps = BootRuntimeDeps::default();
@@ -299,6 +304,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
         #[cfg(feature = "full-boot")]
         {
+            #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+            mirage::kprintln!("[bootdiag] rootfs mount starting");
             boot_phase_start(BootPhase::RootFs);
             match kernel.mount_root_from_boot_sources(boot_info.modules) {
                 Ok(source) => {
@@ -316,6 +323,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
             // Start L2 first, then L1-supervised device-facing daemons.
+            #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+            mirage::kprintln!("[bootdiag] supervisor bootstrap starting");
             boot_phase_start(BootPhase::Supervisor);
             let service_report = supervisor.bootstrap_services(&mut kernel);
             if service_report.all_running() {
@@ -359,6 +368,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
 
         #[cfg(not(feature = "full-boot"))]
         {
+            #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+            mirage::kprintln!("[bootdiag] rootfs mount starting");
             boot_phase_start(BootPhase::RootFs);
             match kernel.mount_root_from_boot_sources(boot_info.modules) {
                 Ok(source) => {
@@ -375,6 +386,8 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                     mirage::kprintln!("root mount attempt failed: {:?}", error);
                 }
             }
+            #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+            mirage::kprintln!("[bootdiag] supervisor bootstrap starting");
             boot_phase_start(BootPhase::Supervisor);
             mirage::kprintln!("minimal supervisor bootstrap starting");
             let minimal_report = supervisor.bootstrap_minimal(&mut kernel);
@@ -466,8 +479,12 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             }
         }
 
+        #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+        mirage::kprintln!("[bootdiag] MTSS init starting");
         boot_phase_start(BootPhase::Mtss);
         kernel.kernel_mtss_init();
+        #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+        mirage::kprintln!("[bootdiag] MTSS init returned");
         boot_phase_online(BootPhase::Mtss);
         mirage::kprintln!("MTSS initialized");
         boot_deps.mtss_online = true;
