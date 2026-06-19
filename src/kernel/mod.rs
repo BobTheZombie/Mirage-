@@ -785,18 +785,18 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     pub fn bootstrap_with_framebuffer(&mut self, framebuffer: Option<FramebufferInfo>) {
-        self.bootstrap_with_boot_info_and_framebuffer(None, framebuffer);
+        let _ = self.bootstrap_with_boot_info_and_framebuffer(None, framebuffer);
     }
 
-    pub fn bootstrap_with_boot_info(&mut self, boot_info: &BootInfo) {
-        self.bootstrap_with_boot_info_and_framebuffer(Some(boot_info), boot_info.framebuffer);
+    pub fn bootstrap_with_boot_info(&mut self, boot_info: &BootInfo) -> KernelResult<()> {
+        self.bootstrap_with_boot_info_and_framebuffer(Some(boot_info), boot_info.framebuffer)
     }
 
     fn bootstrap_with_boot_info_and_framebuffer(
         &mut self,
         boot_info: Option<&BootInfo>,
         framebuffer: Option<FramebufferInfo>,
-    ) {
+    ) -> KernelResult<()> {
         self.scheduler.reset();
         self.mtss_core = CoreMtss::new();
         self.mtss_initialized = false;
@@ -844,11 +844,14 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
         if let Some(boot_info) = boot_info {
             self.devices
-                .install_core_devices_with_boot_info(Some(boot_info));
+                .install_core_devices_with_boot_info(Some(boot_info))
+                .map_err(KernelError::DeviceFault)?;
         } else {
             self.devices
-                .install_core_devices_with_framebuffer(framebuffer);
+                .install_core_devices_with_framebuffer(framebuffer)
+                .map_err(KernelError::DeviceFault)?;
         }
+        Ok(())
     }
 
     pub fn mount_root_from_boot_sources(
