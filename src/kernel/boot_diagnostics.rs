@@ -399,7 +399,8 @@ pub fn draw_failure_screen(reason: &'static str, _keyboard_available: bool) {
 
     #[cfg(feature = "hw-framebuffer")]
     {
-        use crate::arch::x86_64::framebuffer_console::{self, RgbColor};
+        use crate::arch::x86_64::framebuffer_console::{self, BootRenderMode, RgbColor};
+        framebuffer_console::set_render_mode(BootRenderMode::FailureScreen);
         framebuffer_console::write_colored("\n\nMIRAGE BOOT FAILURE\n", RgbColor::RED);
         let diag = snapshot();
         let _ = FailureWriter(RgbColor::WHITE).write_fmt(format_args!("reason: {}\n", reason));

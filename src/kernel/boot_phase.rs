@@ -1038,12 +1038,35 @@ fn transition(phase: BootPhase, state: PhaseState, message: &'static str) {
     }
 }
 
-fn should_render_framebuffer_transition(phase: BootPhase, state: PhaseState) -> bool {
-    cfg!(feature = "hw-framebuffer")
+fn should_render_framebuffer_transition(_phase: BootPhase, state: PhaseState) -> bool {
+    framebuffer_milestone_render_enabled()
         && framebuffer_ready()
-        && (cfg!(feature = "bootdiag-framebuffer")
-            || matches!(state, PhaseState::Failed)
-            || matches!(phase, BootPhase::BootScreen | BootPhase::IdleLoop))
+        && matches!(
+            state,
+            PhaseState::Registered
+                | PhaseState::Started
+                | PhaseState::Detected
+                | PhaseState::Found
+                | PhaseState::Ok
+                | PhaseState::Online
+                | PhaseState::Enabled
+                | PhaseState::Skipped
+                | PhaseState::Stub
+                | PhaseState::Failed
+                | PhaseState::Pending
+                | PhaseState::Running
+        )
+}
+
+#[cfg(feature = "hw-framebuffer")]
+fn framebuffer_milestone_render_enabled() -> bool {
+    cfg!(feature = "bootdiag-framebuffer")
+        || crate::arch::x86_64::framebuffer_console::milestone_ui_active()
+}
+
+#[cfg(not(feature = "hw-framebuffer"))]
+fn framebuffer_milestone_render_enabled() -> bool {
+    false
 }
 
 fn framebuffer_ready() -> bool {
