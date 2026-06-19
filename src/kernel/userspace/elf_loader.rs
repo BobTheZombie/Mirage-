@@ -13,6 +13,7 @@ pub struct LoadedProgram {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadSegment {
     pub vaddr: VirtAddr,
+    pub file_offset: usize,
     pub file_size: usize,
     pub mem_size: usize,
     pub flags: u32,
@@ -29,7 +30,10 @@ pub enum LoadError {
     UnsupportedMachine,
     BadProgramHeaderTable,
     BadLoadSegment,
+    NoLoadSegments,
     EntryNotMapped,
+    MapSegmentFailed,
+    StackBuildFailed,
 }
 
 const EI_CLASS: usize = 4;
@@ -95,10 +99,14 @@ pub fn parse_elf64(image: &[u8]) -> Result<ParsedElf, LoadError> {
     }
 
     let entry = VirtAddr(read_u64(image, 24));
+    if entry.0 == 0 || entry.0 >= 0x0000_8000_0000_0000 {
+        return Err(LoadError::EntryNotMapped);
+    }
     let phoff = read_u64(image, 32) as usize;
     let phentsize = read_u16(image, 54) as usize;
     let phnum = read_u16(image, 56) as usize;
-    if phentsize != PHDR_LEN
+    if phnum == 0
+        || phentsize != PHDR_LEN
         || phoff
             .checked_add(phentsize.saturating_mul(phnum))
             .map_or(true, |end| end > image.len())
@@ -108,6 +116,7 @@ pub fn parse_elf64(image: &[u8]) -> Result<ParsedElf, LoadError> {
 
     let empty = LoadSegment {
         vaddr: VirtAddr(0),
+        file_offset: 0,
         file_size: 0,
         mem_size: 0,
         flags: 0,
@@ -127,7 +136,9 @@ pub fn parse_elf64(image: &[u8]) -> Result<ParsedElf, LoadError> {
                 || p_offset
                     .checked_add(p_filesz)
                     .map_or(true, |end| end > image.len())
-                || p_vaddr >= 0x0000_8000_0000_0000
+                || p_vaddr
+                    .checked_add(p_memsz as u64)
+                    .map_or(true, |end| end > 0x0000_8000_0000_0000)
             {
                 return Err(LoadError::BadLoadSegment);
             }
@@ -136,6 +147,7 @@ pub fn parse_elf64(image: &[u8]) -> Result<ParsedElf, LoadError> {
             }
             segments[count] = LoadSegment {
                 vaddr: VirtAddr(p_vaddr),
+                file_offset: p_offset,
                 file_size: p_filesz,
                 mem_size: p_memsz,
                 flags,
@@ -143,6 +155,9 @@ pub fn parse_elf64(image: &[u8]) -> Result<ParsedElf, LoadError> {
             count += 1;
         }
         idx += 1;
+    }
+    if count == 0 {
+        return Err(LoadError::NoLoadSegments);
     }
     Ok(ParsedElf {
         entry,
@@ -220,6 +235,21 @@ mod tests {
     #[test]
     fn elf_header_validation_rejects_bad_magic() {
         assert_eq!(validate_elf64(&[0; 128]), Err(LoadError::BadMagic));
+    }
+
+    #[test]
+    fn parser_records_load_segment_file_offset() {
+        let parsed = parse_elf64(&minimal_elf()).unwrap();
+        assert_eq!(parsed.segment_count, 1);
+        assert_eq!(parsed.segments[0].file_offset, 0);
+        assert_eq!(parsed.segments[0].mem_size, 0x2000);
+    }
+
+    #[test]
+    fn parser_rejects_elf_without_load_segments() {
+        let mut image = minimal_elf();
+        image[64..68].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(parse_elf64(&image), Err(LoadError::NoLoadSegments));
     }
 
     #[test]

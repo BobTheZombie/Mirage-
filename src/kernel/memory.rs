@@ -1115,6 +1115,32 @@ pub fn mmap_user_fixed(
     None
 }
 
+pub fn find_user_mapping(
+    address_space_root: u64,
+    user_address: u64,
+    length: usize,
+    write: bool,
+) -> Option<MappedRegion> {
+    let table = ADDRESS_SPACES.lock();
+    let mut idx = 0usize;
+    while idx < MAX_USER_MAPPINGS {
+        if let Some(mapping) = table.mappings[idx] {
+            if mapping.contains(address_space_root, user_address, length, write) {
+                return Some(MappedRegion {
+                    owner: mapping.owner,
+                    ptr: NonNull::new(mapping.kernel_start as *mut u8)?,
+                    length: mapping.length,
+                    requested: mapping.length,
+                    protection: mapping.protection,
+                    kind: AllocationKind::Mapping,
+                });
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
 pub fn munmap(region: MappedRegion) -> bool {
     munmap_ptr_for(region.owner, region.ptr, region.length)
 }

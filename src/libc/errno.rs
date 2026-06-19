@@ -68,6 +68,7 @@ pub(super) fn libc_errno(error: KernelError) -> i32 {
         KernelError::InvalidPointer => MIRAGE_EFAULT,
         KernelError::TimedOut => MIRAGE_ETIMEDOUT,
         KernelError::Filesystem(error) => libc_vfs_errno(error),
+        KernelError::Loader(_) => MIRAGE_EINVAL,
     }
 }
 
