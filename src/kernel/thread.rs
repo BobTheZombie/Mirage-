@@ -163,6 +163,34 @@ impl CpuContext {
         }
     }
 
+    pub fn canonical_user_entry_frame(
+        instruction_pointer: u64,
+        stack_pointer: u64,
+    ) -> Option<Self> {
+        if !is_canonical_user_address(instruction_pointer)
+            || !is_canonical_user_address(stack_pointer)
+        {
+            return None;
+        }
+        let mut context = Self::new(instruction_pointer, stack_pointer, PrivilegeMode::User);
+        context.sanitize_user_return_frame()?;
+        Some(context)
+    }
+
+    pub fn sanitize_user_return_frame(&mut self) -> Option<()> {
+        if self.privilege_mode != PrivilegeMode::User
+            || self.cs != USER_CODE_SELECTOR
+            || self.ss != USER_DATA_SELECTOR
+            || !is_canonical_user_address(self.rip)
+            || !is_canonical_user_address(self.rsp)
+        {
+            return None;
+        }
+        self.rflags = (self.rflags | 0x202) & !(1 << 8); // keep IF/reserved bit, clear TF
+        self.trap_vector = 0;
+        Some(())
+    }
+
     pub const fn syscall_number(&self) -> u64 {
         self.rax
     }
@@ -216,7 +244,7 @@ pub struct ThreadControlBlock {
 }
 
 impl ThreadControlBlock {
-    pub const fn new(
+    pub fn new(
         id: ThreadId,
         process: ProcessId,
         entry_point: u64,
@@ -230,7 +258,9 @@ impl ThreadControlBlock {
             state: ThreadState::Ready,
             entry_point,
             stack_pointer,
-            context: CpuContext::new(entry_point, stack_pointer, PrivilegeMode::User),
+            context: CpuContext::canonical_user_entry_frame(entry_point, stack_pointer).unwrap_or(
+                CpuContext::new(entry_point, stack_pointer, PrivilegeMode::User),
+            ),
             cpu_time: 0,
             signal_mask: SignalMask::EMPTY,
             active_signal: None,
@@ -270,7 +300,10 @@ impl ThreadControlBlock {
     pub fn replace_exec_image(&mut self, entry_point: u64, stack_pointer: u64) {
         self.entry_point = entry_point;
         self.stack_pointer = stack_pointer;
-        self.context = CpuContext::new(entry_point, stack_pointer, PrivilegeMode::User);
+        self.context =
+            CpuContext::canonical_user_entry_frame(entry_point, stack_pointer).unwrap_or(
+                CpuContext::new(entry_point, stack_pointer, PrivilegeMode::User),
+            );
         self.tls_base = 0;
         self.fs_base = 0;
         self.gs_base = 0;
@@ -325,4 +358,8 @@ impl ThreadControlBlock {
     pub fn accumulate_cpu_time(&mut self, ticks: u64) {
         self.cpu_time = self.cpu_time.saturating_add(ticks as u128);
     }
+}
+
+const fn is_canonical_user_address(address: u64) -> bool {
+    address < 0x0000_8000_0000_0000
 }

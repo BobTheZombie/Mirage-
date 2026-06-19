@@ -75,7 +75,9 @@ use crate::kernel::services::registry::{
 use crate::kernel::syscall::{
     SyscallContext, SyscallErrorCode, SyscallNumber, MIRAGE_SYSCALL_ERROR_BIT,
 };
-use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS};
+use crate::kernel::thread::{
+    CpuContext, PrivilegeMode, ThreadControlBlock, ThreadId, ThreadState, MAX_THREADS,
+};
 use crate::kernel::time::KERNEL_TIME;
 use crate::kernel::timer::{TimerError, TimerManager, MAX_PROCESS_TIMERS, MAX_SLEEP_ENTRIES};
 use crate::subkernel::{
@@ -1011,14 +1013,38 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if !self.mtss_initialized {
             return Err(KernelError::InvalidArgument);
         }
-        let entry = crate::kernel::userspace::validate_elf64(image)
+        let parsed = crate::kernel::userspace::elf_loader::parse_elf64(image)
             .map_err(|_| KernelError::Filesystem(VfsError::InvalidInput))?;
-        self.admit_pid1_through_mtss(entry.0)
+        self.admit_pid1_through_mtss(image, parsed)
     }
 
-    fn admit_pid1_through_mtss(&mut self, entry_point: u64) -> KernelResult<ProcessId> {
-        let address_space = mirage_mtss::AddressSpaceId::new(CoreTaskId::FIRST_USERSPACE.raw());
-        let user_stack = StackRange::new(0x0000_7fff_fee0_0000, 0x0000_7fff_ff00_0000);
+    fn admit_pid1_through_mtss(
+        &mut self,
+        image: &[u8],
+        parsed: crate::kernel::userspace::elf_loader::ParsedElf,
+    ) -> KernelResult<ProcessId> {
+        #[cfg(test)]
+        let _ = image;
+        let entry_point = parsed.entry.0;
+        #[cfg(test)]
+        let address_space_root =
+            mirage_mtss::AddressSpaceId::new(CoreTaskId::FIRST_USERSPACE.raw()).raw();
+        #[cfg(not(test))]
+        let address_space_root =
+            crate::kernel::memory::create_user_address_space(ProcessId::new(1))
+                .ok_or(KernelError::AllocationFailed)?;
+        let address_space = mirage_mtss::AddressSpaceId::new(address_space_root);
+        #[cfg(not(test))]
+        self.map_pid1_elf_image(ProcessId::new(1), address_space_root, image, parsed)?;
+        #[cfg(not(test))]
+        let stack_top =
+            crate::kernel::userspace::memory::allocate_user_stack(address_space, 0x20_000)
+                .map_err(|_| KernelError::AllocationFailed)?
+                .top
+                .0;
+        #[cfg(test)]
+        let stack_top = 0x0000_7fff_ff00_0000;
+        let user_stack = StackRange::new(0x0000_7fff_fee0_0000, stack_top);
         let kernel_stack_top = x86_64::kernel_stack_top(0).saturating_sub(0x4000);
         let mtss_task = self
             .mtss_core
@@ -1028,7 +1054,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                     entry: entry_point,
                     address_space,
                     user_stack,
-                    cr3: address_space.raw(),
+                    cr3: address_space_root,
                 },
                 StackRange::new(kernel_stack_top.saturating_sub(0x4000), kernel_stack_top),
             )
@@ -1045,9 +1071,104 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         }
         let index = self.locate_process(pid)?;
         if let Some(pcb) = self.process_table[index].as_mut() {
-            pcb.address_space_root = address_space.raw();
+            pcb.address_space_root = address_space_root;
         }
+        self.configure_pid1_user_frame(pid, entry_point, stack_top)?;
         Ok(pid)
+    }
+
+    fn configure_pid1_user_frame(
+        &mut self,
+        pid: ProcessId,
+        entry_point: u64,
+        stack_pointer: u64,
+    ) -> KernelResult<()> {
+        let mut idx = 0usize;
+        while idx < Self::THREAD_CAPACITY {
+            if let Some(tcb) = self.thread_table[idx].as_mut() {
+                if tcb.process == pid {
+                    tcb.entry_point = entry_point;
+                    tcb.stack_pointer = stack_pointer;
+                    tcb.context = CpuContext::new(entry_point, stack_pointer, PrivilegeMode::User);
+                    tcb.context.rdi = 0;
+                    tcb.context.rsi = 0;
+                    tcb.context.rdx = 0;
+                    return Ok(());
+                }
+            }
+            idx += 1;
+        }
+        Err(KernelError::UnknownThread)
+    }
+
+    fn map_pid1_elf_image(
+        &mut self,
+        owner: ProcessId,
+        address_space_root: u64,
+        image: &[u8],
+        parsed: crate::kernel::userspace::elf_loader::ParsedElf,
+    ) -> KernelResult<()> {
+        let mut idx = 0usize;
+        while idx < parsed.segment_count {
+            let segment = parsed.segments[idx];
+            let (base, len) = crate::kernel::userspace::elf_loader::segment_page_bounds(
+                segment.vaddr,
+                segment.mem_size,
+            );
+            let protection =
+                MemoryProtection::new(true, segment.flags & 0x2 != 0, segment.flags & 0x1 != 0);
+            let mapped = crate::kernel::memory::mmap_user_fixed(
+                owner,
+                address_space_root,
+                base.0,
+                len,
+                protection,
+            )
+            .ok_or(KernelError::AllocationFailed)?;
+
+            let page_offset = segment.vaddr.0.saturating_sub(base.0) as usize;
+            let file_start = self.elf_segment_file_offset(image, segment)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    image.as_ptr().add(file_start),
+                    mapped.as_ptr().add(page_offset),
+                    segment.file_size,
+                );
+            }
+            idx += 1;
+        }
+        Ok(())
+    }
+
+    fn elf_segment_file_offset(
+        &self,
+        image: &[u8],
+        segment: crate::kernel::userspace::elf_loader::LoadSegment,
+    ) -> KernelResult<usize> {
+        let phoff = u64::from_le_bytes(image[32..40].try_into().unwrap()) as usize;
+        let phentsize = u16::from_le_bytes(image[54..56].try_into().unwrap()) as usize;
+        let phnum = u16::from_le_bytes(image[56..58].try_into().unwrap()) as usize;
+        let mut idx = 0usize;
+        while idx < phnum {
+            let off = phoff + idx * phentsize;
+            if u32::from_le_bytes(image[off..off + 4].try_into().unwrap()) == 1 {
+                let p_vaddr = u64::from_le_bytes(image[off + 16..off + 24].try_into().unwrap());
+                let p_filesz =
+                    u64::from_le_bytes(image[off + 32..off + 40].try_into().unwrap()) as usize;
+                let p_memsz =
+                    u64::from_le_bytes(image[off + 40..off + 48].try_into().unwrap()) as usize;
+                if p_vaddr == segment.vaddr.0
+                    && p_filesz == segment.file_size
+                    && p_memsz == segment.mem_size
+                {
+                    return Ok(
+                        u64::from_le_bytes(image[off + 8..off + 16].try_into().unwrap()) as usize,
+                    );
+                }
+            }
+            idx += 1;
+        }
+        Err(KernelError::Filesystem(VfsError::InvalidInput))
     }
 
     pub fn mtss_pid1_task(&self) -> Option<CoreTask> {
@@ -3922,9 +4043,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                         *entry = None;
                         terminated = true;
                     } else {
-                        thread.mark_running();
                         run_outcome = x86_64::run_thread_slice(core_index, thread);
-                        thread.accumulate_cpu_time(1);
+                        if run_outcome != ThreadRunOutcome::UserEntryInvalid {
+                            thread.mark_running();
+                            thread.accumulate_cpu_time(1);
+                        }
                     }
                 }
             }
@@ -3951,6 +4074,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                     let _ = self.deliver_signal_checkpoint(scheduled.process, trap.thread);
                 }
                 ThreadRunOutcome::TimerPreempted | ThreadRunOutcome::TimeSliceComplete => {}
+                ThreadRunOutcome::UserEntryInvalid => {
+                    self.handle_isolation_fault(scheduled.process, IsolationError::PolicyViolation);
+                }
             }
 
             let mut requeue_thread = false;
