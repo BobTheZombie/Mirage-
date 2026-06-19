@@ -240,6 +240,7 @@ pub enum SyscallNumber {
     Futex = 241,
     SetThreadArea = 242,
     ArchPrctl = 243,
+    Yield = 244,
 }
 
 impl SyscallNumber {
@@ -338,6 +339,7 @@ impl SyscallNumber {
             241 => Some(Self::Futex),
             242 => Some(Self::SetThreadArea),
             243 => Some(Self::ArchPrctl),
+            244 => Some(Self::Yield),
             _ => None,
         }
     }
@@ -426,6 +428,7 @@ pub const MIRAGE_SYSCALL_CLONE: u64 = SyscallNumber::Clone.raw();
 pub const MIRAGE_SYSCALL_FUTEX: u64 = SyscallNumber::Futex.raw();
 pub const MIRAGE_SYSCALL_SET_THREAD_AREA: u64 = SyscallNumber::SetThreadArea.raw();
 pub const MIRAGE_SYSCALL_ARCH_PRCTL: u64 = SyscallNumber::ArchPrctl.raw();
+pub const MIRAGE_SYSCALL_YIELD: u64 = SyscallNumber::Yield.raw();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SyscallContext {

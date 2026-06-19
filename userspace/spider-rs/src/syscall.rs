@@ -3,9 +3,7 @@
 //! Keep these numbers synchronized with `src/kernel/syscall.rs`.  The older
 //! experimental Spider ABI used small numbers 1-4; the kernel table now exposes
 //! GetPid=0, Spawn=1, OpenAt=16, Close=17, Read=18, Write=19,
-//! Getdents64=25, Exit=102, and Wait4=103. Mirage does not have a
-//! dedicated userspace yield syscall yet, so `yield_now` remains a local CPU
-//! hint until MTSS exposes one.
+//! Getdents64=25, Exit=102, Wait4=103, and Yield=244.
 
 pub const SYS_GETPID: usize = 0;
 pub const SYS_WRITE: usize = 19;
@@ -16,6 +14,7 @@ pub const SYS_OPENAT: usize = 16;
 pub const SYS_CLOSE: usize = 17;
 pub const SYS_READ: usize = 18;
 pub const SYS_GETDENTS64: usize = 25;
+pub const SYS_YIELD: usize = 244;
 
 #[inline(always)]
 pub unsafe fn syscall0(number: usize) -> isize {
@@ -114,10 +113,7 @@ pub fn write(fd: usize, bytes: &[u8]) -> isize {
 }
 
 pub fn yield_now() {
-    // TODO(mtss): replace with a real MTSS yield syscall once the kernel ABI
-    // assigns one.  Do not issue the old experimental syscall number 3 here;
-    // that no longer maps to yield in the kernel table.
-    core::hint::spin_loop();
+    let _ = unsafe { syscall0(SYS_YIELD) };
 }
 
 pub fn getpid() -> isize {
