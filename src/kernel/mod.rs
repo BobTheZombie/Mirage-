@@ -701,6 +701,7 @@ pub enum KernelError {
     FileTableFull,
     Filesystem(VfsError),
     TimedOut,
+    Loader(crate::kernel::userspace::LoadError),
 }
 
 pub type KernelResult<T> = core::result::Result<T, KernelError>;
@@ -1014,7 +1015,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             return Err(KernelError::InvalidArgument);
         }
         let parsed = crate::kernel::userspace::elf_loader::parse_elf64(image)
-            .map_err(|_| KernelError::Filesystem(VfsError::InvalidInput))?;
+            .map_err(KernelError::Loader)?;
+        crate::kernel::userspace::elf_loader::validate_elf64(image).map_err(KernelError::Loader)?;
         self.admit_pid1_through_mtss(image, parsed)
     }
 
@@ -1037,14 +1039,23 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         #[cfg(not(test))]
         self.map_pid1_elf_image(ProcessId::new(1), address_space_root, image, parsed)?;
         #[cfg(not(test))]
-        let stack_top =
-            crate::kernel::userspace::memory::allocate_user_stack(address_space, 0x20_000)
-                .map_err(|_| KernelError::AllocationFailed)?
-                .top
-                .0;
+        let stack = crate::kernel::userspace::memory::allocate_user_stack(address_space, 0x20_000)
+            .map_err(|_| {
+                KernelError::Loader(crate::kernel::userspace::LoadError::StackBuildFailed)
+            })?;
+        #[cfg(not(test))]
+        let stack_top = self
+            .build_pid1_initial_stack(address_space_root, stack)
+            .map_err(KernelError::Loader)?;
         #[cfg(test)]
-        let stack_top = 0x0000_7fff_ff00_0000;
-        let user_stack = StackRange::new(0x0000_7fff_fee0_0000, stack_top);
+        let stack_top = 0x0000_7fff_feff_ffc8;
+        #[cfg(test)]
+        let stack = crate::kernel::userspace::memory::UserStack {
+            bottom: crate::kernel::userspace::memory::VirtAddr(0x0000_7fff_fee0_0000),
+            top: crate::kernel::userspace::memory::VirtAddr(0x0000_7fff_ff00_0000),
+            size: 0x20_000,
+        };
+        let user_stack = StackRange::new(stack.bottom.0, stack.top.0);
         let kernel_stack_top = x86_64::kernel_stack_top(0).saturating_sub(0x4000);
         let mtss_task = self
             .mtss_core
@@ -1124,13 +1135,15 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 len,
                 protection,
             )
-            .ok_or(KernelError::AllocationFailed)?;
+            .ok_or(KernelError::Loader(
+                crate::kernel::userspace::LoadError::MapSegmentFailed,
+            ))?;
 
             let page_offset = segment.vaddr.0.saturating_sub(base.0) as usize;
-            let file_start = self.elf_segment_file_offset(image, segment)?;
             unsafe {
+                core::ptr::write_bytes(mapped.as_ptr(), 0, mapped.length);
                 core::ptr::copy_nonoverlapping(
-                    image.as_ptr().add(file_start),
+                    image.as_ptr().add(segment.file_offset),
                     mapped.as_ptr().add(page_offset),
                     segment.file_size,
                 );
@@ -1140,35 +1153,40 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Ok(())
     }
 
-    fn elf_segment_file_offset(
+    fn build_pid1_initial_stack(
         &self,
-        image: &[u8],
-        segment: crate::kernel::userspace::elf_loader::LoadSegment,
-    ) -> KernelResult<usize> {
-        let phoff = u64::from_le_bytes(image[32..40].try_into().unwrap()) as usize;
-        let phentsize = u16::from_le_bytes(image[54..56].try_into().unwrap()) as usize;
-        let phnum = u16::from_le_bytes(image[56..58].try_into().unwrap()) as usize;
-        let mut idx = 0usize;
-        while idx < phnum {
-            let off = phoff + idx * phentsize;
-            if u32::from_le_bytes(image[off..off + 4].try_into().unwrap()) == 1 {
-                let p_vaddr = u64::from_le_bytes(image[off + 16..off + 24].try_into().unwrap());
-                let p_filesz =
-                    u64::from_le_bytes(image[off + 32..off + 40].try_into().unwrap()) as usize;
-                let p_memsz =
-                    u64::from_le_bytes(image[off + 40..off + 48].try_into().unwrap()) as usize;
-                if p_vaddr == segment.vaddr.0
-                    && p_filesz == segment.file_size
-                    && p_memsz == segment.mem_size
-                {
-                    return Ok(
-                        u64::from_le_bytes(image[off + 8..off + 16].try_into().unwrap()) as usize,
-                    );
-                }
-            }
-            idx += 1;
+        address_space_root: u64,
+        stack: crate::kernel::userspace::memory::UserStack,
+    ) -> Result<u64, crate::kernel::userspace::LoadError> {
+        let region = crate::kernel::memory::find_user_mapping(
+            address_space_root,
+            stack.bottom.0,
+            stack.size,
+            true,
+        )
+        .ok_or(crate::kernel::userspace::LoadError::StackBuildFailed)?;
+        let mut sp = stack.top.0 & !0xf;
+        let argv = b"spider-rs\0";
+        sp = sp
+            .checked_sub(argv.len() as u64)
+            .ok_or(crate::kernel::userspace::LoadError::StackBuildFailed)?;
+        let argv0 = sp;
+        let argv_offset = (argv0 - stack.bottom.0) as usize;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                argv.as_ptr(),
+                region.as_ptr().add(argv_offset),
+                argv.len(),
+            );
         }
-        Err(KernelError::Filesystem(VfsError::InvalidInput))
+        sp &= !0xf;
+        push_user_u64(region.as_ptr(), stack.bottom.0, &mut sp, 0)?; // AT_NULL
+        push_user_u64(region.as_ptr(), stack.bottom.0, &mut sp, 0)?; // auxv value
+        push_user_u64(region.as_ptr(), stack.bottom.0, &mut sp, 0)?; // envp terminator
+        push_user_u64(region.as_ptr(), stack.bottom.0, &mut sp, 0)?; // argv terminator
+        push_user_u64(region.as_ptr(), stack.bottom.0, &mut sp, argv0)?;
+        push_user_u64(region.as_ptr(), stack.bottom.0, &mut sp, 1)?;
+        Ok(sp)
     }
 
     pub fn mtss_pid1_task(&self) -> Option<CoreTask> {
@@ -4846,6 +4864,7 @@ fn syscall_error_code(error: KernelError) -> SyscallErrorCode {
         KernelError::FileTableFull => SyscallErrorCode::OutOfMemory,
         KernelError::Filesystem(error) => vfs_syscall_error_code(error),
         KernelError::TimedOut => SyscallErrorCode::TimedOut,
+        KernelError::Loader(_) => SyscallErrorCode::InvalidArgument,
     }
 }
 
@@ -5623,6 +5642,28 @@ fn wait_selector_matches(
     } else {
         child_pgid.raw() == (-selector) as u64
     }
+}
+
+fn push_user_u64(
+    kernel_base: *mut u8,
+    user_base: u64,
+    sp: &mut u64,
+    value: u64,
+) -> Result<(), crate::kernel::userspace::LoadError> {
+    *sp = sp
+        .checked_sub(core::mem::size_of::<u64>() as u64)
+        .ok_or(crate::kernel::userspace::LoadError::StackBuildFailed)?;
+    let offset = sp
+        .checked_sub(user_base)
+        .ok_or(crate::kernel::userspace::LoadError::StackBuildFailed)? as usize;
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            value.to_le_bytes().as_ptr(),
+            kernel_base.add(offset),
+            core::mem::size_of::<u64>(),
+        );
+    }
+    Ok(())
 }
 
 fn map_core_mtss_error(error: CoreMtssError) -> KernelError {
