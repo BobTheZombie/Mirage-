@@ -182,7 +182,7 @@ impl PhaseState {
             Self::Stub => "Stub",
             Self::Skipped => "Skipped",
             Self::Failed => "Failed",
-            Self::Running => "Runnable",
+            Self::Running => "Running",
         }
     }
 

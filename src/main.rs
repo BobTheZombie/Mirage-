@@ -9,7 +9,8 @@ use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
     boot_phase_detected, boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_running,
-    boot_phase_start, boot_phase_stub, boot_phase_validate_no_unresolved, BootPhase,
+    boot_phase_skipped, boot_phase_start, boot_phase_stub, boot_phase_validate_no_unresolved,
+    BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
@@ -28,15 +29,20 @@ use mirage::supervisor::Supervisor;
 #[cfg(not(feature = "emergency-boot"))]
 #[derive(Clone, Copy, Debug, Default)]
 struct BootRuntimeDeps {
+    root_fs_resolved: bool,
     root_fs_online: bool,
     supervisor_online: bool,
     mtss_online: bool,
     spider_rt_available: bool,
+    spider_found: bool,
+    spider_elf_ok: bool,
     userspace_loader_started: bool,
     userspace_launch_deferred: bool,
     pid1_created: bool,
     pid1_runnable: bool,
     dispatcher_started: bool,
+    dispatcher_pending: bool,
+    idleloop_started: bool,
 }
 
 #[cfg(not(feature = "emergency-boot"))]
@@ -44,6 +50,16 @@ struct BootRuntimeDeps {
 enum Pid1LaunchState {
     Deferred(&'static str),
     Runnable,
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+enum BootContinueResult {
+    DispatcherStarted,
+    DispatcherPending(&'static str),
+    RootFsUnavailable(&'static str),
+    Fatal(&'static str),
 }
 
 #[cfg(not(feature = "emergency-boot"))]
@@ -97,10 +113,11 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         }
     };
     boot_phase_ok(BootPhase::UserspaceLoader);
+    boot_phase_start(BootPhase::SpiderRs);
     boot_phase_ok(BootPhase::SpiderRs);
+    deps.spider_found = true;
     mirage::kprintln!("SPIDER-RS [FOUND]");
 
-    boot_phase_start(BootPhase::SpiderRs);
     let report = supervisor.launch_spider_rs_pid1_checked(
         kernel,
         &spider_image[..len],
@@ -113,6 +130,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         },
     )?;
     deps.userspace_launch_deferred = false;
+    deps.spider_elf_ok = true;
     deps.pid1_created = true;
     deps.pid1_runnable = true;
     boot_phase_ok(BootPhase::SpiderRs);
@@ -134,6 +152,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     mirage::kprintln!("PID1 [CREATED]");
     mirage::kprintln!("PID1 [RUNNABLE]");
     deps.dispatcher_started = false;
+    deps.dispatcher_pending = true;
     mirage::kprintln!("SYSTEM DISPATCHER [PENDING: user-mode transition not implemented]");
     mirage::kprintln!("M1 TERMINAL [PENDING: dispatcher child launch not implemented]");
     mirage::kprintln!(
@@ -148,6 +167,56 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     // launch and the console ABI exist.
     mirage::kprintln!("Userspace [Started: bootstrap dispatcher mode]");
     Ok(Pid1LaunchState::Runnable)
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn continue_after_mtss_online<const NPROC: usize, const MSG_DEPTH: usize>(
+    deps: &mut BootRuntimeDeps,
+    supervisor: &Supervisor,
+    kernel: &mut Kernel<NPROC, MSG_DEPTH>,
+    boot_runtime: Option<&mirage::kernel::boot_runtime::BootRuntimeRamFs>,
+    spider_image: &mut [u8],
+) -> BootContinueResult {
+    if !deps.mtss_online {
+        return BootContinueResult::Fatal("MTSS not online after MTSS transition");
+    }
+
+    deps.root_fs_resolved = true;
+    if !deps.root_fs_online {
+        boot_phase_skipped(BootPhase::UserspaceLoader, "rootfs unavailable");
+        boot_phase_skipped(BootPhase::SpiderRs, "rootfs unavailable");
+        boot_phase_skipped(BootPhase::Pid1, "rootfs unavailable");
+        boot_phase_stub(BootPhase::SystemDispatcher, "PENDING: rootfs unavailable");
+        boot_phase_stub(BootPhase::Userspace, "SKIPPED: rootfs unavailable");
+        mirage::kprintln!("USERSPACE LOADER [SKIPPED: rootfs unavailable]");
+        mirage::kprintln!("SPIDER-RS [SKIPPED: rootfs unavailable]");
+        mirage::kprintln!("SYSTEM DISPATCHER [PENDING: rootfs unavailable]");
+        return BootContinueResult::RootFsUnavailable("rootfs unavailable");
+    }
+
+    match maybe_launch_pid1(deps, supervisor, kernel, boot_runtime, spider_image) {
+        Ok(Pid1LaunchState::Runnable) => {
+            BootContinueResult::DispatcherPending("user-mode transition not implemented")
+        }
+        Ok(Pid1LaunchState::Deferred(reason)) => {
+            boot_phase_skipped(BootPhase::UserspaceLoader, reason);
+            boot_phase_stub(BootPhase::Userspace, reason);
+            boot_phase_stub(BootPhase::SystemDispatcher, reason);
+            mirage::kprintln!("USERSPACE LOADER [SKIPPED: {}]", reason);
+            mirage::kprintln!("SYSTEM DISPATCHER [PENDING: {}]", reason);
+            BootContinueResult::DispatcherPending(reason)
+        }
+        Err(error) => {
+            boot_phase_failed(BootPhase::Userspace, "PID1 launch failed");
+            boot_phase_stub(
+                BootPhase::SystemDispatcher,
+                "PENDING: Spider-rs PID1 launch failed",
+            );
+            mirage::kprintln!("Spider-rs PID 1 not launched: {:?}", error);
+            mirage::kprintln!("SYSTEM DISPATCHER [PENDING: Spider-rs PID1 launch failed]");
+            BootContinueResult::DispatcherPending("Spider-rs PID1 launch failed")
+        }
+    }
 }
 
 #[no_mangle]
@@ -233,12 +302,15 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             match kernel.mount_root_from_boot_sources(boot_info.modules) {
                 Ok(source) => {
                     boot_phase_ok(BootPhase::RootFs);
+                    boot_deps.root_fs_resolved = true;
                     boot_deps.root_fs_online = true;
-                    mirage::kprintln!("Root FS [Ok]");
+                    mirage::kprintln!("ROOT FS [OK]");
                     mirage::kprintln!("root mount attempt succeeded: {:?}", source);
                 }
                 Err(error) => {
-                    boot_phase_failed(BootPhase::RootFs, "root mount failed");
+                    boot_deps.root_fs_resolved = true;
+                    boot_phase_failed(BootPhase::RootFs, "no root source configured");
+                    mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
                     mirage::kprintln!("root mount attempt failed: {:?}", error);
                 }
             }
@@ -290,12 +362,15 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             match kernel.mount_root_from_boot_sources(boot_info.modules) {
                 Ok(source) => {
                     boot_phase_ok(BootPhase::RootFs);
+                    boot_deps.root_fs_resolved = true;
                     boot_deps.root_fs_online = true;
-                    mirage::kprintln!("Root FS [Ok]");
+                    mirage::kprintln!("ROOT FS [OK]");
                     mirage::kprintln!("root mount attempt succeeded: {:?}", source);
                 }
                 Err(error) => {
-                    boot_phase_failed(BootPhase::RootFs, "root mount failed");
+                    boot_deps.root_fs_resolved = true;
+                    boot_phase_failed(BootPhase::RootFs, "no root source configured");
+                    mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
                     mirage::kprintln!("root mount attempt failed: {:?}", error);
                 }
             }
@@ -399,31 +474,40 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         static SPIDER_BOOTRT_IMAGE: mirage::kernel::sync::SpinLock<[u8; 1024 * 1024]> =
             mirage::kernel::sync::SpinLock::new([0; 1024 * 1024]);
         let mut spider_image = SPIDER_BOOTRT_IMAGE.lock();
-        match maybe_launch_pid1(
+        let continuation = continue_after_mtss_online(
             &mut boot_deps,
             &supervisor,
             &mut kernel,
             boot_runtime.as_ref(),
             &mut spider_image[..],
-        ) {
-            Ok(Pid1LaunchState::Runnable) => {}
-            Ok(Pid1LaunchState::Deferred(reason)) => {
-                boot_phase_stub(BootPhase::Userspace, reason);
-                mirage::kprintln!("userspace init launch deferred: {}", reason);
+        );
+        match continuation {
+            BootContinueResult::DispatcherStarted => {
+                mirage::kprintln!("SYSTEM DISPATCHER [STARTED]");
             }
-            Err(error) => {
-                boot_phase_failed(BootPhase::Userspace, "PID1 launch failed");
-                boot_phase_stub(
-                    BootPhase::SpiderRs,
-                    "Spider-rs ELF/rootfs or ring-3 entry path unavailable",
+            BootContinueResult::DispatcherPending(reason) => {
+                mirage::kprintln!(
+                    "post-MTSS continuation resolved: dispatcher pending: {}",
+                    reason
                 );
-                mirage::kprintln!("Spider-rs PID 1 not launched: {:?}", error);
+            }
+            BootContinueResult::RootFsUnavailable(reason) => {
+                mirage::kprintln!(
+                    "post-MTSS continuation resolved: rootfs unavailable: {}",
+                    reason
+                );
+            }
+            BootContinueResult::Fatal(reason) => {
+                boot_phase_failed(BootPhase::SystemDispatcher, reason);
+                mirage::kprintln!("post-MTSS continuation fatal: {}", reason);
             }
         }
         boot_phase_start(BootPhase::BootScreen);
         boot_phase_ok(BootPhase::BootScreen);
         boot_phase_start(BootPhase::IdleLoop);
         boot_phase_running(BootPhase::IdleLoop);
+        boot_deps.idleloop_started = true;
+        mirage::kprintln!("IDLELOOP [RUNNING]");
         boot_phase_validate_no_unresolved();
         let mut observed_timer_ticks = x86_64::timer_ticks();
         loop {
