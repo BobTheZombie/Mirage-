@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "hw-framebuffer")]
 const TITLE: &str = "GNU/MIRAGE";
 #[cfg(feature = "hw-framebuffer")]
-const SUBTITLE: &str = "Mirage Boot Milestone 1.1";
+const SUBTITLE: &str = "MIRAGE BOOT MILESTONE 1.1";
 #[cfg(feature = "hw-framebuffer")]
 const PROMPT: &str = "Press Esc for Debug Shell";
 #[cfg(feature = "hw-framebuffer")]
@@ -62,19 +62,19 @@ fn render_framebuffer(manager: &BootPhaseManager) {
     framebuffer_console::write_colored(SUBTITLE, RgbColor::WHITE);
     framebuffer_console::write_colored("\n\n", RgbColor::WHITE);
 
-    render_named_group(manager, "Core", &CORE_SCREEN_PHASES);
+    render_named_group(manager, "CORE", &CORE_SCREEN_PHASES);
     framebuffer_console::write_colored("\n", RgbColor::WHITE);
-    render_named_group(manager, "Storage", &STORAGE_SCREEN_PHASES);
+    render_named_group(manager, "STORAGE", &STORAGE_SCREEN_PHASES);
     framebuffer_console::write_colored("\n", RgbColor::WHITE);
-    render_named_group(manager, "Input", &INPUT_SCREEN_PHASES);
+    render_named_group(manager, "INPUT", &INPUT_SCREEN_PHASES);
     framebuffer_console::write_colored("\n", RgbColor::WHITE);
-    render_named_group(manager, "AMD/Ryzen", &AMD_RYZEN_SCREEN_PHASES);
+    render_named_group(manager, "AMD/RYZEN", &AMD_RYZEN_SCREEN_PHASES);
     framebuffer_console::write_colored("\n", RgbColor::WHITE);
-    render_named_group(manager, "Services", &SERVICE_SCREEN_PHASES);
+    render_named_group(manager, "SERVICES", &SERVICE_SCREEN_PHASES);
 
-    framebuffer_console::write_colored("\nBoot Progress\n", RgbColor::WHITE);
+    framebuffer_console::write_colored("\nBOOT PROGRESS ", RgbColor::WHITE);
     fb_progress_bar(manager.progress_percent(), manager.has_failed());
-    framebuffer_console::write_colored("\n\nCurrent Phase:\n", RgbColor::WHITE);
+    framebuffer_console::write_colored("\n\nCURRENT PHASE: ", RgbColor::WHITE);
     framebuffer_console::write_colored(manager.current_phase.friendly_name(), RgbColor::YELLOW);
     framebuffer_console::write_colored("\n\n", RgbColor::WHITE);
     framebuffer_console::write_colored(PROMPT, RgbColor::GRAY);

@@ -9,7 +9,7 @@ use mirage_fb::{BootFramebuffer, FramebufferMode, PixelFormat, PixelMasks};
 
 use crate::arch::x86_64::boot::{BootInfo, FramebufferInfo};
 use crate::kernel::sync::SpinLock;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 const DEFAULT_FOREGROUND: (u8, u8, u8) = (0xff, 0xff, 0xff);
 const DEFAULT_BACKGROUND: (u8, u8, u8) = (0x00, 0x00, 0x00);
@@ -48,6 +48,61 @@ const TAB_WIDTH: usize = 4;
 
 static CONSOLE: SpinLock<Option<FramebufferConsole>> = SpinLock::new(None);
 static BOOT_UI_CLEARED: AtomicBool = AtomicBool::new(false);
+static RENDER_MODE: AtomicU8 = AtomicU8::new(BootRenderMode::MilestoneUi as u8);
+
+/// Explicit framebuffer ownership mode during early boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BootRenderMode {
+    /// Default fast live milestone table. Normal log lines do not draw here.
+    MilestoneUi = 0,
+    /// Explicit raw framebuffer console mode.
+    FramebufferConsole = 1,
+    /// Panic/fatal fault screen owns the framebuffer.
+    FailureScreen = 2,
+    /// Interactive debug shell owns the framebuffer console.
+    DebugShell = 3,
+    /// Verbose diagnostic mode mirrors boot logs to framebuffer.
+    VerboseFramebufferLog = 4,
+}
+
+impl BootRenderMode {
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::FramebufferConsole,
+            2 => Self::FailureScreen,
+            3 => Self::DebugShell,
+            4 => Self::VerboseFramebufferLog,
+            _ => Self::MilestoneUi,
+        }
+    }
+}
+
+/// Current framebuffer renderer mode. Defaults to the milestone boot UI.
+pub fn render_mode() -> BootRenderMode {
+    BootRenderMode::from_u8(RENDER_MODE.load(Ordering::SeqCst))
+}
+
+/// Select a new framebuffer renderer owner.
+pub fn set_render_mode(mode: BootRenderMode) {
+    RENDER_MODE.store(mode as u8, Ordering::SeqCst);
+}
+
+/// True when normal log lines may be mirrored into the framebuffer text console.
+pub fn framebuffer_log_overlay_enabled() -> bool {
+    matches!(
+        render_mode(),
+        BootRenderMode::FramebufferConsole
+            | BootRenderMode::DebugShell
+            | BootRenderMode::VerboseFramebufferLog
+            | BootRenderMode::FailureScreen
+    )
+}
+
+/// True when the milestone UI owns the boot framebuffer.
+pub fn milestone_ui_active() -> bool {
+    matches!(render_mode(), BootRenderMode::MilestoneUi)
+}
 
 /// Initialize the early framebuffer console from Limine boot information.
 ///
@@ -64,7 +119,9 @@ pub fn init_from_boot_info(
 
     let mut console = FramebufferConsole::new(framebuffer)?;
     console.clear(DEFAULT_BACKGROUND);
-    let _ = console.write_str("GNU/Mirage framebuffer console ready\n");
+    if framebuffer_log_overlay_enabled() {
+        let _ = console.write_str("GNU/Mirage framebuffer console ready\n");
+    }
     *CONSOLE.lock() = Some(console);
     Ok(Some(framebuffer))
 }
@@ -187,6 +244,7 @@ pub fn clear_for_boot_ui() {
 
 /// Controlled clear for a deliberate firmware/driver mode switch.
 pub fn clear_for_mode_switch() {
+    set_render_mode(BootRenderMode::FramebufferConsole);
     crate::kernel::boot_diagnostics::log(
         crate::kernel::boot_diagnostics::BootLogLevel::Warn,
         "Framebuffer",
@@ -199,6 +257,7 @@ pub fn clear_for_mode_switch() {
 
 /// Controlled clear for explicit debug shell activation.
 pub fn clear_for_debug_shell() {
+    set_render_mode(BootRenderMode::DebugShell);
     crate::kernel::boot_diagnostics::log(
         crate::kernel::boot_diagnostics::BootLogLevel::Info,
         "Framebuffer",

@@ -22,7 +22,7 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
     #[cfg(feature = "hw-framebuffer")]
     {
         if crate::kernel::boot_diagnostics::DEFAULT_FB_LOG_OVERLAY
-            || !crate::kernel::boot_diagnostics::framebuffer_online()
+            || crate::arch::x86_64::framebuffer_console::framebuffer_log_overlay_enabled()
         {
             let mut framebuffer = FramebufferMirror;
             let _ = framebuffer.write_fmt(args);
