@@ -1,4 +1,11 @@
 use crate::units::LoadedUnit;
+#[cfg(target_os = "none")]
+use alloc::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    string::{String, ToString},
+    vec::Vec,
+};
+#[cfg(not(target_os = "none"))]
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

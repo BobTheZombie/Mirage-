@@ -6,6 +6,9 @@
 //! the userspace ELF loader validates/maps it, and MTSS schedules it as PID 1.
 //! The kernel must never call Spider-rs as a Rust function.
 
+#[cfg(target_os = "none")]
+extern crate alloc;
+
 pub mod log;
 pub mod service;
 pub mod start;
@@ -13,20 +16,16 @@ pub mod syscall;
 pub mod target;
 pub mod units;
 
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 pub mod graph;
 #[cfg(all(feature = "host-tools", not(target_os = "none")))]
 pub mod manager;
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 pub mod parser;
 #[cfg(all(feature = "host-tools", not(target_os = "none")))]
 pub mod process;
 
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 pub use graph::{DependencyError, StartupPlan};
 #[cfg(all(feature = "host-tools", not(target_os = "none")))]
 pub use manager::{ServiceOutcome, SpiderManager};
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 pub use parser::{parse_unit, UnitParseError};
 #[cfg(all(feature = "host-tools", not(target_os = "none")))]
 pub use process::{Pid, ProcessSpawner, SpawnError, StubSpawner};
