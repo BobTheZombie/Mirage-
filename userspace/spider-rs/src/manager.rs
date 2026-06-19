@@ -9,20 +9,15 @@ use std::path::Path;
 
 pub const DEFAULT_TARGET: &str = "default.target";
 pub const UNIT_SEARCH_PATHS: [&str; 3] = [
-    "/etc/spider/system/",
-    "/usr/lib/spider/system/",
-    "/run/spider/system/",
+    "/etc/spider/units/",
+    "/usr/lib/spider/units/",
+    "/run/spider/units/",
 ];
 
-const BUILTIN_UNITS: [(&str, &str); 5] = [
+const BUILTIN_UNITS: [(&str, &str); 3] = [
     ("basic.target", include_str!("../units/basic.target")),
-    (
-        "multi-user.target",
-        include_str!("../units/multi-user.target"),
-    ),
     ("default.target", include_str!("../units/default.target")),
-    ("shell.service", include_str!("../units/shell.service")),
-    ("getty.service", include_str!("../units/getty.service")),
+    ("m1-terminal.service", include_str!("../units/m1-terminal.service")),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,7 +134,7 @@ impl SpiderManager {
 
             let (state, message) = match self.units.get(name) {
                 Some(loaded) if loaded.unit.kind == UnitKind::Target => {
-                    (UnitState::Active, "target reached".to_string())
+                    (UnitState::Running, "target reached".to_string())
                 }
                 Some(loaded) if loaded.unit.kind == UnitKind::Service => {
                     match loaded.service.as_ref() {
@@ -193,13 +188,13 @@ fn start_service<S: ProcessSpawner>(exec_start: &str, spawner: &S) -> (UnitState
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     match spawner.spawn(path, &refs, &[]) {
         Ok(pid) if spawner.is_stub() => (
-            UnitState::Stub,
+            UnitState::Skipped,
             format!(
                 "stubbed ExecStart={exec_start}; no process executed (pid token {:?})",
                 pid
             ),
         ),
-        Ok(pid) => (UnitState::Active, format!("started with pid {}", pid.0)),
+        Ok(pid) => (UnitState::Running, format!("started with pid {}", pid.0)),
         Err(error) => (UnitState::Failed, error.to_string()),
     }
 }
@@ -256,7 +251,7 @@ mod tests {
         let outcomes = manager.start_plan(&plan, &spawner);
         assert!(outcomes
             .iter()
-            .any(|outcome| outcome.name == "shell.service" && outcome.state == UnitState::Stub));
+            .any(|outcome| outcome.name == "shell.service" && outcome.state == UnitState::Skipped));
         assert_eq!(spawner.entries().len(), 1);
     }
 
@@ -307,6 +302,6 @@ mod tests {
         ));
         assert!(outcomes
             .iter()
-            .any(|outcome| outcome.name == "default.target" && outcome.state == UnitState::Active));
+            .any(|outcome| outcome.name == "default.target" && outcome.state == UnitState::Running));
     }
 }

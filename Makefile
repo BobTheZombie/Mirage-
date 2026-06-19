@@ -19,6 +19,8 @@ CARGO_JSON_TARGET_SPEC_FLAG := $(shell RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARG
 UNSTABLE_OPTIONS_FLAG := -Z unstable-options
 KERNEL_ELF := target/x86_64-mirage/release/mirage-kernel
 SPIDER_RS_ELF := target/x86_64-mirage/release/spider-rs
+SPIDER_RSD_ELF := target/x86_64-mirage/release/spider-rsd
+M1_TERMINAL_ELF := target/x86_64-mirage/release/m1-terminal
 # Backward-compatible manual feature variables. Leave empty to use mirage.conf.
 KERNEL_FEATURES ?=
 QEMU_FEATURES ?=
@@ -37,13 +39,15 @@ build: kernel
 spider-rs: userspace-spider-rs
 	mkdir -p $(BUILD_DIR)/userspace
 	cp $(SPIDER_RS_ELF) $(BUILD_DIR)/userspace/spider-rs
+	cp $(SPIDER_RSD_ELF) $(BUILD_DIR)/userspace/spider-rsd
+	cp $(M1_TERMINAL_ELF) $(BUILD_DIR)/userspace/m1-terminal
 
 spider-rs-clean:
 	rm -f $(BUILD_DIR)/userspace/spider-rs
 	rm -rf $(BUILD_DIR)/spider-rt $(BUILD_DIR)/spider-rt.img
 
 spider-rs-check: rust-src check-rust-src $(TARGET_JSON)
-	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) check --release -p spider-rs --bin spider-rs --no-default-features \
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) check --release -p spider-rs --bins --no-default-features \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
 		$(UNSTABLE_OPTIONS_FLAG) \
@@ -51,7 +55,7 @@ spider-rs-check: rust-src check-rust-src $(TARGET_JSON)
 		-Z build-std-features=compiler-builtins-mem
 
 userspace-spider-rs: rust-src check-rust-src $(TARGET_JSON)
-	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release -p spider-rs --bin spider-rs --no-default-features \
+	RUSTC=$(RUSTC) RUSTC_BOOTSTRAP=$(RUSTC_BOOTSTRAP) $(CARGO) build --release -p spider-rs --bins --no-default-features \
 		--target $(TARGET_JSON) \
 		$(CARGO_JSON_TARGET_SPEC_FLAG) \
 		$(UNSTABLE_OPTIONS_FLAG) \
@@ -59,17 +63,15 @@ userspace-spider-rs: rust-src check-rust-src $(TARGET_JSON)
 		-Z build-std-features=compiler-builtins-mem
 
 install-spider-rs: spider-rs
-	mkdir -p $(BUILD_DIR)/rootfs/sbin $(BUILD_DIR)/rootfs/etc/spider/system
-	cp $(BUILD_DIR)/userspace/spider-rs $(BUILD_DIR)/rootfs/sbin/spider-rs
-	cp userspace/spider-rs/units/* $(BUILD_DIR)/rootfs/etc/spider/system/
+	mkdir -p $(BUILD_DIR)/rootfs/usr/bin $(BUILD_DIR)/rootfs/etc/spider/units $(BUILD_DIR)/rootfs/usr/lib/spider/units
+	cp $(BUILD_DIR)/userspace/m1-terminal $(BUILD_DIR)/rootfs/usr/bin/m1-terminal
+	cp userspace/spider-rs/units/default.target userspace/spider-rs/units/basic.target userspace/spider-rs/units/m1-terminal.service $(BUILD_DIR)/rootfs/etc/spider/units/
 
 spider-rt-tree: spider-rs
 	rm -rf $(BUILD_DIR)/spider-rt
-	mkdir -p $(BUILD_DIR)/spider-rt/sbin $(BUILD_DIR)/spider-rt/etc/spider
+	mkdir -p $(BUILD_DIR)/spider-rt/sbin
 	cp $(BUILD_DIR)/userspace/spider-rs $(BUILD_DIR)/spider-rt/sbin/spider-rs
-	cp userspace/spider-rs/units/default.target $(BUILD_DIR)/spider-rt/etc/spider/default.target
-	cp userspace/spider-rs/units/basic.target $(BUILD_DIR)/spider-rt/etc/spider/basic.target
-	cp userspace/spider-rs/units/emergency.target $(BUILD_DIR)/spider-rt/etc/spider/emergency.target
+	cp $(BUILD_DIR)/userspace/spider-rsd $(BUILD_DIR)/spider-rt/sbin/spider-rsd
 	printf 'name=spider-rt\nentry=/sbin/spider-rs\n' > $(BUILD_DIR)/spider-rt/manifest
 
 spider-rt-image: spider-rt-tree
@@ -78,7 +80,7 @@ spider-rt-image: spider-rt-tree
 runtime-images: spider-rt-image
 
 qemu-spider: install-spider-rs image
-	@echo "Spider-rs PID 1 ELF staged at $(BUILD_DIR)/rootfs/sbin/spider-rs; boot remains honest Stub until QFS/rootfs byte-read and ring-3 entry are wired."
+	@echo "Spider Runtime staged in $(BUILD_DIR)/spider-rt; m1-terminal staged at $(BUILD_DIR)/rootfs/usr/bin/m1-terminal; boot remains honest until ring-3 entry is wired."
 	MIRAGE_REUSE_IMAGE=1 MIRAGE_ISO_IMAGE=$(ISO_IMAGE) tools/run-qemu.sh
 
 mirageconfig:
@@ -231,13 +233,14 @@ $(LIMINE_BIN):
 
 image: config-generate iso
 
-iso: config-generate qemu-kernel runtime-images limine
+iso: config-generate qemu-kernel runtime-images install-spider-rs limine
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/limine $(ISO_ROOT)/EFI/BOOT
 	cp $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
 	./tools/verify-seed-rs-elf.sh $(KERNEL_ELF) $(ISO_ROOT)/boot/mirage-kernel
 	cp boot/limine/limine.conf $(ISO_ROOT)/boot/limine/limine.conf
 	cp $(BUILD_DIR)/spider-rt.img $(ISO_ROOT)/spider-rt.img
+	cp -a $(BUILD_DIR)/rootfs/. $(ISO_ROOT)/
 	cp $(LIMINE_DIR)/limine-bios.sys $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/limine-bios-cd.bin $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/

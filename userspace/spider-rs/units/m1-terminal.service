@@ -1,0 +1,12 @@
+[Unit]
+Name=M1 Terminal
+Description=Mirage M1.1 first terminal service
+After=basic.target
+Wants=basic.target
+
+[Service]
+ExecStart=/usr/bin/m1-terminal
+Restart=no
+
+[Install]
+WantedBy=default.target

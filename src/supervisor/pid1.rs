@@ -14,7 +14,7 @@ use crate::supervisor::Supervisor;
 pub const SPIDER_RS_RUNTIME_PATH: &str = "/spider-rt/sbin/spider-rs";
 
 /// First child app declared for Spider-rs once dispatcher child launching exists.
-pub const M1_TERMINAL_PATH: &str = "/spider-rt/bin/mirage-m1-terminal";
+pub const M1_TERMINAL_PATH: &str = "/usr/bin/m1-terminal";
 pub const M1_TERMINAL_OUTPUT: &str = "Mirage M1.1 System\nhello world\n";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -9,6 +9,8 @@
 pub const SYS_GETPID: usize = 0;
 pub const SYS_WRITE: usize = 19;
 pub const SYS_EXIT: usize = 102;
+pub const SYS_SPAWN: usize = 220;
+pub const SYS_WAIT: usize = 221;
 
 #[inline(always)]
 pub unsafe fn syscall0(number: usize) -> isize {
@@ -77,6 +79,32 @@ pub unsafe fn syscall3(number: usize, arg0: usize, arg1: usize, arg2: usize) -> 
     }
 }
 
+
+#[inline(always)]
+pub unsafe fn syscall4(number: usize, arg0: usize, arg1: usize, arg2: usize, arg3: usize) -> isize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: isize;
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") number as isize => ret,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            in("r10") arg3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+        ret
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (number, arg0, arg1, arg2, arg3);
+        -38
+    }
+}
+
 pub fn write(fd: usize, bytes: &[u8]) -> isize {
     unsafe { syscall3(SYS_WRITE, fd, bytes.as_ptr() as usize, bytes.len()) }
 }
@@ -97,4 +125,15 @@ pub fn exit(status: i32) -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+
+pub fn spawn(path: &str, argv: &[&str], _env: &[(&str, &str)]) -> Result<isize, isize> {
+    let ret = unsafe { syscall4(SYS_SPAWN, path.as_ptr() as usize, path.len(), argv.as_ptr() as usize, argv.len()) };
+    if ret >= 0 { Ok(ret) } else { Err(ret) }
+}
+
+pub fn wait(pid: isize) -> Result<isize, isize> {
+    let ret = unsafe { syscall1(SYS_WAIT, pid as usize) };
+    if ret >= 0 { Ok(ret) } else { Err(ret) }
 }

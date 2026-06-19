@@ -50,17 +50,17 @@ impl fmt::Display for UnitKind {
 /// Runtime state tracked by Spider-rs for a loaded unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnitState {
+    Loaded,
+    Waiting,
+    Starting,
+    Running,
+    Exited,
+    Failed,
+    Skipped,
     Inactive,
     Activating,
     Active,
-    Failed,
     Stopping,
-    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
-    Loaded,
-    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
-    Stub,
-    #[cfg(all(feature = "host-tools", not(target_os = "none")))]
-    Skipped,
 }
 
 /// Static v0 unit descriptor. Dynamic parsers can later populate equivalent records.
@@ -75,9 +75,12 @@ pub struct UnitDescriptor {
 }
 
 const EMPTY: &[&str] = &[];
-const BASIC_WANTS: &[&str] = &["spider-init.service"];
+const BASIC_WANTS: &[&str] = &[];
 const DEFAULT_AFTER: &[&str] = &["basic.target"];
-const DEFAULT_REQUIRES: &[&str] = &["basic.target"];
+const DEFAULT_REQUIRES: &[&str] = &[];
+const DEFAULT_WANTS: &[&str] = &["basic.target", "m1-terminal.service"];
+const M1_AFTER: &[&str] = &["basic.target"];
+const M1_WANTS: &[&str] = &["basic.target"];
 
 pub static BUILTIN_UNITS: &[UnitDescriptor] = &[
     UnitDescriptor {
@@ -94,7 +97,15 @@ pub static BUILTIN_UNITS: &[UnitDescriptor] = &[
         description: "Default Mirage userspace target",
         after: DEFAULT_AFTER,
         requires: DEFAULT_REQUIRES,
-        wants: EMPTY,
+        wants: DEFAULT_WANTS,
+    },
+    UnitDescriptor {
+        name: "m1-terminal.service",
+        kind: UnitKind::Service,
+        description: "Mirage M1.1 first terminal service",
+        after: M1_AFTER,
+        requires: EMPTY,
+        wants: M1_WANTS,
     },
     UnitDescriptor {
         name: "emergency.target",
