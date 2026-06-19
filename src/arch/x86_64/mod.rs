@@ -1193,9 +1193,14 @@ fn initialize_input_hardware(
     #[cfg(feature = "hw-ps2-keyboard")]
     {
         boot_phase_start(BootPhase::Ps2Keyboard);
-        match PS2_KEYBOARD_DRIVER.initialize(true) {
+        // Keep early PS/2 input non-blocking during architecture bring-up.
+        // IRQ1 delivery is not a boot dependency and enabling it here can leave
+        // QEMU servicing keyboard interrupts before the post-kernel pipeline
+        // reaches BootInfoApplied/Supervisor/MTSS.  Polling still allows the
+        // debug-shell hotkey path to drain scancodes without gating boot on the
+        // first key event.
+        match PS2_KEYBOARD_DRIVER.initialize(false) {
             Ok(()) => {
-                crate::arch::x86_64::pic::unmask_irq(1);
                 boot_phase_ok(BootPhase::Ps2Keyboard);
             }
             Err(error) => {

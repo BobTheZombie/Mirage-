@@ -1017,10 +1017,10 @@ pub fn boot_phase_render_screen() {
 }
 
 fn transition(phase: BootPhase, state: PhaseState, message: &'static str) {
-    let registered = {
+    let registered = crate::arch::x86_64::interrupts::without_interrupts(|| {
         let mut manager = BOOT_PHASE_MANAGER.lock();
         manager.transition(phase, state, message)
-    };
+    });
 
     if !registered {
         write_unregistered_transition_serial(phase, state);
@@ -1033,9 +1033,17 @@ fn transition(phase: BootPhase, state: PhaseState, message: &'static str) {
         write_transition_serial(phase, state, message);
     }
 
-    if cfg!(feature = "hw-framebuffer") && framebuffer_ready() {
+    if should_render_framebuffer_transition(phase, state) {
         boot_phase_render_screen();
     }
+}
+
+fn should_render_framebuffer_transition(phase: BootPhase, state: PhaseState) -> bool {
+    cfg!(feature = "hw-framebuffer")
+        && framebuffer_ready()
+        && (cfg!(feature = "bootdiag-framebuffer")
+            || matches!(state, PhaseState::Failed)
+            || matches!(phase, BootPhase::BootScreen | BootPhase::IdleLoop))
 }
 
 fn framebuffer_ready() -> bool {

@@ -18,6 +18,35 @@ pub fn enable() {
     }
 }
 
+/// Return whether maskable interrupts are enabled on the current CPU.
+#[inline(always)]
+pub fn are_enabled() -> bool {
+    #[cfg(not(test))]
+    unsafe {
+        let flags: u64;
+        core::arch::asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags));
+        flags & (1 << 9) != 0
+    }
+
+    #[cfg(test)]
+    {
+        false
+    }
+}
+
+/// Run a short critical section with maskable interrupts disabled, restoring
+/// the previous interrupt-enable state afterwards.
+#[inline(always)]
+pub fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
+    let was_enabled = are_enabled();
+    disable();
+    let result = f();
+    if was_enabled {
+        enable();
+    }
+    result
+}
+
 /// Halt the current CPU until the next external interrupt arrives.
 #[inline(always)]
 pub fn halt() {
