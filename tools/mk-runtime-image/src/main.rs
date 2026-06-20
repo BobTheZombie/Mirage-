@@ -9,7 +9,12 @@ const PATH_CAP: usize = 64;
 const ENTRY_SIZE: usize = 128;
 const MAX_FILES: usize = 16;
 
-struct Args {
+enum Command {
+    Build(BuildArgs),
+    List { image: PathBuf },
+}
+
+struct BuildArgs {
     tree: PathBuf,
     image: PathBuf,
     name: String,
@@ -21,48 +26,130 @@ struct FileEntry {
 }
 
 fn main() -> Result<(), String> {
-    let args = parse_args()?;
-    let mut files = Vec::new();
-    collect_files(&args.tree, &args.tree, &mut files).map_err(|e| e.to_string())?;
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    if files.is_empty() || files.len() > MAX_FILES {
-        return Err(format!("runtime image must contain 1..={MAX_FILES} files"));
+    match parse_args()? {
+        Command::Build(args) => {
+            let mut files = Vec::new();
+            collect_files(&args.tree, &args.tree, &mut files).map_err(|e| e.to_string())?;
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            if files.is_empty() || files.len() > MAX_FILES {
+                return Err(format!("runtime image must contain 1..={MAX_FILES} files"));
+            }
+            let image = build_image(&args, &files)?;
+            if let Some(parent) = args.image.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            fs::write(&args.image, &image).map_err(|e| e.to_string())?;
+            println!(
+                "wrote {} ({} bytes, {} files)",
+                args.image.display(),
+                image.len(),
+                files.len()
+            );
+            Ok(())
+        }
+        Command::List { image } => list_image(&image),
     }
-    let image = build_image(&args, &files)?;
-    if let Some(parent) = args.image.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(&args.image, &image).map_err(|e| e.to_string())?;
-    println!(
-        "wrote {} ({} bytes, {} files)",
-        args.image.display(),
-        image.len(),
-        files.len()
-    );
-    Ok(())
 }
 
-fn parse_args() -> Result<Args, String> {
+fn parse_args() -> Result<Command, String> {
     let mut positional = Vec::new();
     let mut name = String::from("spider-rt");
     let mut entry = String::from("/sbin/spider-rs");
     let mut it = env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--list" => {
+                let image = it.next().ok_or("--list requires an image path")?;
+                if it.next().is_some() {
+                    return Err("usage: mk-runtime-image --list <image>".into());
+                }
+                return Ok(Command::List {
+                    image: image.into(),
+                });
+            }
             "--name" => name = it.next().ok_or("--name requires a value")?,
             "--entry" => entry = it.next().ok_or("--entry requires a value")?,
             _ => positional.push(arg),
         }
     }
     if positional.len() != 2 {
-        return Err("usage: mk-runtime-image <tree> <image> [--name NAME] [--entry PATH]".into());
+        return Err("usage: mk-runtime-image <tree> <image> [--name NAME] [--entry PATH] | mk-runtime-image --list <image>".into());
     }
-    Ok(Args {
+    Ok(Command::Build(BuildArgs {
         tree: positional[0].clone().into(),
         image: positional[1].clone().into(),
         name,
         entry,
-    })
+    }))
+}
+
+fn list_image(image: &Path) -> Result<(), String> {
+    let bytes = fs::read(image).map_err(|e| e.to_string())?;
+    let files = parse_image_paths(&bytes)?;
+    for path in files {
+        println!("{path}");
+    }
+    Ok(())
+}
+
+fn parse_image_paths(image: &[u8]) -> Result<Vec<String>, String> {
+    if image.len() < HEADER_SIZE || &image[0..8] != MAGIC {
+        return Err("invalid runtime image signature".into());
+    }
+    let file_count = get_u32(image, 8)? as usize;
+    if file_count == 0 || file_count > MAX_FILES {
+        return Err(format!("runtime image must contain 1..={MAX_FILES} files"));
+    }
+    let entries_offset = get_u32(image, 12)? as usize;
+    let entries_end = entries_offset
+        .checked_add(file_count * ENTRY_SIZE)
+        .ok_or("runtime image entry table overflows")?;
+    if entries_end > image.len() {
+        return Err("runtime image entry table is out of bounds".into());
+    }
+
+    let mut paths = Vec::with_capacity(file_count);
+    for idx in 0..file_count {
+        let off = entries_offset + idx * ENTRY_SIZE;
+        let path_len = image[off] as usize;
+        if path_len == 0 || path_len > PATH_CAP {
+            return Err(format!("invalid path length in runtime image entry {idx}"));
+        }
+        let path_end = off + 16 + path_len;
+        if path_end > off + ENTRY_SIZE {
+            return Err(format!("runtime image entry {idx} path is out of bounds"));
+        }
+        let path = std::str::from_utf8(&image[off + 16..path_end])
+            .map_err(|_| format!("runtime image entry {idx} path is not UTF-8"))?;
+        if !path.starts_with('/') {
+            return Err(format!("runtime image entry {idx} is not absolute: {path}"));
+        }
+        let file_offset = get_u32(image, off + 4)? as usize;
+        let size = get_u32(image, off + 8)? as usize;
+        let expected_crc = get_u32(image, off + 12)?;
+        let file_end = file_offset
+            .checked_add(size)
+            .ok_or_else(|| format!("runtime image entry {idx} data overflows"))?;
+        if file_end > image.len() {
+            return Err(format!("runtime image entry {idx} data is out of bounds"));
+        }
+        let actual_crc = crc32(&image[file_offset..file_end]);
+        if actual_crc != expected_crc {
+            return Err(format!("runtime image entry {idx} CRC mismatch for {path}"));
+        }
+        paths.push(path.to_string());
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn get_u32(image: &[u8], offset: usize) -> Result<u32, String> {
+    let bytes: [u8; 4] = image
+        .get(offset..offset + 4)
+        .ok_or("runtime image integer is out of bounds")?
+        .try_into()
+        .unwrap();
+    Ok(u32::from_le_bytes(bytes))
 }
 
 fn collect_files(root: &Path, current: &Path, out: &mut Vec<FileEntry>) -> io::Result<()> {
@@ -87,7 +174,7 @@ fn collect_files(root: &Path, current: &Path, out: &mut Vec<FileEntry>) -> io::R
     Ok(())
 }
 
-fn build_image(args: &Args, files: &[FileEntry]) -> Result<Vec<u8>, String> {
+fn build_image(args: &BuildArgs, files: &[FileEntry]) -> Result<Vec<u8>, String> {
     let entries_offset = HEADER_SIZE + PATH_CAP;
     let data_offset = entries_offset + files.len() * ENTRY_SIZE;
     let mut image = vec![0u8; data_offset];

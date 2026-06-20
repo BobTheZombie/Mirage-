@@ -96,7 +96,16 @@ image_has_limine_bios_support() {
     case "$image" in
         *.iso|*.ISO)
             if command -v xorriso >/dev/null 2>&1; then
-                xorriso -indev "$image" -find /boot/limine/limine-bios.sys -print 2>/dev/null | grep -Fx '/boot/limine/limine-bios.sys' >/dev/null 2>&1 && return 0
+                if xorriso -indev "$image" -find /boot/limine/limine-bios.sys -print 2>/dev/null \
+                    | sed -n "s/^'\(\/.*\)'$/\1/p; /^\/.*$/p" \
+                    | grep -Fx '/boot/limine/limine-bios.sys' >/dev/null 2>&1; then
+                    return 0
+                fi
+                if xorriso -indev "$image" -find /boot/limine/limine-bios.sys 2>/dev/null \
+                    | sed -n "s/^'\(\/.*\)'$/\1/p; /^\/.*$/p" \
+                    | grep -Fx '/boot/limine/limine-bios.sys' >/dev/null 2>&1; then
+                    return 0
+                fi
             fi
             if command -v isoinfo >/dev/null 2>&1; then
                 isoinfo -i "$image" -f 2>/dev/null | grep -Ei '^/BOOT/LIMINE/LIMINE-BIOS\.SYS(;[0-9]+)?$' >/dev/null 2>&1 && return 0
