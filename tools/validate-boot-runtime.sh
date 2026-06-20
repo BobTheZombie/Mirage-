@@ -46,16 +46,38 @@ check_root_path_in_tree() {
     [ -f "$tree_root$path" ] && printf 'found rootfs staging: %s\n' "$path"
 }
 
+iso_contains_path() {
+    path=$1
+
+    if command -v xorriso >/dev/null 2>&1; then
+        xorriso -indev "$iso_image" -find "$path" -print 2>/dev/null | grep -Fx -- "$path" >/dev/null 2>&1 \
+            && return 0
+    fi
+
+    if command -v isoinfo >/dev/null 2>&1; then
+        # Prefer Rock Ridge names because the Mirage boot contract is expressed
+        # in POSIX paths. Strip ISO9660 version suffixes if the local isoinfo
+        # still reports them alongside Rock Ridge entries.
+        isoinfo -R -i "$iso_image" -f 2>/dev/null \
+            | sed 's/;[0-9][0-9]*$//' \
+            | grep -Fx -- "$path" >/dev/null 2>&1 \
+            && return 0
+    fi
+
+    return 1
+}
+
 check_root_path_in_iso() {
     path=$1
-    if command -v xorriso >/dev/null 2>&1 && [ -f "$iso_image" ]; then
-        xorriso -indev "$iso_image" -find "$path" -print 2>/dev/null | grep -Fx -- "$path" >/dev/null 2>&1 \
-            || err "ISO '$iso_image' is missing $path"
-        if xorriso -indev "$iso_image" -find /spider-rt/sbin/m1-terminal -print 2>/dev/null | grep -Fx /spider-rt/sbin/m1-terminal >/dev/null 2>&1; then
+    if [ -f "$iso_image" ]; then
+        if ! command -v xorriso >/dev/null 2>&1 && ! command -v isoinfo >/dev/null 2>&1; then
+            printf 'warning: xorriso/isoinfo unavailable; skipping ISO rootfs inspection for %s\n' "$path" >&2
+            return
+        fi
+        iso_contains_path "$path" || err "ISO '$iso_image' is missing $path"
+        if iso_contains_path /spider-rt/sbin/m1-terminal; then
             err "ISO '$iso_image' incorrectly contains /spider-rt/sbin/m1-terminal"
         fi
-    elif [ -f "$iso_image" ]; then
-        printf 'warning: xorriso unavailable; skipping ISO rootfs inspection for %s\n' "$path" >&2
     fi
 }
 
@@ -69,9 +91,8 @@ for path in \
     check_root_path_in_iso "$path"
  done
 
-if [ -f "$iso_image" ] && command -v xorriso >/dev/null 2>&1; then
-    xorriso -indev "$iso_image" -find /spider-rt.img -print 2>/dev/null | grep -Fx /spider-rt.img >/dev/null 2>&1 \
-        || err "ISO '$iso_image' is missing /spider-rt.img"
+if [ -f "$iso_image" ] && { command -v xorriso >/dev/null 2>&1 || command -v isoinfo >/dev/null 2>&1; }; then
+    iso_contains_path /spider-rt.img || err "ISO '$iso_image' is missing /spider-rt.img"
     [ "$fail" -eq 0 ] && printf 'found ISO module: /spider-rt.img\n'
 fi
 
