@@ -607,3 +607,16 @@ Required rootfs userland:
 /etc/spider/units/basic.target
 /etc/spider/units/m1-terminal.service
 ```
+
+---
+
+## Mirage Menuconfig Input Contract
+
+1. Menuconfig must support Up, Down, Left, and Right arrow keys.
+2. Arrow keys must not be interpreted as standalone Escape.
+3. ANSI sequences ESC [ A/B/C/D and ESC O A/B/C/D must decode correctly unless a terminal library handles them directly.
+4. Left and Right must have explicit menu semantics.
+5. Key decoding must be tested separately from menu state transitions.
+6. Menu navigation must be tested with a pure state-machine test when possible.
+7. Do not ship menuconfig changes without manually testing all four arrow keys.
+8. Do not leave terminal raw mode enabled after exit or panic.

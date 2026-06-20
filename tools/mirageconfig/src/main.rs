@@ -117,10 +117,6 @@ impl Schema {
         self.by_symbol.get(symbol).map(|idx| &self.options[*idx])
     }
 
-    fn index(&self, symbol: &str) -> Option<usize> {
-        self.by_symbol.get(symbol).copied()
-    }
-
     fn defaults(&self) -> BTreeMap<String, ConfigValue> {
         self.options
             .iter()
@@ -154,11 +150,18 @@ impl Schema {
                 errors.push(format!("{}: help is required", opt.symbol));
             }
             if !value_matches_type(&opt.ty, &opt.default) {
-                errors.push(format!("{}: default value does not match type {}", opt.symbol, opt.ty.as_str()));
+                errors.push(format!(
+                    "{}: default value does not match type {}",
+                    opt.symbol,
+                    opt.ty.as_str()
+                ));
             }
             if let ConfigValue::Tristate(value) = &opt.default {
                 if !matches!(value, 'y' | 'm' | 'n') {
-                    errors.push(format!("{}: tristate default must be y, m, or n", opt.symbol));
+                    errors.push(format!(
+                        "{}: tristate default must be y, m, or n",
+                        opt.symbol
+                    ));
                 }
             }
             for dep in opt
@@ -173,7 +176,11 @@ impl Schema {
             }
         }
         errors.extend(self.select_cycles());
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     fn select_cycles(&self) -> Vec<String> {
@@ -187,7 +194,10 @@ impl Schema {
             if let Some(pos) = visiting.iter().position(|item| item == symbol) {
                 let mut cycle = visiting[pos..].to_vec();
                 cycle.push(symbol.to_string());
-                errors.push(format!("circular select dependency: {}", cycle.join(" -> ")));
+                errors.push(format!(
+                    "circular select dependency: {}",
+                    cycle.join(" -> ")
+                ));
                 return;
             }
             if visited.contains(symbol) {
@@ -206,7 +216,13 @@ impl Schema {
         let mut errors = Vec::new();
         let mut visited = HashSet::new();
         for opt in &self.options {
-            visit(self, &opt.symbol, &mut Vec::new(), &mut visited, &mut errors);
+            visit(
+                self,
+                &opt.symbol,
+                &mut Vec::new(),
+                &mut visited,
+                &mut errors,
+            );
         }
         errors.sort();
         errors.dedup();
@@ -248,10 +264,17 @@ fn run() -> Result<(), String> {
         return Err(errors.join("\n"));
     }
 
-    let command_count = [args.menu, args.defconfig, args.oldconfig, args.savedefconfig, args.list, args.check]
-        .iter()
-        .filter(|enabled| **enabled)
-        .count();
+    let command_count = [
+        args.menu,
+        args.defconfig,
+        args.oldconfig,
+        args.savedefconfig,
+        args.list,
+        args.check,
+    ]
+    .iter()
+    .filter(|enabled| **enabled)
+    .count();
     if command_count != 1 {
         return Err("select exactly one of --menu, --defconfig, --oldconfig, --savedefconfig, --list, or --check".to_string());
     }
@@ -266,7 +289,9 @@ fn run() -> Result<(), String> {
         validate_values(&schema, &values, false)?;
         let output = args.output.as_deref().unwrap_or(&args.config);
         write_config(output, &schema, &values, false)?;
-        if args.generate { generate_artifacts(&schema, &values, &args.out_dir)?; }
+        if args.generate {
+            generate_artifacts(&schema, &values, &args.out_dir)?;
+        }
         return Ok(());
     }
 
@@ -275,20 +300,26 @@ fn run() -> Result<(), String> {
         validate_values(&schema, &parsed.values, true)?;
         let values = resolve_selects(&schema, parsed.values.clone())?;
         validate_values(&schema, &values, true)?;
-        if args.generate { generate_artifacts(&schema, &values, &args.out_dir)?; }
+        if args.generate {
+            generate_artifacts(&schema, &values, &args.out_dir)?;
+        }
         return Ok(());
     }
 
     if args.oldconfig {
         let mut values = schema.defaults();
         if let Some(parsed) = read_config_if_present(&args.config, &schema)? {
-            for (symbol, value) in parsed.values { values.insert(symbol, value); }
+            for (symbol, value) in parsed.values {
+                values.insert(symbol, value);
+            }
         }
         let values = resolve_selects(&schema, values)?;
         validate_values(&schema, &values, false)?;
         let output = args.output.as_deref().unwrap_or(&args.config);
         write_config(output, &schema, &values, false)?;
-        if args.generate { generate_artifacts(&schema, &values, &args.out_dir)?; }
+        if args.generate {
+            generate_artifacts(&schema, &values, &args.out_dir)?;
+        }
         return Ok(());
     }
 
@@ -296,16 +327,22 @@ fn run() -> Result<(), String> {
         let parsed = read_config(&args.config, &schema)?;
         let values = resolve_selects(&schema, parsed.values)?;
         validate_values(&schema, &values, true)?;
-        let output = args.output.unwrap_or_else(|| PathBuf::from("mirage.defconfig"));
+        let output = args
+            .output
+            .unwrap_or_else(|| PathBuf::from("mirage.defconfig"));
         write_config(&output, &schema, &values, true)?;
-        if args.generate { generate_artifacts(&schema, &values, &args.out_dir)?; }
+        if args.generate {
+            generate_artifacts(&schema, &values, &args.out_dir)?;
+        }
         return Ok(());
     }
 
     if args.menu {
         let mut values = schema.defaults();
         if let Some(parsed) = read_config_if_present(&args.config, &schema)? {
-            for (symbol, value) in parsed.values { values.insert(symbol, value); }
+            for (symbol, value) in parsed.values {
+                values.insert(symbol, value);
+            }
         }
         match menu(&schema, &mut values)? {
             MenuOutcome::Save => {
@@ -313,7 +350,9 @@ fn run() -> Result<(), String> {
                 validate_values(&schema, &values, false)?;
                 let output = args.output.as_deref().unwrap_or(&args.config);
                 write_config(output, &schema, &values, false)?;
-                if args.generate { generate_artifacts(&schema, &values, &args.out_dir)?; }
+                if args.generate {
+                    generate_artifacts(&schema, &values, &args.out_dir)?;
+                }
             }
             MenuOutcome::Discard => {
                 println!("configuration unchanged");
@@ -348,7 +387,10 @@ where
             "--output" => args.output = Some(PathBuf::from(next_arg(&mut iter, "--output")?)),
             "--schema" => args.schema = PathBuf::from(next_arg(&mut iter, "--schema")?),
             "--out-dir" => args.out_dir = PathBuf::from(next_arg(&mut iter, "--out-dir")?),
-            "--help" | "-h" => { print_help(); std::process::exit(0); }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
@@ -356,7 +398,8 @@ where
 }
 
 fn next_arg(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
-    iter.next().ok_or_else(|| format!("{flag} requires a value"))
+    iter.next()
+        .ok_or_else(|| format!("{flag} requires a value"))
 }
 
 fn print_help() {
@@ -391,9 +434,13 @@ fn parse_schema_toml(text: &str) -> Result<Schema, String> {
         let line_no = idx + 1;
         let stripped = strip_toml_comment(raw_line);
         let line = stripped.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if line == "[[options]]" {
-            if let Some(table) = current.take() { tables.push(table); }
+            if let Some(table) = current.take() {
+                tables.push(table);
+            }
             current = Some(BTreeMap::new());
             continue;
         }
@@ -410,7 +457,9 @@ fn parse_schema_toml(text: &str) -> Result<Schema, String> {
             return Err(format!("schema line {line_no}: duplicate key {key}"));
         }
     }
-    if let Some(table) = current.take() { tables.push(table); }
+    if let Some(table) = current.take() {
+        tables.push(table);
+    }
 
     let mut options = Vec::new();
     let mut by_symbol = HashMap::new();
@@ -427,7 +476,12 @@ fn parse_schema_toml(text: &str) -> Result<Schema, String> {
             "hex" => ConfigType::Hex,
             other => return Err(format!("{symbol}: unsupported type '{other}'")),
         };
-        let default = parse_default(&ty, table.get("default").ok_or_else(|| format!("{symbol}: missing default"))?)?;
+        let default = parse_default(
+            &ty,
+            table
+                .get("default")
+                .ok_or_else(|| format!("{symbol}: missing default"))?,
+        )?;
         let option = OptionDef {
             prompt: required_string(&table, "prompt", idx)?,
             category: required_string(&table, "category", idx)?,
@@ -476,8 +530,12 @@ fn strip_toml_comment(line: &str) -> String {
 }
 
 fn parse_toml_value(raw: &str) -> Result<TomlValue, String> {
-    if raw == "true" { return Ok(TomlValue::Bool(true)); }
-    if raw == "false" { return Ok(TomlValue::Bool(false)); }
+    if raw == "true" {
+        return Ok(TomlValue::Bool(true));
+    }
+    if raw == "false" {
+        return Ok(TomlValue::Bool(false));
+    }
     if raw.starts_with('"') {
         return Ok(TomlValue::String(parse_quoted(raw)?));
     }
@@ -522,9 +580,13 @@ fn parse_quoted(raw: &str) -> Result<String, String> {
 }
 
 fn parse_array(raw: &str) -> Result<Vec<String>, String> {
-    if !raw.ends_with(']') { return Err(format!("unterminated array {raw}")); }
+    if !raw.ends_with(']') {
+        return Err(format!("unterminated array {raw}"));
+    }
     let inner = raw[1..raw.len() - 1].trim();
-    if inner.is_empty() { return Ok(Vec::new()); }
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut result = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
@@ -547,18 +609,26 @@ fn parse_array(raw: &str) -> Result<Vec<String>, String> {
         }
         if ch == ',' && !in_string {
             let item = current.trim();
-            if !item.is_empty() { result.push(parse_quoted(item)?); }
+            if !item.is_empty() {
+                result.push(parse_quoted(item)?);
+            }
             current.clear();
         } else {
             current.push(ch);
         }
     }
     let item = current.trim();
-    if !item.is_empty() { result.push(parse_quoted(item)?); }
+    if !item.is_empty() {
+        result.push(parse_quoted(item)?);
+    }
     Ok(result)
 }
 
-fn required_string(table: &BTreeMap<String, TomlValue>, key: &str, idx: usize) -> Result<String, String> {
+fn required_string(
+    table: &BTreeMap<String, TomlValue>,
+    key: &str,
+    idx: usize,
+) -> Result<String, String> {
     match table.get(key) {
         Some(TomlValue::String(value)) => Ok(value.clone()),
         Some(_) => Err(format!("option #{idx}: {key} must be a string")),
@@ -566,7 +636,10 @@ fn required_string(table: &BTreeMap<String, TomlValue>, key: &str, idx: usize) -
     }
 }
 
-fn optional_string(table: &BTreeMap<String, TomlValue>, key: &str) -> Result<Option<String>, String> {
+fn optional_string(
+    table: &BTreeMap<String, TomlValue>,
+    key: &str,
+) -> Result<Option<String>, String> {
     match table.get(key) {
         Some(TomlValue::String(value)) => Ok(Some(value.clone())),
         Some(_) => Err(format!("{key} must be a string")),
@@ -608,7 +681,11 @@ fn value_matches_type(ty: &ConfigType, value: &ConfigValue) -> bool {
 }
 
 fn read_config_if_present(path: &Path, schema: &Schema) -> Result<Option<ParsedConfig>, String> {
-    if path.exists() { read_config(path, schema).map(Some) } else { Ok(None) }
+    if path.exists() {
+        read_config(path, schema).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 fn read_config(path: &Path, schema: &Schema) -> Result<ParsedConfig, String> {
@@ -618,7 +695,9 @@ fn read_config(path: &Path, schema: &Schema) -> Result<ParsedConfig, String> {
     for (idx, raw_line) in text.lines().enumerate() {
         let line_no = idx + 1;
         let line = raw_line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("# ") {
             if let Some(symbol) = rest.strip_suffix(" is not set") {
                 if schema.get(symbol).is_some() {
@@ -627,7 +706,9 @@ fn read_config(path: &Path, schema: &Schema) -> Result<ParsedConfig, String> {
                 continue;
             }
         }
-        if line.starts_with('#') { continue; }
+        if line.starts_with('#') {
+            continue;
+        }
         let (symbol, raw_value) = line
             .split_once('=')
             .ok_or_else(|| format!("config line {line_no}: expected SYMBOL=value"))?;
@@ -656,29 +737,48 @@ fn parse_config_value(ty: &ConfigType, raw: &str) -> Result<ConfigValue, String>
             _ => Err("expected y, m, or n".to_string()),
         },
         ConfigType::String => parse_quoted(raw).map(ConfigValue::String),
-        ConfigType::Int => raw.parse::<i64>().map(ConfigValue::Int).map_err(|err| err.to_string()),
+        ConfigType::Int => raw
+            .parse::<i64>()
+            .map(ConfigValue::Int)
+            .map_err(|err| err.to_string()),
         ConfigType::Hex => {
             if let Some(hex) = raw.strip_prefix("0x") {
-                u64::from_str_radix(hex, 16).map(ConfigValue::Hex).map_err(|err| err.to_string())
+                u64::from_str_radix(hex, 16)
+                    .map(ConfigValue::Hex)
+                    .map_err(|err| err.to_string())
             } else {
-                raw.parse::<u64>().map(ConfigValue::Hex).map_err(|err| err.to_string())
+                raw.parse::<u64>()
+                    .map(ConfigValue::Hex)
+                    .map_err(|err| err.to_string())
             }
         }
     }
 }
 
-fn write_config(path: &Path, schema: &Schema, values: &BTreeMap<String, ConfigValue>, minimal: bool) -> Result<(), String> {
+fn write_config(
+    path: &Path,
+    schema: &Schema,
+    values: &BTreeMap<String, ConfigValue>,
+    minimal: bool,
+) -> Result<(), String> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent).map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
     }
     let mut out = String::new();
-    out.push_str("#\n# Automatically generated file; DO NOT EDIT.\n# Mirage Kernel Configuration\n#\n\n");
+    out.push_str(
+        "#\n# Automatically generated file; DO NOT EDIT.\n# Mirage Kernel Configuration\n#\n\n",
+    );
     let mut last_category = String::new();
     for opt in &schema.options {
         let value = values.get(&opt.symbol).unwrap_or(&opt.default);
-        if minimal && *value == opt.default { continue; }
+        if minimal && *value == opt.default {
+            continue;
+        }
         if opt.category != last_category {
-            if !last_category.is_empty() { out.push('\n'); }
+            if !last_category.is_empty() {
+                out.push('\n');
+            }
             out.push_str("#\n# ");
             out.push_str(&opt.category);
             out.push_str("\n#\n");
@@ -701,7 +801,10 @@ fn write_config(path: &Path, schema: &Schema, values: &BTreeMap<String, ConfigVa
     fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
-fn resolve_selects(schema: &Schema, mut values: BTreeMap<String, ConfigValue>) -> Result<BTreeMap<String, ConfigValue>, String> {
+fn resolve_selects(
+    schema: &Schema,
+    mut values: BTreeMap<String, ConfigValue>,
+) -> Result<BTreeMap<String, ConfigValue>, String> {
     let mut changed = true;
     let mut passes = 0usize;
     while changed {
@@ -731,7 +834,11 @@ fn resolve_selects(schema: &Schema, mut values: BTreeMap<String, ConfigValue>) -
     Ok(values)
 }
 
-fn validate_values(schema: &Schema, values: &BTreeMap<String, ConfigValue>, strict: bool) -> Result<(), String> {
+fn validate_values(
+    schema: &Schema,
+    values: &BTreeMap<String, ConfigValue>,
+    strict: bool,
+) -> Result<(), String> {
     let mut errors = Vec::new();
     if strict {
         for symbol in values.keys() {
@@ -743,7 +850,11 @@ fn validate_values(schema: &Schema, values: &BTreeMap<String, ConfigValue>, stri
     for opt in &schema.options {
         let value = values.get(&opt.symbol).unwrap_or(&opt.default);
         if !value_matches_type(&opt.ty, value) {
-            errors.push(format!("{}: value does not match type {}", opt.symbol, opt.ty.as_str()));
+            errors.push(format!(
+                "{}: value does not match type {}",
+                opt.symbol,
+                opt.ty.as_str()
+            ));
             continue;
         }
         if value.is_enabled() {
@@ -754,7 +865,11 @@ fn validate_values(schema: &Schema, values: &BTreeMap<String, ConfigValue>, stri
             }
         }
     }
-    if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
 }
 
 fn value_enabled(value: Option<&ConfigValue>) -> bool {
@@ -762,11 +877,15 @@ fn value_enabled(value: Option<&ConfigValue>) -> bool {
 }
 
 fn option_visible(opt: &OptionDef, values: &BTreeMap<String, ConfigValue>) -> bool {
-    opt.visible_if.iter().all(|sym| value_enabled(values.get(sym)))
+    opt.visible_if
+        .iter()
+        .all(|sym| value_enabled(values.get(sym)))
 }
 
 fn deps_satisfied(opt: &OptionDef, values: &BTreeMap<String, ConfigValue>) -> bool {
-    opt.depends_on.iter().all(|sym| value_enabled(values.get(sym)))
+    opt.depends_on
+        .iter()
+        .all(|sym| value_enabled(values.get(sym)))
 }
 
 fn list_config(schema: &Schema) {
@@ -780,16 +899,28 @@ fn list_config(schema: &Schema) {
         println!("{} ({})", opt.symbol, opt.ty.as_str());
         println!("  prompt:  {}", opt.prompt);
         println!("  default: {}", opt.default.to_config_text());
-        if !opt.depends_on.is_empty() { println!("  depends: {}", opt.depends_on.join(", ")); }
-        if !opt.selects.is_empty() { println!("  selects: {}", opt.selects.join(", ")); }
-        if let Some(feature) = &opt.cargo_feature { println!("  cargo:   {feature}"); }
+        if !opt.depends_on.is_empty() {
+            println!("  depends: {}", opt.depends_on.join(", "));
+        }
+        if !opt.selects.is_empty() {
+            println!("  selects: {}", opt.selects.join(", "));
+        }
+        if let Some(feature) = &opt.cargo_feature {
+            println!("  cargo:   {feature}");
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MenuOutcome { Save, Discard }
+enum MenuOutcome {
+    Save,
+    Discard,
+}
 
-fn menu(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>) -> Result<MenuOutcome, String> {
+fn menu(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+) -> Result<MenuOutcome, String> {
     if io::stdin().is_terminal() && io::stdout().is_terminal() {
         run_tui(schema, values)
     } else {
@@ -807,7 +938,6 @@ enum MenuRow {
 #[derive(Clone, Debug)]
 struct MenuState {
     categories: Vec<String>,
-    expanded: BTreeSet<String>,
     current_menu: Option<String>,
     cursor: usize,
     scroll: usize,
@@ -819,13 +949,8 @@ struct MenuState {
 impl MenuState {
     fn new(schema: &Schema) -> Self {
         let categories = schema.categories();
-        let mut expanded = BTreeSet::new();
-        if let Some(first) = categories.first() {
-            expanded.insert(first.clone());
-        }
         Self {
             categories,
-            expanded,
             current_menu: None,
             cursor: 0,
             scroll: 0,
@@ -836,7 +961,9 @@ impl MenuState {
     }
 }
 
-struct TerminalGuard { original: String }
+struct TerminalGuard {
+    original: String,
+}
 
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
@@ -871,126 +998,206 @@ impl Drop for TerminalGuard {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Key {
+enum MenuKey {
     Up,
     Down,
     Left,
     Right,
-    Home,
-    End,
+    Enter,
+    Escape,
+    Space,
     PageUp,
     PageDown,
+    Home,
+    End,
     Backspace,
-    Enter,
-    Esc,
+    Help,
+    Quit,
     Char(char),
+    Unknown,
 }
 
-fn read_key() -> io::Result<Key> {
+fn decode_key_bytes(bytes: &[u8]) -> MenuKey {
+    match bytes {
+        [b'\r', ..] | [b'\n', ..] => MenuKey::Enter,
+        [b' ', ..] => MenuKey::Space,
+        [0x7f, ..] | [0x08, ..] => MenuKey::Backspace,
+        [b'?', ..] | [b'h', ..] => MenuKey::Help,
+        [b'q', ..] => MenuKey::Quit,
+        [0x1b] => MenuKey::Escape,
+        [0x1b, b'[', b'A', ..] | [0x1b, b'O', b'A', ..] => MenuKey::Up,
+        [0x1b, b'[', b'B', ..] | [0x1b, b'O', b'B', ..] => MenuKey::Down,
+        [0x1b, b'[', b'C', ..] | [0x1b, b'O', b'C', ..] => MenuKey::Right,
+        [0x1b, b'[', b'D', ..] | [0x1b, b'O', b'D', ..] => MenuKey::Left,
+        [0x1b, b'[', b'H', ..] | [0x1b, b'O', b'H', ..] => MenuKey::Home,
+        [0x1b, b'[', b'F', ..] | [0x1b, b'O', b'F', ..] => MenuKey::End,
+        [0x1b, b'[', b'5', b'~', ..] | [0x1b, b'[', b'5', ..] => MenuKey::PageUp,
+        [0x1b, b'[', b'6', b'~', ..] | [0x1b, b'[', b'6', ..] => MenuKey::PageDown,
+        [0x1b, ..] => MenuKey::Unknown,
+        [byte, ..] if byte.is_ascii() => MenuKey::Char(*byte as char),
+        [_byte, ..] => MenuKey::Unknown,
+        [] => MenuKey::Unknown,
+    }
+}
+
+fn read_key() -> io::Result<MenuKey> {
     let mut stdin = io::stdin();
     let mut buf = [0u8; 8];
     loop {
         let n = stdin.read(&mut buf[..1])?;
-        if n == 0 { continue; }
+        if n == 0 {
+            continue;
+        }
         break;
     }
-    match buf[0] {
-        b'\r' | b'\n' => Ok(Key::Enter),
-        0x7f | 0x08 => Ok(Key::Backspace),
-        0x1b => {
-            let n = stdin.read(&mut buf[1..])?;
-            if n >= 2 && buf[1] == b'[' {
-                Ok(match buf[2] {
-                    b'A' => Key::Up,
-                    b'B' => Key::Down,
-                    b'C' => Key::Right,
-                    b'D' => Key::Left,
-                    b'H' => Key::Home,
-                    b'F' => Key::End,
-                    b'5' => Key::PageUp,
-                    b'6' => Key::PageDown,
-                    _ => Key::Esc,
-                })
-            } else {
-                Ok(Key::Esc)
-            }
-        }
-        byte => Ok(Key::Char(byte as char)),
+
+    if buf[0] == 0x1b {
+        // In cbreak mode stty VTIME provides a small bounded timeout for the
+        // remainder of an escape sequence. This keeps standalone Escape working
+        // without misclassifying ESC [ A/B/C/D or ESC O A/B/C/D arrow keys.
+        let n = stdin.read(&mut buf[1..])?;
+        return Ok(decode_key_bytes(&buf[..1 + n]));
     }
+
+    Ok(decode_key_bytes(&buf[..1]))
 }
 
-fn run_tui(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>) -> Result<MenuOutcome, String> {
-    let _guard = TerminalGuard::enter().map_err(|err| format!("failed to enter terminal menu mode: {err}"))?;
+fn run_tui(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+) -> Result<MenuOutcome, String> {
+    let _guard = TerminalGuard::enter()
+        .map_err(|err| format!("failed to enter terminal menu mode: {err}"))?;
     let mut state = MenuState::new(schema);
 
     loop {
         let rows = visible_rows(schema, values, &state);
         clamp_cursor(&mut state, rows.len());
+        keep_cursor_visible(&mut state, TUI_BODY_ROWS);
         render(schema, values, &state, &rows).map_err(|err| err.to_string())?;
 
-        match read_key().map_err(|err| err.to_string())? {
-            Key::Up | Key::Char('k') => move_cursor(&mut state, rows.len(), -1),
-            Key::Down | Key::Char('j') => move_cursor(&mut state, rows.len(), 1),
-            Key::PageUp => move_cursor(&mut state, rows.len(), -(TUI_BODY_ROWS as isize)),
-            Key::PageDown => move_cursor(&mut state, rows.len(), TUI_BODY_ROWS as isize),
-            Key::Home => {
-                state.cursor = 0;
-                state.scroll = 0;
-            }
-            Key::End => {
-                state.cursor = rows.len().saturating_sub(1);
-            }
-            Key::Left => {
-                if state.current_menu.is_some() {
-                    state.current_menu = None;
-                    state.cursor = 0;
-                    state.scroll = 0;
-                }
-            }
-            Key::Right | Key::Enter => {
-                let cursor = state.cursor;
-                menu_select(schema, values, &mut state, rows.get(cursor))?;
-            }
-            Key::Char(' ') | Key::Char('y') | Key::Char('n') | Key::Char('m') => {
-                if let Some(MenuRow::Option(idx)) = rows.get(state.cursor) {
-                    toggle_option(schema, values, *idx, &mut state)?;
-                }
-            }
-            Key::Char('?') | Key::Char('h') => state.show_help = !state.show_help,
-            Key::Char('/') => {
-                state.search = prompt_raw("Search", &state.search).map_err(|err| err.to_string())?;
-                state.current_menu = None;
-                state.cursor = 0;
-                state.scroll = 0;
-            }
-            Key::Char('c') => {
-                state.search.clear();
-                state.cursor = 0;
-                state.scroll = 0;
-            }
-            Key::Char('s') => return Ok(MenuOutcome::Save),
-            Key::Char('q') | Key::Esc => {
-                if state.current_menu.is_some() {
-                    state.current_menu = None;
-                    state.cursor = 0;
-                    state.scroll = 0;
-                    continue;
-                }
-
-                if state.dirty {
-                    let answer = prompt_key("Save changed configuration? [Y/n]").map_err(|err| err.to_string())?;
-                    if matches!(answer, Key::Char('n') | Key::Char('N')) {
-                        return Ok(MenuOutcome::Discard);
-                    }
-                    return Ok(MenuOutcome::Save);
-                }
-                return Ok(MenuOutcome::Discard);
-            }
-            _ => {}
+        if let Some(outcome) = handle_menu_key(
+            schema,
+            values,
+            &mut state,
+            read_key().map_err(|err| err.to_string())?,
+            &rows,
+        )? {
+            return Ok(outcome);
         }
     }
 }
-fn visible_rows(schema: &Schema, values: &BTreeMap<String, ConfigValue>, state: &MenuState) -> Vec<MenuRow> {
+
+fn handle_menu_key(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+    state: &mut MenuState,
+    key: MenuKey,
+    rows: &[MenuRow],
+) -> Result<Option<MenuOutcome>, String> {
+    match key {
+        MenuKey::Up | MenuKey::Char('k') => move_cursor(state, rows.len(), -1),
+        MenuKey::Down | MenuKey::Char('j') => move_cursor(state, rows.len(), 1),
+        MenuKey::PageUp => move_cursor(state, rows.len(), -(TUI_BODY_ROWS as isize)),
+        MenuKey::PageDown => move_cursor(state, rows.len(), TUI_BODY_ROWS as isize),
+        MenuKey::Home => {
+            state.cursor = 0;
+            state.scroll = 0;
+        }
+        MenuKey::End => {
+            state.cursor = rows.len().saturating_sub(1);
+            keep_cursor_visible(state, TUI_BODY_ROWS);
+        }
+        MenuKey::Left => back_or_reverse(schema, values, state, rows)?,
+        MenuKey::Right => activate_or_advance(schema, values, state, rows)?,
+        MenuKey::Enter => activate_selected(schema, values, state, rows)?,
+        MenuKey::Space | MenuKey::Char('y') | MenuKey::Char('n') | MenuKey::Char('m') => {
+            if let Some(MenuRow::Option(idx)) = rows.get(state.cursor) {
+                toggle_option(schema, values, *idx, state)?;
+            }
+        }
+        MenuKey::Help => state.show_help = !state.show_help,
+        MenuKey::Char('/') => {
+            state.search = prompt_raw("Search", &state.search).map_err(|err| err.to_string())?;
+            state.current_menu = None;
+            state.cursor = 0;
+            state.scroll = 0;
+        }
+        MenuKey::Char('c') => {
+            state.search.clear();
+            state.cursor = 0;
+            state.scroll = 0;
+        }
+        MenuKey::Char('s') => return Ok(Some(MenuOutcome::Save)),
+        MenuKey::Quit | MenuKey::Escape => return quit_or_back(state),
+        MenuKey::Backspace | MenuKey::Unknown | MenuKey::Char(_) => {}
+    }
+    keep_cursor_visible(state, TUI_BODY_ROWS);
+    Ok(None)
+}
+
+fn quit_or_back(state: &mut MenuState) -> Result<Option<MenuOutcome>, String> {
+    if state.current_menu.is_some() {
+        state.current_menu = None;
+        state.cursor = 0;
+        state.scroll = 0;
+        return Ok(None);
+    }
+
+    if state.dirty {
+        let answer =
+            prompt_key("Save changed configuration? [Y/n]").map_err(|err| err.to_string())?;
+        if matches!(answer, MenuKey::Char('n') | MenuKey::Char('N')) {
+            return Ok(Some(MenuOutcome::Discard));
+        }
+        return Ok(Some(MenuOutcome::Save));
+    }
+    Ok(Some(MenuOutcome::Discard))
+}
+
+fn activate_selected(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+    state: &mut MenuState,
+    rows: &[MenuRow],
+) -> Result<(), String> {
+    let cursor = state.cursor;
+    menu_select(schema, values, state, rows.get(cursor))
+}
+
+fn activate_or_advance(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+    state: &mut MenuState,
+    rows: &[MenuRow],
+) -> Result<(), String> {
+    activate_selected(schema, values, state, rows)
+}
+
+fn back_or_reverse(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+    state: &mut MenuState,
+    rows: &[MenuRow],
+) -> Result<(), String> {
+    if state.current_menu.is_some() {
+        state.current_menu = None;
+        state.cursor = 0;
+        state.scroll = 0;
+        return Ok(());
+    }
+
+    if let Some(MenuRow::Option(idx)) = rows.get(state.cursor) {
+        reverse_option(schema, values, *idx, state)?;
+    }
+    Ok(())
+}
+
+fn visible_rows(
+    schema: &Schema,
+    values: &BTreeMap<String, ConfigValue>,
+    state: &MenuState,
+) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     let search = state.search.to_lowercase();
 
@@ -999,7 +1206,11 @@ fn visible_rows(schema: &Schema, values: &BTreeMap<String, ConfigValue>, state: 
             if !option_visible(opt, values) {
                 continue;
             }
-            let hay = format!("{} {} {} {}", opt.symbol, opt.prompt, opt.category, opt.help).to_lowercase();
+            let hay = format!(
+                "{} {} {} {}",
+                opt.symbol, opt.prompt, opt.category, opt.help
+            )
+            .to_lowercase();
             if hay.contains(&search) {
                 rows.push(MenuRow::Option(idx));
             }
@@ -1029,7 +1240,12 @@ fn visible_rows(schema: &Schema, values: &BTreeMap<String, ConfigValue>, state: 
 
     rows
 }
-fn render(schema: &Schema, values: &BTreeMap<String, ConfigValue>, state: &MenuState, rows: &[MenuRow]) -> io::Result<()> {
+fn render(
+    schema: &Schema,
+    values: &BTreeMap<String, ConfigValue>,
+    state: &MenuState,
+    rows: &[MenuRow],
+) -> io::Result<()> {
     let mut out = io::stdout();
     let (term_rows, term_cols) = terminal_size();
     let width = bounded(term_cols.saturating_sub(4), 76, 132);
@@ -1102,18 +1318,32 @@ fn render(schema: &Schema, values: &BTreeMap<String, ConfigValue>, state: &MenuS
     clear_line_region(&mut out, help_row, inner_left, width.saturating_sub(4))?;
     goto(&mut out, help_row, inner_left)?;
     if state.show_help {
-        write!(out, "{}", fit_text(&selected_help(schema, rows.get(state.cursor)), width.saturating_sub(4)))?;
+        write!(
+            out,
+            "{}",
+            fit_text(
+                &selected_help(schema, rows.get(state.cursor)),
+                width.saturating_sub(4)
+            )
+        )?;
     } else {
         write!(out, "Help hidden; press ? to show.")?;
     }
 
     let status_row = top + height.saturating_sub(2);
     goto(&mut out, status_row, left + width.saturating_sub(64) / 2)?;
-    write!(out, "\x1b[44m<Select>\x1b[0m    < Exit >    < Help >    < Save >    < Search >")?;
+    write!(
+        out,
+        "\x1b[44m<Select>\x1b[0m    < Exit >    < Help >    < Save >    < Search >"
+    )?;
 
     if !state.search.is_empty() {
         goto(&mut out, top + 1, left + 3)?;
-        write!(out, "\x1b[36m/ {}\x1b[0m", fit_text(&state.search, width.saturating_sub(8)))?;
+        write!(
+            out,
+            "\x1b[36m/ {}\x1b[0m",
+            fit_text(&state.search, width.saturating_sub(8))
+        )?;
     }
 
     out.flush()
@@ -1149,8 +1379,15 @@ fn render_linux_row(
             let marker = linux_marker(value, &opt.ty);
             let blocked = !deps_satisfied(opt, values);
             let left = if blocked {
-                format!("    -{}- {}", marker.trim_matches(&['[', ']', '<', '>'][..]), opt.prompt)
-            } else if matches!(opt.ty, ConfigType::String | ConfigType::Int | ConfigType::Hex) {
+                format!(
+                    "    -{}- {}",
+                    marker.trim_matches(&['[', ']', '<', '>'][..]),
+                    opt.prompt
+                )
+            } else if matches!(
+                opt.ty,
+                ConfigType::String | ConfigType::Int | ConfigType::Hex
+            ) {
                 format!("    ({}) {}", value.to_config_text(), opt.prompt)
             } else {
                 format!("    {marker} {}", opt.prompt)
@@ -1207,15 +1444,30 @@ fn right_status(left: String, status: String, width: usize) -> String {
     if left_len + status_len + 1 >= width {
         return left;
     }
-    format!("{left}{}{}", " ".repeat(width - left_len - status_len), status)
+    format!(
+        "{left}{}{}",
+        " ".repeat(width - left_len - status_len),
+        status
+    )
 }
 
-fn draw_box(out: &mut impl Write, top: usize, left: usize, width: usize, height: usize, title: &str) -> io::Result<()> {
+fn draw_box(
+    out: &mut impl Write,
+    top: usize,
+    left: usize,
+    width: usize,
+    height: usize,
+    title: &str,
+) -> io::Result<()> {
     goto(out, top, left)?;
     write!(out, "┌{}┐", "─".repeat(width.saturating_sub(2)))?;
 
     let title = fit_text(title, width.saturating_sub(8));
-    goto(out, top, left + (width.saturating_sub(title.chars().count()) / 2))?;
+    goto(
+        out,
+        top,
+        left + (width.saturating_sub(title.chars().count()) / 2),
+    )?;
     write!(out, "\x1b[1m{title}\x1b[0m")?;
 
     for row in (top + 1)..(top + height.saturating_sub(1)) {
@@ -1255,8 +1507,14 @@ fn terminal_size() -> (usize, usize) {
         }
     }
 
-    let rows = env::var("LINES").ok().and_then(|v| v.parse().ok()).unwrap_or(32);
-    let cols = env::var("COLUMNS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let rows = env::var("LINES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+    let cols = env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
     (rows, cols)
 }
 
@@ -1290,12 +1548,29 @@ fn clamp_cursor(state: &mut MenuState, len: usize) {
 }
 
 fn move_cursor(state: &mut MenuState, len: usize, delta: isize) {
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
     let next = (state.cursor as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize;
     state.cursor = next;
+    keep_cursor_visible(state, TUI_BODY_ROWS);
 }
 
-fn menu_select(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>, state: &mut MenuState, row: Option<&MenuRow>) -> Result<(), String> {
+fn keep_cursor_visible(state: &mut MenuState, body_rows: usize) {
+    let body_rows = body_rows.max(1);
+    if state.cursor < state.scroll {
+        state.scroll = state.cursor;
+    } else if state.cursor >= state.scroll + body_rows {
+        state.scroll = state.cursor + 1 - body_rows;
+    }
+}
+
+fn menu_select(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+    state: &mut MenuState,
+    row: Option<&MenuRow>,
+) -> Result<(), String> {
     match row {
         Some(MenuRow::Back) => {
             state.current_menu = None;
@@ -1313,7 +1588,12 @@ fn menu_select(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>, stat
     Ok(())
 }
 
-fn toggle_option(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>, idx: usize, state: &mut MenuState) -> Result<(), String> {
+fn toggle_option(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+    idx: usize,
+    state: &mut MenuState,
+) -> Result<(), String> {
     let opt = &schema.options[idx];
     if !deps_satisfied(opt, values) {
         return Ok(());
@@ -1323,8 +1603,11 @@ fn toggle_option(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>, id
         ConfigValue::Tristate('n') => ConfigValue::Tristate('m'),
         ConfigValue::Tristate('m') => ConfigValue::Tristate('y'),
         ConfigValue::Tristate(_) => ConfigValue::Tristate('n'),
-        current @ ConfigValue::String(_) | current @ ConfigValue::Int(_) | current @ ConfigValue::Hex(_) => {
-            let raw = prompt_raw(&opt.prompt, &current.to_config_text()).map_err(|err| err.to_string())?;
+        current @ ConfigValue::String(_)
+        | current @ ConfigValue::Int(_)
+        | current @ ConfigValue::Hex(_) => {
+            let raw = prompt_raw(&opt.prompt, &current.to_config_text())
+                .map_err(|err| err.to_string())?;
             parse_config_value(&opt.ty, raw.trim()).unwrap_or(current)
         }
     };
@@ -1336,12 +1619,46 @@ fn toggle_option(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>, id
     Ok(())
 }
 
-fn apply_selects_from(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>, symbol: &str) -> Result<(), String> {
+fn reverse_option(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+    idx: usize,
+    state: &mut MenuState,
+) -> Result<(), String> {
+    let opt = &schema.options[idx];
+    if !deps_satisfied(opt, values) {
+        return Ok(());
+    }
+    let current = values.get(&opt.symbol).unwrap_or(&opt.default).clone();
+    let next = match current {
+        ConfigValue::Bool(value) => ConfigValue::Bool(!value),
+        ConfigValue::Tristate('y') => ConfigValue::Tristate('m'),
+        ConfigValue::Tristate('m') => ConfigValue::Tristate('n'),
+        ConfigValue::Tristate(_) => ConfigValue::Tristate('y'),
+        ConfigValue::String(_) | ConfigValue::Int(_) | ConfigValue::Hex(_) => return Ok(()),
+    };
+    values.insert(opt.symbol.clone(), next.clone());
+    if next.is_enabled() {
+        apply_selects_from(schema, values, &opt.symbol)?;
+    }
+    state.dirty = true;
+    Ok(())
+}
+
+fn apply_selects_from(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+    symbol: &str,
+) -> Result<(), String> {
     let mut queue = vec![symbol.to_string()];
     let mut visited = HashSet::new();
     while let Some(current) = queue.pop() {
-        if !visited.insert(current.clone()) { continue; }
-        let Some(opt) = schema.get(&current) else { continue; };
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        let Some(opt) = schema.get(&current) else {
+            continue;
+        };
         for selected in &opt.selects {
             if let Some(target) = schema.get(selected) {
                 let value = match target.ty {
@@ -1359,7 +1676,7 @@ fn apply_selects_from(schema: &Schema, values: &mut BTreeMap<String, ConfigValue
     Ok(())
 }
 
-fn prompt_key(prompt: &str) -> io::Result<Key> {
+fn prompt_key(prompt: &str) -> io::Result<MenuKey> {
     let (rows, _) = terminal_size();
     let row = rows.saturating_sub(1).max(1);
     print!("\x1b[{row};1H\x1b[2K{} ", prompt);
@@ -1375,33 +1692,52 @@ fn prompt_raw(prompt: &str, current: &str) -> io::Result<String> {
         print!("\x1b[{row};1H\x1b[2K{}: {}", prompt, input);
         io::stdout().flush()?;
         match read_key()? {
-            Key::Enter => return Ok(input),
-            Key::Esc => return Ok(current.to_string()),
-            Key::Backspace => { input.pop(); }
-            Key::Char(ch) if !ch.is_control() => input.push(ch),
+            MenuKey::Enter => return Ok(input),
+            MenuKey::Escape => return Ok(current.to_string()),
+            MenuKey::Backspace => {
+                input.pop();
+            }
+            MenuKey::Char(ch) if !ch.is_control() => input.push(ch),
             _ => {}
         }
     }
 }
 
-fn run_line_menu(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>) -> Result<MenuOutcome, String> {
+fn run_line_menu(
+    schema: &Schema,
+    values: &mut BTreeMap<String, ConfigValue>,
+) -> Result<MenuOutcome, String> {
     println!("Mirage configuration fallback menu");
     println!("stdin/stdout are not a terminal, so using line mode.");
     loop {
         println!();
         let mut displayed = Vec::new();
         for (idx, opt) in schema.options.iter().enumerate() {
-            if !option_visible(opt, values) { continue; }
+            if !option_visible(opt, values) {
+                continue;
+            }
             let value = values.get(&opt.symbol).unwrap_or(&opt.default);
-            println!("{:>3}. {:<12} {} ({})", displayed.len() + 1, value.short_display(), opt.prompt, opt.category);
+            println!(
+                "{:>3}. {:<12} {} ({})",
+                displayed.len() + 1,
+                value.short_display(),
+                opt.prompt,
+                opt.category
+            );
             displayed.push(idx);
         }
         println!("Enter number to toggle/edit, s to save, q to discard:");
         let mut line = String::new();
-        io::stdin().read_line(&mut line).map_err(|err| err.to_string())?;
+        io::stdin()
+            .read_line(&mut line)
+            .map_err(|err| err.to_string())?;
         let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("s") { return Ok(MenuOutcome::Save); }
-        if trimmed.eq_ignore_ascii_case("q") { return Ok(MenuOutcome::Discard); }
+        if trimmed.eq_ignore_ascii_case("s") {
+            return Ok(MenuOutcome::Save);
+        }
+        if trimmed.eq_ignore_ascii_case("q") {
+            return Ok(MenuOutcome::Discard);
+        }
         if let Ok(number) = trimmed.parse::<usize>() {
             if let Some(idx) = displayed.get(number.saturating_sub(1)).copied() {
                 let mut state = MenuState::new(schema);
@@ -1411,13 +1747,30 @@ fn run_line_menu(schema: &Schema, values: &mut BTreeMap<String, ConfigValue>) ->
     }
 }
 
-fn generate_artifacts(schema: &Schema, values: &BTreeMap<String, ConfigValue>, out_dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(out_dir).map_err(|err| format!("failed to create {}: {err}", out_dir.display()))?;
+fn generate_artifacts(
+    schema: &Schema,
+    values: &BTreeMap<String, ConfigValue>,
+    out_dir: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(out_dir)
+        .map_err(|err| format!("failed to create {}: {err}", out_dir.display()))?;
     let features = cargo_features(schema, values);
     let kernel_cmdline = kernel_cmdline(values);
-    let display_args = if value_enabled(values.get("CONFIG_MIRAGE_HW_FRAMEBUFFER")) { "-display gtk" } else { "-display none" };
-    let serial_args = if value_enabled(values.get("CONFIG_MIRAGE_SERIAL_CONSOLE")) { "-serial stdio" } else { "" };
-    let debug_args = if value_enabled(values.get("CONFIG_MIRAGE_QEMU_DEBUG")) { "-S -s -d int,cpu_reset,guest_errors" } else { "" };
+    let display_args = if value_enabled(values.get("CONFIG_MIRAGE_HW_FRAMEBUFFER")) {
+        "-display gtk"
+    } else {
+        "-display none"
+    };
+    let serial_args = if value_enabled(values.get("CONFIG_MIRAGE_SERIAL_CONSOLE")) {
+        "-serial stdio"
+    } else {
+        ""
+    };
+    let debug_args = if value_enabled(values.get("CONFIG_MIRAGE_QEMU_DEBUG")) {
+        "-S -s -d int,cpu_reset,guest_errors"
+    } else {
+        ""
+    };
 
     let mut generated = String::new();
     generated.push_str("// Generated by mirageconfig. Do not edit.\n");
@@ -1433,7 +1786,9 @@ fn generate_artifacts(schema: &Schema, values: &BTreeMap<String, ConfigValue>, o
     }
     generated.push_str("pub const MIRAGE_CARGO_FEATURES: &[&str] = &[");
     for (idx, feature) in features.iter().enumerate() {
-        if idx != 0 { generated.push_str(", "); }
+        if idx != 0 {
+            generated.push_str(", ");
+        }
         generated.push('"');
         generated.push_str(feature);
         generated.push('"');
@@ -1447,7 +1802,8 @@ fn generate_artifacts(schema: &Schema, values: &BTreeMap<String, ConfigValue>, o
     fs::write(
         out_dir.join("cargo_features.env"),
         format!("MIRAGE_FEATURES={}\n", shell_quote(&features.join(" "))),
-    ).map_err(|err| err.to_string())?;
+    )
+    .map_err(|err| err.to_string())?;
     fs::write(
         out_dir.join("build_flags.env"),
         format!(
@@ -1476,11 +1832,21 @@ fn cargo_features(schema: &Schema, values: &BTreeMap<String, ConfigValue>) -> Ve
 
 fn kernel_cmdline(values: &BTreeMap<String, ConfigValue>) -> String {
     let mut parts = Vec::new();
-    if value_enabled(values.get("CONFIG_MIRAGE_FULL_BOOT")) { parts.push("mirage.full_boot=1"); }
-    if value_enabled(values.get("CONFIG_MIRAGE_VERBOSE_BOOT")) { parts.push("mirage.verbose=1"); }
-    if value_enabled(values.get("CONFIG_MIRAGE_DEBUG")) { parts.push("mirage.debug=1"); }
-    if value_enabled(values.get("CONFIG_MIRAGE_TRACE_IPC")) { parts.push("mirage.trace_ipc=1"); }
-    if value_enabled(values.get("CONFIG_MIRAGE_HW_FRAMEBUFFER")) { parts.push("mirage.framebuffer=1"); }
+    if value_enabled(values.get("CONFIG_MIRAGE_FULL_BOOT")) {
+        parts.push("mirage.full_boot=1");
+    }
+    if value_enabled(values.get("CONFIG_MIRAGE_VERBOSE_BOOT")) {
+        parts.push("mirage.verbose=1");
+    }
+    if value_enabled(values.get("CONFIG_MIRAGE_DEBUG")) {
+        parts.push("mirage.debug=1");
+    }
+    if value_enabled(values.get("CONFIG_MIRAGE_TRACE_IPC")) {
+        parts.push("mirage.trace_ipc=1");
+    }
+    if value_enabled(values.get("CONFIG_MIRAGE_HW_FRAMEBUFFER")) {
+        parts.push("mirage.framebuffer=1");
+    }
     parts.join(" ")
 }
 
@@ -1495,10 +1861,16 @@ fn rust_type(ty: &ConfigType) -> &'static str {
 }
 
 fn shell_quote(value: &str) -> String {
-    if value.is_empty() { return "''".to_string(); }
+    if value.is_empty() {
+        return "''".to_string();
+    }
     let mut out = String::from("'");
     for ch in value.chars() {
-        if ch == '\'' { out.push_str("'\\''"); } else { out.push(ch); }
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
     }
     out.push('\'');
     out
@@ -1506,4 +1878,185 @@ fn shell_quote(value: &str) -> String {
 
 fn escape_config_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opt(
+        symbol: &str,
+        prompt: &str,
+        category: &str,
+        ty: ConfigType,
+        default: ConfigValue,
+    ) -> OptionDef {
+        OptionDef {
+            symbol: symbol.to_string(),
+            prompt: prompt.to_string(),
+            category: category.to_string(),
+            default,
+            help: format!("Help for {prompt}"),
+            depends_on: Vec::new(),
+            selects: Vec::new(),
+            visible_if: Vec::new(),
+            ty,
+            cargo_feature: None,
+        }
+    }
+
+    fn test_schema() -> Schema {
+        let options = vec![
+            opt(
+                "CONFIG_ALPHA",
+                "Alpha",
+                "General",
+                ConfigType::Bool,
+                ConfigValue::Bool(false),
+            ),
+            opt(
+                "CONFIG_TRI",
+                "Tri",
+                "General",
+                ConfigType::Tristate,
+                ConfigValue::Tristate('n'),
+            ),
+            opt(
+                "CONFIG_BETA",
+                "Beta",
+                "Drivers",
+                ConfigType::Bool,
+                ConfigValue::Bool(false),
+            ),
+            opt(
+                "CONFIG_GAMMA",
+                "Gamma",
+                "Drivers",
+                ConfigType::Bool,
+                ConfigValue::Bool(false),
+            ),
+        ];
+        let by_symbol = options
+            .iter()
+            .enumerate()
+            .map(|(idx, opt)| (opt.symbol.clone(), idx))
+            .collect();
+        Schema { options, by_symbol }
+    }
+
+    #[test]
+    fn decodes_escape_arrow_sequences() {
+        assert_eq!(decode_key_bytes(b"\x1b[A"), MenuKey::Up);
+        assert_eq!(decode_key_bytes(b"\x1b[B"), MenuKey::Down);
+        assert_eq!(decode_key_bytes(b"\x1b[C"), MenuKey::Right);
+        assert_eq!(decode_key_bytes(b"\x1b[D"), MenuKey::Left);
+        assert_eq!(decode_key_bytes(b"\x1bOA"), MenuKey::Up);
+        assert_eq!(decode_key_bytes(b"\x1bOB"), MenuKey::Down);
+        assert_eq!(decode_key_bytes(b"\x1bOC"), MenuKey::Right);
+        assert_eq!(decode_key_bytes(b"\x1bOD"), MenuKey::Left);
+        assert_eq!(decode_key_bytes(b"\x1b"), MenuKey::Escape);
+        assert_eq!(decode_key_bytes(b"\n"), MenuKey::Enter);
+        assert_eq!(decode_key_bytes(b" "), MenuKey::Space);
+    }
+
+    #[test]
+    fn up_down_clamp_and_keep_selection_visible() {
+        let schema = test_schema();
+        let values = schema.defaults();
+        let mut state = MenuState::new(&schema);
+        let rows = visible_rows(&schema, &values, &state);
+
+        handle_menu_key(
+            &schema,
+            &mut values.clone(),
+            &mut state,
+            MenuKey::Down,
+            &rows,
+        )
+        .unwrap();
+        assert_eq!(state.cursor, 1);
+        handle_menu_key(
+            &schema,
+            &mut values.clone(),
+            &mut state,
+            MenuKey::Down,
+            &rows,
+        )
+        .unwrap();
+        assert_eq!(state.cursor, 1);
+        handle_menu_key(&schema, &mut values.clone(), &mut state, MenuKey::Up, &rows).unwrap();
+        assert_eq!(state.cursor, 0);
+        handle_menu_key(&schema, &mut values.clone(), &mut state, MenuKey::Up, &rows).unwrap();
+        assert_eq!(state.cursor, 0);
+
+        state.cursor = 0;
+        state.scroll = 0;
+        for _ in 0..30 {
+            handle_menu_key(
+                &schema,
+                &mut values.clone(),
+                &mut state,
+                MenuKey::Down,
+                &rows,
+            )
+            .unwrap();
+        }
+        assert!(state.cursor >= state.scroll);
+        assert!(state.cursor < state.scroll + TUI_BODY_ROWS);
+        for _ in 0..30 {
+            handle_menu_key(&schema, &mut values.clone(), &mut state, MenuKey::Up, &rows).unwrap();
+        }
+        assert!(state.cursor >= state.scroll);
+        assert!(state.cursor < state.scroll + TUI_BODY_ROWS);
+    }
+
+    #[test]
+    fn right_enter_open_submenu_and_left_escape_return_to_parent() {
+        let schema = test_schema();
+        let mut values = schema.defaults();
+        let mut state = MenuState::new(&schema);
+        let rows = visible_rows(&schema, &values, &state);
+
+        handle_menu_key(&schema, &mut values, &mut state, MenuKey::Right, &rows).unwrap();
+        assert_eq!(state.current_menu.as_deref(), Some("General"));
+        let rows = visible_rows(&schema, &values, &state);
+        handle_menu_key(&schema, &mut values, &mut state, MenuKey::Left, &rows).unwrap();
+        assert_eq!(state.current_menu, None);
+
+        let rows = visible_rows(&schema, &values, &state);
+        handle_menu_key(&schema, &mut values, &mut state, MenuKey::Enter, &rows).unwrap();
+        assert_eq!(state.current_menu.as_deref(), Some("General"));
+        let rows = visible_rows(&schema, &values, &state);
+        assert!(
+            handle_menu_key(&schema, &mut values, &mut state, MenuKey::Escape, &rows)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(state.current_menu, None);
+    }
+
+    #[test]
+    fn space_toggles_bool_and_right_left_cycle_tristate() {
+        let schema = test_schema();
+        let mut values = schema.defaults();
+        let mut state = MenuState::new(&schema);
+        state.current_menu = Some("General".to_string());
+        state.cursor = 1;
+        let rows = visible_rows(&schema, &values, &state);
+
+        handle_menu_key(&schema, &mut values, &mut state, MenuKey::Space, &rows).unwrap();
+        assert_eq!(values.get("CONFIG_ALPHA"), Some(&ConfigValue::Bool(true)));
+
+        state.cursor = 2;
+        let rows = visible_rows(&schema, &values, &state);
+        handle_menu_key(&schema, &mut values, &mut state, MenuKey::Right, &rows).unwrap();
+        assert_eq!(values.get("CONFIG_TRI"), Some(&ConfigValue::Tristate('m')));
+        // At the top menu, Left on a tristate reverses the value when no parent back action is available.
+        state.current_menu = None;
+        state.search = "Tri".to_string();
+        state.cursor = 0;
+        let rows = visible_rows(&schema, &values, &state);
+        handle_menu_key(&schema, &mut values, &mut state, MenuKey::Left, &rows).unwrap();
+        assert_eq!(values.get("CONFIG_TRI"), Some(&ConfigValue::Tristate('n')));
+    }
 }
