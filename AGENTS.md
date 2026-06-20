@@ -620,3 +620,24 @@ Required rootfs userland:
 6. Menu navigation must be tested with a pure state-machine test when possible.
 7. Do not ship menuconfig changes without manually testing all four arrow keys.
 8. Do not leave terminal raw mode enabled after exit or panic.
+
+---
+
+## Mirage Boot Runtime Validation Contract
+
+1. The boot runtime validator must never be disabled to pass a build.
+2. False-positive validation failures must be fixed in the validator.
+3. False-negative validation passes are release blockers.
+4. The validator must check staging and generated ISO contents.
+5. The validator must use Rock Ridge/POSIX paths when inspecting ISO files.
+6. Required bootstrap runtime:
+   /spider-rt/sbin/spider-rs
+   /spider-rt/sbin/spider-rsd
+7. Required rootfs userland:
+   /usr/bin/m1-terminal
+   /etc/spider/units/default.target
+   /etc/spider/units/basic.target
+   /etc/spider/units/m1-terminal.service
+8. /usr/bin/m1-terminal must not be placed under /spider-rt.
+9. A missing spider-rs or spider-rsd is a build failure.
+10. A validator change must include both positive and negative proof.
