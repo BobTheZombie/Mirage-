@@ -1038,24 +1038,47 @@ fn transition(phase: BootPhase, state: PhaseState, message: &'static str) {
     }
 }
 
-fn should_render_framebuffer_transition(_phase: BootPhase, state: PhaseState) -> bool {
+fn should_render_framebuffer_transition(phase: BootPhase, state: PhaseState) -> bool {
     framebuffer_milestone_render_enabled()
         && framebuffer_ready()
-        && matches!(
-            state,
-            PhaseState::Registered
-                | PhaseState::Started
-                | PhaseState::Detected
-                | PhaseState::Found
-                | PhaseState::Ok
-                | PhaseState::Online
-                | PhaseState::Enabled
-                | PhaseState::Skipped
-                | PhaseState::Stub
-                | PhaseState::Failed
-                | PhaseState::Pending
-                | PhaseState::Running
-        )
+        && is_framebuffer_repaint_milestone(phase, state)
+}
+
+const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -> bool {
+    match (phase, state) {
+        // The boot screen and framebuffer phases establish the live UI itself,
+        // so repaint them promptly once the framebuffer is available.
+        (BootPhase::BootScreen, _) => true,
+        (BootPhase::Framebuffer, PhaseState::Ok | PhaseState::Online | PhaseState::Enabled) => true,
+
+        // Failures are user-visible terminal states and should not wait for a
+        // later successful milestone before the live UI reflects the fault.
+        (_, PhaseState::Failed) => true,
+
+        // Stable user-visible milestones. Stub is included because Mirage uses
+        // explicit stub statuses to communicate intentional skeleton coverage.
+        (
+            _,
+            PhaseState::Ok
+            | PhaseState::Online
+            | PhaseState::Enabled
+            | PhaseState::Running
+            | PhaseState::Stub,
+        ) => true,
+
+        // Noisy probe/intermediate states and routine optional skips remain
+        // serial-diagnostic events only; they should not thrash the framebuffer.
+        (
+            _,
+            PhaseState::Unregistered
+            | PhaseState::Registered
+            | PhaseState::Pending
+            | PhaseState::Started
+            | PhaseState::Detected
+            | PhaseState::Found
+            | PhaseState::Skipped,
+        ) => false,
+    }
 }
 
 #[cfg(feature = "hw-framebuffer")]
@@ -1141,7 +1164,10 @@ fn write_transition_serial(phase: BootPhase, state: PhaseState, message: &'stati
 
 #[cfg(test)]
 mod tests {
-    use super::{BootPhase, BootPhaseManager, PhaseState, DEFAULT_SUBSYSTEM_DESCRIPTORS};
+    use super::{
+        is_framebuffer_repaint_milestone, BootPhase, BootPhaseManager, PhaseState,
+        DEFAULT_SUBSYSTEM_DESCRIPTORS,
+    };
 
     #[test]
     fn registration_makes_records_visible_without_heap() {
@@ -1206,6 +1232,51 @@ mod tests {
 
         assert_eq!(manager.state(BootPhase::SeedRs), PhaseState::Failed);
         assert_eq!(manager.state(BootPhase::Framebuffer), PhaseState::Skipped);
+    }
+
+    #[test]
+    fn framebuffer_repaint_milestones_ignore_intermediate_noise() {
+        let noisy_transitions = [
+            (BootPhase::KernelMain, PhaseState::Started),
+            (BootPhase::RootFs, PhaseState::Pending),
+            (BootPhase::Nvme, PhaseState::Detected),
+            (BootPhase::Gpt, PhaseState::Found),
+            (BootPhase::Battery, PhaseState::Skipped),
+        ];
+
+        let render_count = noisy_transitions
+            .iter()
+            .filter(|(phase, state)| is_framebuffer_repaint_milestone(*phase, *state))
+            .count();
+
+        assert_eq!(
+            render_count, 0,
+            "intermediate/probe/optional-skip transitions should remain serial-only"
+        );
+    }
+
+    #[test]
+    fn framebuffer_repaint_milestones_count_stable_user_visible_states() {
+        let stable_transitions = [
+            (BootPhase::KernelMain, PhaseState::Ok),
+            (BootPhase::Framebuffer, PhaseState::Online),
+            (BootPhase::Input, PhaseState::Enabled),
+            (BootPhase::Userspace, PhaseState::Running),
+            (BootPhase::Qfs, PhaseState::Failed),
+            (BootPhase::Ext4, PhaseState::Stub),
+            (BootPhase::BootScreen, PhaseState::Started),
+        ];
+
+        let render_count = stable_transitions
+            .iter()
+            .filter(|(phase, state)| is_framebuffer_repaint_milestone(*phase, *state))
+            .count();
+
+        assert_eq!(
+            render_count,
+            stable_transitions.len(),
+            "stable milestones, visible stubs, BootScreen, Framebuffer, and failures should repaint"
+        );
     }
 
     #[test]
