@@ -210,10 +210,35 @@ pub fn write_byte(byte: u8) {
 /// cursor and overwrite the fixed table cells, avoiding the slow full-screen
 /// clear/redraw loop that made bare-metal boots appear frame-by-frame.
 pub fn prepare_boot_ui_frame() {
+    if !milestone_ui_active() {
+        return;
+    }
     if !BOOT_UI_CLEARED.swap(true, Ordering::SeqCst) {
         clear_for_boot_ui();
         return;
     }
+    reset_cursor_to_origin();
+}
+
+/// Clear the rectangular text-cell region owned by the live milestone boot UI.
+///
+/// This intentionally avoids a full-framebuffer clear after the first paint so
+/// panic, failure, or debug-shell evidence outside the milestone table survives
+/// normal live UI refreshes. The helper is a no-op when another renderer owner
+/// has taken the framebuffer.
+pub fn clear_boot_ui_region(rows: usize) {
+    if !milestone_ui_active() {
+        return;
+    }
+    if let Some(console) = CONSOLE.lock().as_mut() {
+        console.cursor_column = 0;
+        console.cursor_row = 0;
+        let height = rows.saturating_mul(CELL_HEIGHT);
+        console.fill_rect(0, 0, console.mode.width(), height, console.background);
+    }
+}
+
+fn reset_cursor_to_origin() {
     if let Some(console) = CONSOLE.lock().as_mut() {
         console.cursor_column = 0;
         console.cursor_row = 0;

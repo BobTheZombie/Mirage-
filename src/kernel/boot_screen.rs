@@ -17,6 +17,8 @@ const SUBTITLE: &str = "MIRAGE BOOT MILESTONE 1.1";
 const PROMPT: &str = "Press Esc for Debug Shell";
 #[cfg(feature = "hw-framebuffer")]
 const PROGRESS_BAR_WIDTH: u8 = 28;
+#[cfg(feature = "hw-framebuffer")]
+const BOOT_UI_OWNED_ROWS: usize = 58;
 
 static LAST_RENDERED_PHASES: SpinLock<Option<BootPhaseManager>> = SpinLock::new(None);
 static FRAMEBUFFER_RENDERS: AtomicU64 = AtomicU64::new(0);
@@ -55,7 +57,12 @@ pub fn render_persistent_boot_screen() {
 fn render_framebuffer(manager: &BootPhaseManager) {
     use crate::arch::x86_64::framebuffer_console::{self, RgbColor};
 
+    if !framebuffer_console::milestone_ui_active() {
+        return;
+    }
+
     framebuffer_console::prepare_boot_ui_frame();
+    framebuffer_console::clear_boot_ui_region(BOOT_UI_OWNED_ROWS);
     framebuffer_console::write_colored(TITLE, RgbColor::CYAN);
     framebuffer_console::write_colored("\n\n", RgbColor::WHITE);
     framebuffer_console::write_colored("               ", RgbColor::WHITE);
