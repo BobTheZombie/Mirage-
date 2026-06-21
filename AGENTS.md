@@ -641,3 +641,16 @@ Required rootfs userland:
 8. /usr/bin/m1-terminal must not be placed under /spider-rt.
 9. A missing spider-rs or spider-rsd is a build failure.
 10. A validator change must include both positive and negative proof.
+
+## Mirage Userspace Launch Contract
+
+1. Do not attempt ring3 entry unless ELF entry and initial stack are proven mapped in the target process address space.
+2. The userspace loader must validate every PT_LOAD segment before creating a runnable task.
+3. The initial stack builder must return only mapped, writable, canonical, aligned user stack pointers.
+4. PID1 may be marked CREATED only after a real process record exists.
+5. PID1 may be marked RUNNABLE only after MTSS accepts a real user task.
+6. PID1 may be marked RUNNING only after execution actually begins.
+7. If launch preflight fails, report an exact failure and do not execute iretq/sysret.
+8. A VirtualBox Guru Meditation or QEMU triple fault during PID1 launch is a release blocker.
+9. Bootdiag serial logs must not corrupt the live milestone framebuffer UI.
+10. The live milestone UI must remain the default boot display after framebuffer init.

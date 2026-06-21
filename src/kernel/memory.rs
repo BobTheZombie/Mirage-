@@ -1141,6 +1141,24 @@ pub fn find_user_mapping(
     None
 }
 
+pub fn find_user_mapping_protection(
+    address_space_root: u64,
+    user_address: u64,
+    length: usize,
+) -> Option<MemoryProtection> {
+    let table = ADDRESS_SPACES.lock();
+    let mut idx = 0usize;
+    while idx < MAX_USER_MAPPINGS {
+        if let Some(mapping) = table.mappings[idx] {
+            if mapping.contains(address_space_root, user_address, length, false) {
+                return Some(mapping.protection);
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
 pub fn munmap(region: MappedRegion) -> bool {
     munmap_ptr_for(region.owner, region.ptr, region.length)
 }
