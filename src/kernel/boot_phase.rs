@@ -1063,6 +1063,7 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | PhaseState::Online
             | PhaseState::Enabled
             | PhaseState::Running
+            | PhaseState::Found
             | PhaseState::Stub,
         ) => true,
 
@@ -1075,7 +1076,6 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | PhaseState::Pending
             | PhaseState::Started
             | PhaseState::Detected
-            | PhaseState::Found
             | PhaseState::Skipped,
         ) => false,
     }
@@ -1240,7 +1240,7 @@ mod tests {
             (BootPhase::KernelMain, PhaseState::Started),
             (BootPhase::RootFs, PhaseState::Pending),
             (BootPhase::Nvme, PhaseState::Detected),
-            (BootPhase::Gpt, PhaseState::Found),
+            (BootPhase::Gpt, PhaseState::Detected),
             (BootPhase::Battery, PhaseState::Skipped),
         ];
 
@@ -1262,6 +1262,7 @@ mod tests {
             (BootPhase::Framebuffer, PhaseState::Online),
             (BootPhase::Input, PhaseState::Enabled),
             (BootPhase::Userspace, PhaseState::Running),
+            (BootPhase::SpiderRs, PhaseState::Found),
             (BootPhase::Qfs, PhaseState::Failed),
             (BootPhase::Ext4, PhaseState::Stub),
             (BootPhase::BootScreen, PhaseState::Started),
@@ -1275,7 +1276,7 @@ mod tests {
         assert_eq!(
             render_count,
             stable_transitions.len(),
-            "stable milestones, visible stubs, BootScreen, Framebuffer, and failures should repaint"
+            "stable milestones, Found artifacts, visible stubs, BootScreen, Framebuffer, and failures should repaint"
         );
     }
 
