@@ -1031,6 +1031,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         #[cfg(test)]
         let _ = image;
         let entry_point = parsed.entry.0;
+        self.dump_pid1_elf_diagnostics(parsed, false, 0, false);
         #[cfg(test)]
         let address_space_root =
             mirage_mtss::AddressSpaceId::new(CoreTaskId::FIRST_USERSPACE.raw()).raw();
@@ -1058,8 +1059,15 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             top: crate::kernel::userspace::memory::VirtAddr(0x0000_7fff_ff00_0000),
             size: 0x20_000,
         };
+        #[cfg(not(test))]
+        self.preflight_pid1_user_entry(address_space_root, entry_point, stack_top)?;
+        #[cfg(not(test))]
+        self.dump_pid1_elf_diagnostics(parsed, true, stack_top, true);
         let user_stack = StackRange::new(stack.bottom.0, stack.top.0);
         let kernel_stack_top = x86_64::kernel_stack_top(0).saturating_sub(0x4000);
+        if kernel_stack_top == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
         let mtss_task = self
             .mtss_core
             .spawn_userspace(
@@ -1115,6 +1123,71 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         Err(KernelError::UnknownThread)
     }
 
+    fn preflight_pid1_user_entry(
+        &self,
+        address_space_root: u64,
+        entry: u64,
+        stack_pointer: u64,
+    ) -> KernelResult<()> {
+        if address_space_root == 0
+            || entry == 0
+            || entry >= USER_CANONICAL_LIMIT
+            || stack_pointer == 0
+            || stack_pointer >= USER_CANONICAL_LIMIT
+            || (stack_pointer & 0xf) != 0
+        {
+            return Err(KernelError::InvalidArgument);
+        }
+        let entry_prot =
+            crate::kernel::memory::find_user_mapping_protection(address_space_root, entry, 1)
+                .ok_or(KernelError::Loader(
+                    crate::kernel::userspace::LoadError::EntryNotMapped,
+                ))?;
+        if !entry_prot.read || !entry_prot.execute {
+            return Err(KernelError::Loader(
+                crate::kernel::userspace::LoadError::EntryNotMapped,
+            ));
+        }
+        let stack_probe = stack_pointer.saturating_sub(8);
+        let stack_prot =
+            crate::kernel::memory::find_user_mapping_protection(address_space_root, stack_probe, 8)
+                .ok_or(KernelError::Loader(
+                    crate::kernel::userspace::LoadError::StackBuildFailed,
+                ))?;
+        if !stack_prot.read || !stack_prot.write {
+            return Err(KernelError::Loader(
+                crate::kernel::userspace::LoadError::StackBuildFailed,
+            ));
+        }
+        crate::arch::x86_64::early_console::panic_write_fmt(format_args!(
+            "[user-entry preflight]\npid=1\nrip={:#x}\nrsp={:#x}\ncr3={:#x}\ncs=ring3-validated-by-arch-pending\nss=ring3-validated-by-arch-pending\nrflags=0x202\nentry_mapped=true\nstack_mapped=true\n",
+            entry, stack_pointer, address_space_root
+        ));
+        Ok(())
+    }
+
+    fn dump_pid1_elf_diagnostics(
+        &self,
+        parsed: crate::kernel::userspace::elf_loader::ParsedElf,
+        entry_mapped: bool,
+        stack_pointer: u64,
+        stack_mapped: bool,
+    ) {
+        crate::arch::x86_64::early_console::panic_write_fmt(format_args!(
+            "[pid1-loader] ELF entry: {:#x} entry mapped: {} stack: {:#x} stack mapped: {}\n",
+            parsed.entry.0, entry_mapped, stack_pointer, stack_mapped
+        ));
+        let mut idx = 0usize;
+        while idx < parsed.segment_count {
+            let segment = parsed.segments[idx];
+            crate::arch::x86_64::early_console::panic_write_fmt(format_args!(
+                "[pid1-loader] PT_LOAD[{}]: vaddr={:#x} memsz={:#x} filesz={:#x} flags={:#x}\n",
+                idx, segment.vaddr.0, segment.mem_size, segment.file_size, segment.flags
+            ));
+            idx += 1;
+        }
+    }
+
     fn map_pid1_elf_image(
         &mut self,
         owner: ProcessId,
@@ -1125,10 +1198,13 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let mut idx = 0usize;
         while idx < parsed.segment_count {
             let segment = parsed.segments[idx];
-            let (base, len) = crate::kernel::userspace::elf_loader::segment_page_bounds(
+            let mapping = crate::kernel::userspace::elf_loader::segment_mapping(
                 segment.vaddr,
+                segment.file_offset,
                 segment.mem_size,
             );
+            let base = mapping.map_start;
+            let len = mapping.map_len;
             let protection =
                 MemoryProtection::new(true, segment.flags & 0x2 != 0, segment.flags & 0x1 != 0);
             let mapped = crate::kernel::memory::mmap_user_fixed(

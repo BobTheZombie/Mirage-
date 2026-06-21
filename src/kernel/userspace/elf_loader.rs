@@ -11,6 +11,14 @@ pub struct LoadedProgram {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SegmentMapping {
+    pub map_start: VirtAddr,
+    pub map_len: usize,
+    pub page_offset: usize,
+    pub file_start: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadSegment {
     pub vaddr: VirtAddr,
     pub file_offset: usize,
@@ -59,7 +67,8 @@ pub fn validate_elf64(image: &[u8]) -> Result<VirtAddr, LoadError> {
     let mut idx = 0usize;
     while idx < parsed.segment_count {
         let segment = parsed.segments[idx];
-        if contains(segment.vaddr.0, segment.mem_size, parsed.entry.0) {
+        if (segment.flags & 0x1) != 0 && contains(segment.vaddr.0, segment.mem_size, parsed.entry.0)
+        {
             mapped = true;
             break;
         }
@@ -132,7 +141,11 @@ pub fn parse_elf64(image: &[u8]) -> Result<ParsedElf, LoadError> {
             let p_vaddr = read_u64(image, off + 16);
             let p_filesz = read_u64(image, off + 32) as usize;
             let p_memsz = read_u64(image, off + 40) as usize;
-            if p_memsz < p_filesz
+            let p_align = read_u64(image, off + 48);
+            if (p_align > 1
+                && (!p_align.is_power_of_two()
+                    || p_vaddr % p_align != read_u64(image, off + 8) % p_align))
+                || p_memsz < p_filesz
                 || p_offset
                     .checked_add(p_filesz)
                     .map_or(true, |end| end > image.len())
@@ -166,11 +179,26 @@ pub fn parse_elf64(image: &[u8]) -> Result<ParsedElf, LoadError> {
     })
 }
 
+pub const fn segment_mapping(
+    vaddr: VirtAddr,
+    file_offset: usize,
+    mem_size: usize,
+) -> SegmentMapping {
+    let map_start = vaddr.0 & !0xfff;
+    let file_start = file_offset & !0xfff;
+    let page_offset = (vaddr.0 - map_start) as usize;
+    let map_len = align_up(page_offset + mem_size, 4096);
+    SegmentMapping {
+        map_start: VirtAddr(map_start),
+        map_len,
+        page_offset,
+        file_start,
+    }
+}
+
 pub const fn segment_page_bounds(vaddr: VirtAddr, mem_size: usize) -> (VirtAddr, usize) {
-    let start = vaddr.0 & !0xfff;
-    let page_offset = (vaddr.0 - start) as usize;
-    let len = align_up(page_offset + mem_size, 4096);
-    (VirtAddr(start), len)
+    let mapping = segment_mapping(vaddr, 0, mem_size);
+    (mapping.map_start, mapping.map_len)
 }
 
 const fn contains(start: u64, len: usize, value: u64) -> bool {
