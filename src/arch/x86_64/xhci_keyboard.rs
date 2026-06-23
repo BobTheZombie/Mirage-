@@ -170,6 +170,8 @@ struct XhciController {
     max_ports: u8,
     max_slots: u8,
     context_size: u16,
+    command_index: usize,
+    command_cycle: bool,
     event_cycle: bool,
 }
 
@@ -179,6 +181,9 @@ struct UsbDeviceRecord {
     port: u8,
     endpoint_count: u8,
     port_speed: u8,
+    hid_interface_number: u8,
+    interrupt_in_endpoint: u8,
+    interrupt_in_max_packet_size: u16,
     is_hid_boot_keyboard_candidate: bool,
 }
 
@@ -448,15 +453,31 @@ impl DriverModule for UsbCoreModule {
             match unsafe { scan_and_reset_port(controller, port) } {
                 Ok(true) => {
                     crate::kprintln!("[usb] device found on port {}", port + 1);
-                    let record = UsbDeviceRecord {
-                        id: (found + 1) as u8,
-                        port,
-                        endpoint_count: 1,
-                        port_speed: unsafe { read_port_speed(controller, port) },
-                        is_hid_boot_keyboard_candidate: false,
-                    };
-                    if USB_DRIVER_STACK.lock().add_device(record) {
-                        found += 1;
+                    let device_id = (found + 1) as u8;
+                    match unsafe { enumerate_usb_device(&mut controller, device_id, port) } {
+                        Ok(record) => {
+                            if USB_DRIVER_STACK.lock().add_device(record) {
+                                found += 1;
+                            }
+                        }
+                        Err(UsbEnumerationError::AddressDeviceFailed) => {
+                            crate::kprintln!(
+                                "USB DEVICE {} [FAILED: address device command failed]",
+                                device_id
+                            );
+                        }
+                        Err(UsbEnumerationError::DescriptorReadFailed) => {
+                            crate::kprintln!(
+                                "USB DEVICE {} [FAILED: descriptor read failed]",
+                                device_id
+                            );
+                        }
+                        Err(UsbEnumerationError::EndpointSetupFailed) => {
+                            crate::kprintln!(
+                                "USB DEVICE {} [FAILED: endpoint setup failed]",
+                                device_id
+                            );
+                        }
                     }
                 }
                 Ok(false) => {}
@@ -474,10 +495,16 @@ impl DriverModule for UsbCoreModule {
             port += 1;
         }
 
-        USB_DRIVER_STACK
-            .lock()
-            .registry
-            .set_status(USB_CORE_MODULE, DriverStatus::Initialized);
+        {
+            let mut stack = USB_DRIVER_STACK.lock();
+            stack.xhci = Some(controller);
+            stack
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Initialized);
+        }
+        if found == 0 {
+            return Err(DriverError::NoDevice);
+        }
         Ok(())
     }
 
@@ -545,9 +572,9 @@ impl DriverModule for UsbHidModule {
                 if device.is_hid_boot_keyboard_candidate {
                     let hid = HidDeviceRecord {
                         device_id: device.id,
-                        interface_number: 0,
-                        interrupt_in_endpoint: 1,
-                        max_packet_size: 8,
+                        interface_number: device.hid_interface_number,
+                        interrupt_in_endpoint: device.interrupt_in_endpoint,
+                        max_packet_size: device.interrupt_in_max_packet_size,
                         boot_keyboard: true,
                     };
                     if USB_DRIVER_STACK.lock().add_hid(hid) {
@@ -1395,10 +1422,13 @@ unsafe fn bring_up_xhci(
         max_ports,
         max_slots,
         context_size,
+        command_index: 0,
+        command_cycle: true,
         event_cycle: true,
     })
 }
 
+#[derive(Clone, Copy)]
 #[repr(C, align(64))]
 struct XhciAlignedU64<const N: usize>([u64; N]);
 
@@ -1406,6 +1436,23 @@ static mut XHCI_DCBAA: XhciAlignedU64<256> = XhciAlignedU64([0; 256]);
 static mut XHCI_COMMAND_RING: XhciAlignedU64<64> = XhciAlignedU64([0; 64]);
 static mut XHCI_EVENT_RING: XhciAlignedU64<64> = XhciAlignedU64([0; 64]);
 static mut XHCI_ERST: XhciAlignedU64<2> = XhciAlignedU64([0; 2]);
+static mut XHCI_INPUT_CONTEXTS: [XhciAlignedU64<64>; MAX_USB_DEVICES] =
+    [const { XhciAlignedU64([0; 64]) }; MAX_USB_DEVICES];
+static mut XHCI_DEVICE_CONTEXTS: [XhciAlignedU64<64>; MAX_USB_DEVICES] =
+    [const { XhciAlignedU64([0; 64]) }; MAX_USB_DEVICES];
+static mut XHCI_EP0_TRANSFER_RINGS: [XhciAlignedU64<64>; MAX_USB_DEVICES] =
+    [const { XhciAlignedU64([0; 64]) }; MAX_USB_DEVICES];
+static mut XHCI_EP0_DEQUEUE_INDEX: [usize; MAX_USB_DEVICES] = [0; MAX_USB_DEVICES];
+static mut XHCI_EP0_CYCLE: [bool; MAX_USB_DEVICES] = [true; MAX_USB_DEVICES];
+static mut USB_DESCRIPTOR_BUFFER: [XhciAlignedU64<64>; MAX_USB_DEVICES] =
+    [const { XhciAlignedU64([0; 64]) }; MAX_USB_DEVICES];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UsbEnumerationError {
+    AddressDeviceFailed,
+    DescriptorReadFailed,
+    EndpointSetupFailed,
+}
 
 unsafe fn configure_static_xhci_rings(op: *mut u8, runtime: *mut u8) -> Result<(), UsbKbdError> {
     XHCI_DCBAA.0.fill(0);
@@ -1448,37 +1495,362 @@ fn dma_address(virtual_address: u64) -> u64 {
 }
 
 unsafe fn submit_noop_command_and_wait(controller: &mut XhciController) -> Result<(), UsbKbdError> {
-    XHCI_COMMAND_RING.0[0] = 0;
-    XHCI_COMMAND_RING.0[1] = ((23u64) << 10) | 1;
+    submit_command_and_wait(
+        controller,
+        0,
+        0,
+        TRB_TYPE_NOOP_COMMAND,
+        "xHCI No-Op command",
+    )
+    .map(|_| ())
+}
+
+unsafe fn enumerate_usb_device(
+    controller: &mut XhciController,
+    device_id: u8,
+    port: u8,
+) -> Result<UsbDeviceRecord, UsbEnumerationError> {
+    let slot_id = enable_slot(controller).map_err(|_| UsbEnumerationError::AddressDeviceFailed)?;
+    let port_speed = read_port_speed(*controller, port);
+    prepare_device_contexts(controller, device_id, slot_id, port, port_speed)
+        .map_err(|_| UsbEnumerationError::EndpointSetupFailed)?;
+    address_device(controller, device_id, slot_id)
+        .map_err(|_| UsbEnumerationError::AddressDeviceFailed)?;
+
+    let mut device_descriptor = [0u8; 18];
+    ep0_get_descriptor(controller, device_id, slot_id, 1, 0, &mut device_descriptor)
+        .map_err(|_| UsbEnumerationError::DescriptorReadFailed)?;
+    let parsed_device = parse_device_descriptor(&device_descriptor)
+        .map_err(|_| UsbEnumerationError::DescriptorReadFailed)?;
+
+    let mut config_header = [0u8; 9];
+    ep0_get_descriptor(controller, device_id, slot_id, 2, 0, &mut config_header)
+        .map_err(|_| UsbEnumerationError::DescriptorReadFailed)?;
+    let total_length = u16::from_le_bytes([config_header[2], config_header[3]]) as usize;
+    if total_length < 9 || total_length > 512 {
+        return Err(UsbEnumerationError::DescriptorReadFailed);
+    }
+    let descriptor_words = &mut USB_DESCRIPTOR_BUFFER[(device_id - 1) as usize].0;
+    descriptor_words.fill(0);
+    let config_bytes =
+        core::slice::from_raw_parts_mut(descriptor_words.as_mut_ptr() as *mut u8, 512);
+    ep0_get_descriptor(
+        controller,
+        device_id,
+        slot_id,
+        2,
+        0,
+        &mut config_bytes[..total_length],
+    )
+    .map_err(|_| UsbEnumerationError::DescriptorReadFailed)?;
+    let config = scan_configuration_descriptor(&config_bytes[..total_length])
+        .map_err(|_| UsbEnumerationError::DescriptorReadFailed)?;
+
+    crate::kprintln!(
+        "USB DEVICE {} [OK: {:04x}:{:04x} port={} speed={}]",
+        device_id,
+        parsed_device.vendor_id,
+        parsed_device.product_id,
+        port + 1,
+        port_speed
+    );
+
+    Ok(UsbDeviceRecord {
+        id: device_id,
+        port,
+        endpoint_count: if config.interrupt_in.is_some() { 2 } else { 1 },
+        port_speed,
+        hid_interface_number: config
+            .hid_boot_keyboard
+            .map(|interface| interface.number)
+            .unwrap_or(0),
+        interrupt_in_endpoint: config
+            .interrupt_in
+            .map(|endpoint| endpoint.address)
+            .unwrap_or(0),
+        interrupt_in_max_packet_size: config
+            .interrupt_in
+            .map(|endpoint| endpoint.max_packet_size)
+            .unwrap_or(0),
+        is_hid_boot_keyboard_candidate: config.hid_boot_keyboard.is_some()
+            && config.interrupt_in.is_some(),
+    })
+}
+
+unsafe fn enable_slot(controller: &mut XhciController) -> Result<u8, UsbKbdError> {
+    submit_command_and_wait(
+        controller,
+        0,
+        0,
+        TRB_TYPE_ENABLE_SLOT_COMMAND,
+        "xHCI Enable Slot command",
+    )
+    .and_then(|event| {
+        if event.slot_id == 0 {
+            Err(UsbKbdError::InvalidMmio("xHCI Enable Slot returned slot 0"))
+        } else {
+            Ok(event.slot_id)
+        }
+    })
+}
+
+unsafe fn address_device(
+    controller: &mut XhciController,
+    device_id: u8,
+    slot_id: u8,
+) -> Result<(), UsbKbdError> {
+    let input_context = dma_address(core::ptr::addr_of_mut!(
+        XHCI_INPUT_CONTEXTS[(device_id - 1) as usize].0
+    ) as u64);
+    let control = ((slot_id as u64) << 24) | ((TRB_TYPE_ADDRESS_DEVICE_COMMAND as u64) << 10) | 1;
+    submit_command_and_wait_raw(
+        controller,
+        input_context,
+        0,
+        control,
+        "xHCI Address Device command",
+    )
+    .and_then(|_| Ok(()))
+}
+
+#[derive(Clone, Copy)]
+struct XhciCommandEvent {
+    completion_code: u8,
+    slot_id: u8,
+}
+
+unsafe fn submit_command_and_wait(
+    controller: &mut XhciController,
+    parameter: u64,
+    status: u32,
+    trb_type: u8,
+    stage: &'static str,
+) -> Result<XhciCommandEvent, UsbKbdError> {
+    submit_command_and_wait_raw(
+        controller,
+        parameter,
+        status,
+        ((trb_type as u64) << 10) | 1,
+        stage,
+    )
+}
+
+unsafe fn submit_command_and_wait_raw(
+    controller: &mut XhciController,
+    parameter: u64,
+    status: u32,
+    control: u64,
+    stage: &'static str,
+) -> Result<XhciCommandEvent, UsbKbdError> {
+    XHCI_EVENT_RING.0[0] = 0;
+    XHCI_EVENT_RING.0[1] = 0;
+    let index = controller.command_index.min(125);
+    let cycle_control = (control & !1) | u64::from(controller.command_cycle);
+    XHCI_COMMAND_RING.0[index * 2] = parameter;
+    XHCI_COMMAND_RING.0[index * 2 + 1] = ((status as u64) & 0xffff_ffff) | (cycle_control << 32);
     mmio_write32(controller.doorbells as *mut u8, 0, 0);
+    let event = wait_command_completion(controller, stage)?;
+    controller.command_index += 1;
+    if controller.command_index >= 126 {
+        controller.command_index = 0;
+        controller.command_cycle = !controller.command_cycle;
+    }
+    Ok(event)
+}
+
+unsafe fn wait_command_completion(
+    controller: &mut XhciController,
+    stage: &'static str,
+) -> Result<XhciCommandEvent, UsbKbdError> {
     let mut count = 0usize;
     while count < EVENT_POLL_LIMIT {
-        let event0 = core::ptr::read_volatile(core::ptr::addr_of!(XHCI_EVENT_RING.0[0]));
         let event1 = core::ptr::read_volatile(core::ptr::addr_of!(XHCI_EVENT_RING.0[1]));
-        let cycle = (event1 & 1) != 0;
-        let trb_type = ((event1 >> 10) & 0x3f) as u8;
-        if cycle == controller.event_cycle && trb_type == 33 {
-            let completion_code = ((event1 >> 24) & 0xff) as u8;
+        let status = event1 as u32;
+        let control = (event1 >> 32) as u32;
+        if (control & 1) == controller.event_cycle as u32
+            && ((control >> 10) & 0x3f) as u8 == TRB_TYPE_COMMAND_COMPLETION_EVENT
+        {
+            let completion_code = ((status >> 24) & 0xff) as u8;
+            let slot_id = ((control >> 24) & 0xff) as u8;
+            acknowledge_event(controller, 1);
             if completion_code == 1 {
-                let erdp = dma_address(core::ptr::addr_of!(XHCI_EVENT_RING.0[2]) as u64) | (1 << 3);
-                let interrupter = (controller.runtime as *mut u8).add(0x20);
-                mmio_write32(interrupter, 0x18, erdp as u32);
-                mmio_write32(interrupter, 0x1c, (erdp >> 32) as u32);
-                let sts = mmio_read32(controller.op as *mut u8, 0x04);
-                mmio_write32(controller.op as *mut u8, 0x04, sts | USBSTS_EINT);
-                let _ = event0;
-                return Ok(());
+                return Ok(XhciCommandEvent {
+                    completion_code,
+                    slot_id,
+                });
             }
-            return Err(UsbKbdError::InvalidMmio(
-                "xHCI No-Op command completion failed",
-            ));
+            return Err(UsbKbdError::InvalidMmio(stage));
         }
         core::hint::spin_loop();
         count += 1;
     }
-    Err(UsbKbdError::Timeout(
-        "timeout waiting for xHCI No-Op command completion",
-    ))
+    Err(UsbKbdError::Timeout(stage))
+}
+
+unsafe fn acknowledge_event(controller: XhciController, consumed_trbs: usize) {
+    let erdp =
+        dma_address(core::ptr::addr_of!(XHCI_EVENT_RING.0[consumed_trbs * 2]) as u64) | (1 << 3);
+    let interrupter = (controller.runtime as *mut u8).add(0x20);
+    mmio_write32(interrupter, 0x18, erdp as u32);
+    mmio_write32(interrupter, 0x1c, (erdp >> 32) as u32);
+    let sts = mmio_read32(controller.op as *mut u8, 0x04);
+    mmio_write32(controller.op as *mut u8, 0x04, sts | USBSTS_EINT);
+}
+
+unsafe fn prepare_device_contexts(
+    controller: &XhciController,
+    device_id: u8,
+    slot_id: u8,
+    port: u8,
+    port_speed: u8,
+) -> Result<(), UsbKbdError> {
+    if device_id == 0 || device_id as usize > MAX_USB_DEVICES || slot_id == 0 {
+        return Err(UsbKbdError::InvalidMmio("invalid USB device slot"));
+    }
+    let index = (device_id - 1) as usize;
+    XHCI_INPUT_CONTEXTS[index].0.fill(0);
+    XHCI_DEVICE_CONTEXTS[index].0.fill(0);
+    XHCI_EP0_TRANSFER_RINGS[index].0.fill(0);
+    XHCI_EP0_DEQUEUE_INDEX[index] = 0;
+    XHCI_EP0_CYCLE[index] = true;
+
+    let device_context = dma_address(core::ptr::addr_of_mut!(XHCI_DEVICE_CONTEXTS[index].0) as u64);
+    XHCI_DCBAA.0[slot_id as usize] = device_context;
+
+    write_context_u32(controller, &mut XHCI_INPUT_CONTEXTS[index], 0, 0, 0);
+    write_context_u32(controller, &mut XHCI_INPUT_CONTEXTS[index], 0, 1, 0x3);
+
+    let route_string = 0u32;
+    let slot_info = route_string | ((port_speed as u32) << 20) | (1 << 27);
+    write_context_u32(controller, &mut XHCI_INPUT_CONTEXTS[index], 1, 0, slot_info);
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[index],
+        1,
+        1,
+        (port as u32 + 1) << 16,
+    );
+
+    let ep0_ring_dma =
+        dma_address(core::ptr::addr_of_mut!(XHCI_EP0_TRANSFER_RINGS[index].0) as u64);
+    XHCI_EP0_TRANSFER_RINGS[index].0[126] = ep0_ring_dma;
+    XHCI_EP0_TRANSFER_RINGS[index].0[127] = ((6u64) << 42) | (1u64 << 33) | 1;
+
+    let ep0_type_control = 4u32 << 3;
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[index],
+        2,
+        1,
+        ep0_type_control | (3 << 1) | (8 << 16),
+    );
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[index],
+        2,
+        2,
+        (ep0_ring_dma as u32) | 1,
+    );
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[index],
+        2,
+        3,
+        (ep0_ring_dma >> 32) as u32,
+    );
+    write_context_u32(controller, &mut XHCI_INPUT_CONTEXTS[index], 2, 4, 8);
+    Ok(())
+}
+
+fn write_context_u32<const N: usize>(
+    controller: &XhciController,
+    context: &mut XhciAlignedU64<N>,
+    context_index: usize,
+    dword: usize,
+    value: u32,
+) {
+    let byte_offset = context_index * controller.context_size as usize + dword * 4;
+    let word = byte_offset / 8;
+    if word >= N {
+        return;
+    }
+    if byte_offset & 4 == 0 {
+        context.0[word] = (context.0[word] & 0xffff_ffff_0000_0000) | value as u64;
+    } else {
+        context.0[word] = (context.0[word] & 0x0000_0000_ffff_ffff) | ((value as u64) << 32);
+    }
+}
+
+unsafe fn ep0_get_descriptor(
+    controller: &mut XhciController,
+    device_id: u8,
+    slot_id: u8,
+    descriptor_type: u8,
+    descriptor_index: u8,
+    out: &mut [u8],
+) -> Result<(), UsbKbdError> {
+    if out.is_empty() || out.len() > 512 {
+        return Err(UsbKbdError::InvalidMmio("invalid descriptor buffer"));
+    }
+    let index = (device_id - 1) as usize;
+    let buffer = &mut USB_DESCRIPTOR_BUFFER[index].0;
+    buffer.fill(0);
+    let buffer_dma = dma_address(buffer.as_mut_ptr() as u64);
+    let ring = &mut XHCI_EP0_TRANSFER_RINGS[index].0;
+    let start = XHCI_EP0_DEQUEUE_INDEX[index].min(57);
+    let cycle = u64::from(XHCI_EP0_CYCLE[index]);
+    let setup = 0x80u64
+        | ((6u64) << 8)
+        | (((descriptor_index as u64) | ((descriptor_type as u64) << 8)) << 16)
+        | ((out.len() as u64) << 48);
+    ring[start * 2] = setup;
+    ring[start * 2 + 1] = ((8u64) | ((2u64) << 16)) | (((2u64 << 10) | (3u64 << 16) | cycle) << 32);
+    ring[start * 2 + 2] = buffer_dma;
+    ring[start * 2 + 3] = (out.len() as u64) | (((3u64 << 10) | (1u64 << 16) | cycle) << 32);
+    ring[start * 2 + 4] = 0;
+    ring[start * 2 + 5] = ((4u64 << 10) | (1u64 << 16) | cycle) << 32;
+    XHCI_EVENT_RING.0[0] = 0;
+    XHCI_EVENT_RING.0[1] = 0;
+    mmio_write32(
+        (controller.doorbells as *mut u8).add(slot_id as usize * 4),
+        0,
+        1,
+    );
+    wait_transfer_completion(controller, slot_id, "USB descriptor control transfer")?;
+    XHCI_EP0_DEQUEUE_INDEX[index] += 3;
+    if XHCI_EP0_DEQUEUE_INDEX[index] >= 58 {
+        XHCI_EP0_DEQUEUE_INDEX[index] = 0;
+        XHCI_EP0_CYCLE[index] = !XHCI_EP0_CYCLE[index];
+    }
+    let bytes = core::slice::from_raw_parts(buffer.as_ptr() as *const u8, out.len());
+    out.copy_from_slice(bytes);
+    Ok(())
+}
+
+unsafe fn wait_transfer_completion(
+    controller: &mut XhciController,
+    slot_id: u8,
+    stage: &'static str,
+) -> Result<(), UsbKbdError> {
+    let mut count = 0usize;
+    while count < EVENT_POLL_LIMIT {
+        let event1 = core::ptr::read_volatile(core::ptr::addr_of!(XHCI_EVENT_RING.0[1]));
+        let status = event1 as u32;
+        let control = (event1 >> 32) as u32;
+        if (control & 1) == controller.event_cycle as u32
+            && ((control >> 10) & 0x3f) as u8 == TRB_TYPE_TRANSFER_EVENT
+            && ((control >> 24) & 0xff) as u8 == slot_id
+        {
+            acknowledge_event(*controller, 1);
+            if ((status >> 24) & 0xff) as u8 == 1 {
+                return Ok(());
+            }
+            return Err(UsbKbdError::InvalidMmio(stage));
+        }
+        core::hint::spin_loop();
+        count += 1;
+    }
+    Err(UsbKbdError::Timeout(stage))
 }
 
 unsafe fn scan_and_reset_port(controller: XhciController, port: u8) -> Result<bool, UsbKbdError> {
