@@ -8,9 +8,9 @@ use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
-    boot_phase_failed, boot_phase_found, boot_phase_ok, boot_phase_online, boot_phase_running,
-    boot_phase_skipped, boot_phase_start, boot_phase_stub, boot_phase_validate_no_unresolved,
-    BootPhase,
+    boot_phase_failed, boot_phase_found, boot_phase_ok, boot_phase_online, boot_phase_pending,
+    boot_phase_running, boot_phase_skipped, boot_phase_start, boot_phase_stub,
+    boot_phase_validate_no_unresolved, BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
@@ -509,13 +509,62 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
         mirage::kprintln!("[bootdiag] MTSS init starting");
         boot_phase_start(BootPhase::Mtss);
-        kernel.kernel_mtss_init();
-        #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
-        mirage::kprintln!("[bootdiag] MTSS init returned");
-        boot_phase_online(BootPhase::Mtss);
-        mirage::kprintln!("MTSS initialized");
-        boot_deps.mtss_online = true;
-        mirage::kprintln!("MTSS [Online]");
+        match kernel.kernel_mtss_init() {
+            Ok(report) => {
+                #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+                mirage::kprintln!("[bootdiag] MTSS init returned");
+                mirage::kprintln!(
+                    "MTSS CORE [{}]",
+                    if report.core_ready {
+                        "READY"
+                    } else {
+                        "PENDING"
+                    }
+                );
+                mirage::kprintln!(
+                    "MTSS SCHEDULER [{}]",
+                    if report.scheduler_ready {
+                        "READY"
+                    } else {
+                        "PENDING"
+                    }
+                );
+                mirage::kprintln!(
+                    "MTSS TIMER [{}]",
+                    if report.timer_ready {
+                        "READY"
+                    } else {
+                        "PENDING"
+                    }
+                );
+                mirage::kprintln!(
+                    "MTSS PREEMPTION [{}]",
+                    if report.preemption_ready {
+                        "READY"
+                    } else {
+                        "PENDING"
+                    }
+                );
+
+                if report.required_components_ready() {
+                    boot_phase_online(BootPhase::Mtss);
+                    boot_deps.mtss_online = true;
+                    mirage::kprintln!("MTSS [ ONLINE ]");
+                } else if !report.timer_ready || !report.preemption_ready {
+                    boot_phase_pending(BootPhase::Mtss, "timer/preemption backend pending");
+                    mirage::kprintln!("MTSS [DEGRADED: timer/preemption backend pending]");
+                } else {
+                    boot_phase_pending(BootPhase::Mtss, "required component pending");
+                    mirage::kprintln!("MTSS [PENDING: required component pending]");
+                }
+            }
+            Err(error) => {
+                #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+                mirage::kprintln!("[bootdiag] MTSS init failed");
+                boot_phase_failed(BootPhase::Mtss, "MTSS initialization failed");
+                mirage::kprintln!("MTSS [FAILED: {:?}]", error);
+            }
+        }
         static SPIDER_BOOTRT_IMAGE: mirage::kernel::sync::SpinLock<[u8; 1024 * 1024]> =
             mirage::kernel::sync::SpinLock::new([0; 1024 * 1024]);
         let mut spider_image = SPIDER_BOOTRT_IMAGE.lock();

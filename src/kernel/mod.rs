@@ -707,6 +707,27 @@ pub enum KernelError {
 pub type KernelResult<T> = core::result::Result<T, KernelError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MtssInitReport {
+    pub core_ready: bool,
+    pub scheduler_ready: bool,
+    pub timer_ready: bool,
+    pub preemption_ready: bool,
+    pub idle_ready: bool,
+    pub api_ready: bool,
+}
+
+impl MtssInitReport {
+    pub const fn required_components_ready(&self) -> bool {
+        self.core_ready
+            && self.scheduler_ready
+            && self.timer_ready
+            && self.preemption_ready
+            && self.idle_ready
+            && self.api_ready
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessExitReport {
     pub pid: ProcessId,
     pub status: ExitStatus,
@@ -968,16 +989,29 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     /// Initialize the kernel-facing MTSS integration without installing a
-    /// CPU-specific context-switching backend for this milestone.
-    pub fn kernel_mtss_init(&mut self) {
+    /// CPU-specific timer/preemption backend for this milestone.
+    pub fn kernel_mtss_init(&mut self) -> Result<MtssInitReport, KernelError> {
         self.mtss_core = CoreMtss::new();
+        self.mtss_initialized = false;
+        self.mtss_ticks = 0;
+
         let kernel_stack_top = x86_64::kernel_stack_top(0);
         let kernel_stack =
             StackRange::new(kernel_stack_top.saturating_sub(0x4000), kernel_stack_top);
-        if self.mtss_core.init_with_idle(kernel_stack).is_ok() {
-            self.mtss_initialized = true;
-            self.mtss_ticks = 0;
-        }
+        self.mtss_core
+            .init_with_idle(kernel_stack)
+            .map_err(map_core_mtss_error)?;
+
+        self.mtss_initialized = true;
+
+        Ok(MtssInitReport {
+            core_ready: true,
+            scheduler_ready: true,
+            timer_ready: false,
+            preemption_ready: false,
+            idle_ready: true,
+            api_ready: true,
+        })
     }
 
     /// Let MTSS observe the timer tick before kernel-owned timer, wakeup, and
