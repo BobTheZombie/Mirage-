@@ -22,8 +22,10 @@ pub const PCI_SUBCLASS_USB: u8 = 0x03;
 pub const PCI_PROGIF_XHCI: u8 = 0x30;
 
 const USBSTS_HCH: u32 = 1 << 0;
+const USBSTS_EINT: u32 = 1 << 3;
 const USBCMD_RUN: u32 = 1 << 0;
 const USBCMD_RESET: u32 = 1 << 1;
+const USBCMD_INTE: u32 = 1 << 2;
 const PORTSC_CCS: u32 = 1 << 0;
 const PORTSC_PED: u32 = 1 << 1;
 const PORTSC_PR: u32 = 1 << 4;
@@ -31,6 +33,7 @@ const PORTSC_PP: u32 = 1 << 9;
 const PORT_REGISTER_STRIDE: usize = 0x10;
 const PORT_REGISTER_BASE: usize = 0x400;
 const WAIT_LIMIT: usize = 1_000_000;
+const EVENT_POLL_LIMIT: usize = 250_000;
 const MAX_USB_DEVICES: usize = 8;
 const MAX_HID_DEVICES: usize = 4;
 
@@ -167,6 +170,7 @@ struct XhciController {
     max_ports: u8,
     max_slots: u8,
     context_size: u16,
+    event_cycle: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -368,14 +372,19 @@ impl DriverModule for XhciHostModule {
         if USB_DRIVER_STACK.lock().xhci.is_none() {
             return Err(DriverError::NoController);
         }
-        // The lower-kernel path has halted, reset, configured rings, and started
-        // the controller.  It is not ONLINE until a command/event round trip has
-        // completed; keep the staged status honest for the boot UI.
-        USB_DRIVER_STACK
-            .lock()
-            .registry
-            .set_status(XHCI_MODULE, DriverStatus::Started);
-        crate::kprintln!("[xhci] controller started; event-path smoke test pending");
+        let mut stack = USB_DRIVER_STACK.lock();
+        let Some(mut controller) = stack.xhci else {
+            return Err(DriverError::NoController);
+        };
+        drop(stack);
+        unsafe { submit_noop_command_and_wait(&mut controller) }.map_err(|error| match error {
+            UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
+            UsbKbdError::Timeout(stage) => DriverError::Timeout(stage),
+        })?;
+        let mut stack = USB_DRIVER_STACK.lock();
+        stack.xhci = Some(controller);
+        stack.registry.set_status(XHCI_MODULE, DriverStatus::Online);
+        crate::kprintln!("[xhci] command/event rings ok; irq mode: polling");
         Ok(())
     }
 
@@ -726,8 +735,8 @@ pub fn initialize_usb_driver_stack(hhdm_offset: Option<u64>) -> UsbStackBootStat
 
 fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> ModuleInitStatus {
     use crate::kernel::boot_phase::{
-        boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_pending, boot_phase_skipped, boot_phase_start,
-        PhaseState,
+        boot_phase_failed, boot_phase_ok, boot_phase_online, boot_phase_pending,
+        boot_phase_skipped, boot_phase_start, PhaseState,
     };
 
     let descriptor = module.descriptor();
@@ -786,7 +795,9 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
     let status = match module.init().and_then(|_| module.start()) {
         Ok(()) => match module.status() {
             DriverStatus::Online => ModuleInitStatus::Online,
-            DriverStatus::Started => ModuleInitStatus::Pending("controller started; event path pending"),
+            DriverStatus::Started => {
+                ModuleInitStatus::Pending("controller started; event path pending")
+            }
             DriverStatus::Initialized => ModuleInitStatus::Ok,
             DriverStatus::Pending => ModuleInitStatus::Pending("driver pending"),
             DriverStatus::Skipped => ModuleInitStatus::Skipped("module skipped"),
@@ -1339,6 +1350,7 @@ unsafe fn bring_up_xhci(
     let op = base.add(cap_length);
     let hcsparams1 = mmio_read32(base, 0x04);
     let hccparams1 = mmio_read32(base, 0x10);
+    let hcsparams2 = mmio_read32(base, 0x08);
     let dboff = (mmio_read32(base, 0x14) & !0x3) as usize;
     let rtsoff = (mmio_read32(base, 0x18) & !0x1f) as usize;
     if dboff == 0 || rtsoff == 0 {
@@ -1361,10 +1373,16 @@ unsafe fn bring_up_xhci(
         return Err(UsbKbdError::InvalidMmio("xHCI reports zero root ports"));
     }
     let context_size = if hccparams1 & (1 << 2) != 0 { 64 } else { 32 };
-    configure_static_xhci_rings(op)?;
+    let max_scratchpads = (((hcsparams2 >> 21) & 0x1f) << 5) | ((hcsparams2 >> 27) & 0x1f);
+    if max_scratchpads != 0 {
+        return Err(UsbKbdError::InvalidMmio(
+            "xHCI scratchpad buffers require DMA allocator integration",
+        ));
+    }
+    configure_static_xhci_rings(op, base.add(rtsoff))?;
     mmio_write32(op, 0x38, max_slots as u32);
 
-    cmd = mmio_read32(op, 0x00) | USBCMD_RUN;
+    cmd = mmio_read32(op, 0x00) | USBCMD_RUN | USBCMD_INTE;
     mmio_write32(op, 0x00, cmd);
     wait_status(op, USBSTS_HCH, false, "timeout waiting for controller run")?;
     Ok(XhciController {
@@ -1377,6 +1395,7 @@ unsafe fn bring_up_xhci(
         max_ports,
         max_slots,
         context_size,
+        event_cycle: true,
     })
 }
 
@@ -1388,11 +1407,20 @@ static mut XHCI_COMMAND_RING: XhciAlignedU64<64> = XhciAlignedU64([0; 64]);
 static mut XHCI_EVENT_RING: XhciAlignedU64<64> = XhciAlignedU64([0; 64]);
 static mut XHCI_ERST: XhciAlignedU64<2> = XhciAlignedU64([0; 2]);
 
-unsafe fn configure_static_xhci_rings(op: *mut u8) -> Result<(), UsbKbdError> {
-    let dcbaa = core::ptr::addr_of_mut!(XHCI_DCBAA.0) as u64;
-    let command_ring = (core::ptr::addr_of_mut!(XHCI_COMMAND_RING.0) as u64) | 1;
-    let event_ring = core::ptr::addr_of_mut!(XHCI_EVENT_RING.0) as u64;
-    let erst = core::ptr::addr_of_mut!(XHCI_ERST.0) as u64;
+unsafe fn configure_static_xhci_rings(op: *mut u8, runtime: *mut u8) -> Result<(), UsbKbdError> {
+    XHCI_DCBAA.0.fill(0);
+    XHCI_COMMAND_RING.0.fill(0);
+    XHCI_EVENT_RING.0.fill(0);
+    XHCI_ERST.0.fill(0);
+    let command_ring_virt = core::ptr::addr_of_mut!(XHCI_COMMAND_RING.0) as u64;
+    let command_ring_dma = dma_address(command_ring_virt);
+    XHCI_COMMAND_RING.0[126] = command_ring_dma;
+    XHCI_COMMAND_RING.0[127] = ((6u64) << 10) | (1 << 1) | 1;
+
+    let dcbaa = dma_address(core::ptr::addr_of_mut!(XHCI_DCBAA.0) as u64);
+    let command_ring = command_ring_dma | 1;
+    let event_ring = dma_address(core::ptr::addr_of_mut!(XHCI_EVENT_RING.0) as u64);
+    let erst = dma_address(core::ptr::addr_of_mut!(XHCI_ERST.0) as u64);
 
     XHCI_ERST.0[0] = event_ring;
     XHCI_ERST.0[1] = 64;
@@ -1402,11 +1430,55 @@ unsafe fn configure_static_xhci_rings(op: *mut u8) -> Result<(), UsbKbdError> {
     mmio_write32(op, 0x18, command_ring as u32);
     mmio_write32(op, 0x1c, (command_ring >> 32) as u32);
 
-    // Interrupter 0 ERST registers are under RTSOFF + 0x20, but Mirage still
-    // lacks a generic xHCI interrupt owner. Keep command/event backing prepared
-    // without submitting commands from this boot path.
-    let _ = erst;
+    let interrupter = runtime.add(0x20);
+    mmio_write32(interrupter, 0x00, 0x3);
+    mmio_write32(interrupter, 0x04, 0);
+    mmio_write32(interrupter, 0x08, 1);
+    mmio_write32(interrupter, 0x10, erst as u32);
+    mmio_write32(interrupter, 0x14, (erst >> 32) as u32);
+    mmio_write32(interrupter, 0x18, event_ring as u32);
+    mmio_write32(interrupter, 0x1c, ((event_ring >> 32) as u32) | (1 << 3));
     Ok(())
+}
+
+fn dma_address(virtual_address: u64) -> u64 {
+    crate::arch::x86_64::paging::translate_kernel_address(virtual_address).unwrap_or_else(|| {
+        crate::arch::x86_64::paging::active_translator().physical_for_virtual(virtual_address)
+    })
+}
+
+unsafe fn submit_noop_command_and_wait(controller: &mut XhciController) -> Result<(), UsbKbdError> {
+    XHCI_COMMAND_RING.0[0] = 0;
+    XHCI_COMMAND_RING.0[1] = ((23u64) << 10) | 1;
+    mmio_write32(controller.doorbells as *mut u8, 0, 0);
+    let mut count = 0usize;
+    while count < EVENT_POLL_LIMIT {
+        let event0 = core::ptr::read_volatile(core::ptr::addr_of!(XHCI_EVENT_RING.0[0]));
+        let event1 = core::ptr::read_volatile(core::ptr::addr_of!(XHCI_EVENT_RING.0[1]));
+        let cycle = (event1 & 1) != 0;
+        let trb_type = ((event1 >> 10) & 0x3f) as u8;
+        if cycle == controller.event_cycle && trb_type == 33 {
+            let completion_code = ((event1 >> 24) & 0xff) as u8;
+            if completion_code == 1 {
+                let erdp = dma_address(core::ptr::addr_of!(XHCI_EVENT_RING.0[2]) as u64) | (1 << 3);
+                let interrupter = (controller.runtime as *mut u8).add(0x20);
+                mmio_write32(interrupter, 0x18, erdp as u32);
+                mmio_write32(interrupter, 0x1c, (erdp >> 32) as u32);
+                let sts = mmio_read32(controller.op as *mut u8, 0x04);
+                mmio_write32(controller.op as *mut u8, 0x04, sts | USBSTS_EINT);
+                let _ = event0;
+                return Ok(());
+            }
+            return Err(UsbKbdError::InvalidMmio(
+                "xHCI No-Op command completion failed",
+            ));
+        }
+        core::hint::spin_loop();
+        count += 1;
+    }
+    Err(UsbKbdError::Timeout(
+        "timeout waiting for xHCI No-Op command completion",
+    ))
 }
 
 unsafe fn scan_and_reset_port(controller: XhciController, port: u8) -> Result<bool, UsbKbdError> {
@@ -1421,7 +1493,6 @@ unsafe fn scan_and_reset_port(controller: XhciController, port: u8) -> Result<bo
     reset_port(registers, port)?;
     Ok(true)
 }
-
 
 unsafe fn read_port_speed(controller: XhciController, port: u8) -> u8 {
     let portsc = mmio_read32(controller.op as *mut u8, portsc_offset(port));

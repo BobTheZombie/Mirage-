@@ -654,3 +654,18 @@ Required rootfs userland:
 8. A VirtualBox Guru Meditation or QEMU triple fault during PID1 launch is a release blocker.
 9. Bootdiag serial logs must not corrupt the live milestone framebuffer UI.
 10. The live milestone UI must remain the default boot display after framebuffer init.
+
+---
+
+## Mirage Hardware Driver Contract
+
+1. Hardware drivers must use bounded waits only. No infinite polling loops.
+2. Driver failure must not block boot unless explicitly configured fatal.
+3. Drivers must not mark hardware ONLINE unless real initialization succeeded.
+4. Linux kernel source may be studied as a reference, but GPL code must not be copied into Mirage.
+5. Hardware implementation must be original Rust code based on public specs, observed hardware behavior, and documented quirks.
+6. xHCI/USB bring-up must validate MMIO, rings, command/event flow, and device descriptors before reporting ONLINE.
+7. USB input must not block boot waiting for the first key event.
+8. Verbose hardware diagnostics go to serial by default; framebuffer milestone UI stays concise and live.
+9. Real hardware quirks must be documented with source/provenance.
+10. Do not open PRs for driver bring-up unless QEMU/VirtualBox boot still works and failures are explicit.
