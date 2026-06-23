@@ -1,6 +1,6 @@
 # Linux xHCI / AMD Renoir Reference Audit
 
-This audit records Linux source files inspected as behavioral/provenance references for Mirage's independent Rust xHCI/USB/Renoir bring-up. No Linux GPL C code was copied into Mirage.
+This audit records Linux source files inspected as behavioral/provenance references for Mirage's independent Rust xHCI/USB/Renoir bring-up. Linux source was inspected only for behavior, sequencing, quirks, and provenance; no Linux GPL C code, structures, comments, tables, or quirk implementations were copied into Mirage.
 
 ## Linux files inspected
 
@@ -49,7 +49,8 @@ Mirage implements an original Rust early xHCI path in `src/arch/x86_64/xhci_keyb
 - Bounded halt/reset/start waits.
 - Static early-boot DCBAA, command ring, event ring, ERST, and interrupter-0 setup with physical-address translation.
 - A No-Op command submission and bounded command-completion event poll before `xhci-host0` is marked `ONLINE`.
-- Root-port scan and reset with bounded waits; USB/HID/keyboard phases remain skipped unless real devices and class paths are proven.
+- Root-port scan and reset with bounded waits; this only resets connected ports and does not complete USB Address Device or descriptor enumeration.
+- USB/HID keyboard/storage phases remain pending unless real descriptor reads, endpoint setup, and transfer-ring/class paths are proven.
 
 ## Intentionally not copied
 
@@ -58,5 +59,7 @@ No Linux functions, structures, comments, tables, or quirk code were copied. Lin
 ## Remaining unknowns
 
 - Real Dell Inspiron 15 5505/Ryzen 5 4500U scratchpad count, IOMMU mode, MSI routing, and firmware handoff behavior need hardware logs.
-- USB descriptor control transfers, Address Device, HID Set Protocol/Idle, and USB Mass Storage BOT command transport are not yet complete in the early kernel path.
+- Current code proves xHCI PCI/MMIO/reset/ring/No-Op liveness only.
+- USB descriptor control transfers, Address Device, HID Set Protocol/Idle, HID interrupt transfers, and USB Mass Storage BOT command transport are not yet complete in the early kernel path.
+- Scratchpad buffers, IOMMU-aware DMA, MSI/MSI-X delivery, and BIOS/OS ownership handoff remain blockers for broader real-hardware coverage.
 - A supervised `usbd` service should eventually own most of this logic after the kernel provides DMA/MMIO/IRQ capabilities.
