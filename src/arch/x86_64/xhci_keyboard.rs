@@ -36,6 +36,7 @@ const WAIT_LIMIT: usize = 1_000_000;
 const EVENT_POLL_LIMIT: usize = 250_000;
 const MAX_USB_DEVICES: usize = 8;
 const MAX_HID_DEVICES: usize = 4;
+const MAX_STORAGE_DEVICES: usize = 4;
 const XHCI_PAGE_SIZE: usize = crate::kernel::memory::PAGE_SIZE;
 const XHCI_MAX_SCRATCHPADS: usize = 1024;
 
@@ -200,6 +201,12 @@ struct UsbDeviceRecord {
     interrupt_in_interval: u8,
     configuration_value: u8,
     is_hid_boot_keyboard_candidate: bool,
+    storage_interface_number: u8,
+    bulk_in_endpoint: u8,
+    bulk_in_max_packet_size: u16,
+    bulk_out_endpoint: u8,
+    bulk_out_max_packet_size: u16,
+    is_mass_storage_bot_candidate: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,11 +224,25 @@ struct HidDeviceRecord {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UsbStorageDeviceRecord {
+    device_id: u8,
+    slot_id: u8,
+    interface_number: u8,
+    bulk_in_endpoint: u8,
+    bulk_in_max_packet_size: u16,
+    bulk_out_endpoint: u8,
+    bulk_out_max_packet_size: u16,
+    configuration_value: u8,
+    bot_ready: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct UsbDriverStackState {
     registry: DriverRegistry,
     xhci: Option<XhciController>,
     devices: [Option<UsbDeviceRecord>; MAX_USB_DEVICES],
     hids: [Option<HidDeviceRecord>; MAX_HID_DEVICES],
+    storage_devices: [Option<UsbStorageDeviceRecord>; MAX_STORAGE_DEVICES],
     keyboard_online: bool,
 }
 
@@ -232,6 +253,7 @@ impl UsbDriverStackState {
             xhci: None,
             devices: [None; MAX_USB_DEVICES],
             hids: [None; MAX_HID_DEVICES],
+            storage_devices: [None; MAX_STORAGE_DEVICES],
             keyboard_online: false,
         }
     }
@@ -240,6 +262,7 @@ impl UsbDriverStackState {
         self.xhci = None;
         self.devices = [None; MAX_USB_DEVICES];
         self.hids = [None; MAX_HID_DEVICES];
+        self.storage_devices = [None; MAX_STORAGE_DEVICES];
         self.keyboard_online = false;
     }
 
@@ -260,6 +283,18 @@ impl UsbDriverStackState {
         while index < self.hids.len() {
             if self.hids[index].is_none() {
                 self.hids[index] = Some(record);
+                return true;
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn add_storage(&mut self, record: UsbStorageDeviceRecord) -> bool {
+        let mut index = 0usize;
+        while index < self.storage_devices.len() {
+            if self.storage_devices[index].is_none() {
+                self.storage_devices[index] = Some(record);
                 return true;
             }
             index += 1;
@@ -716,12 +751,14 @@ impl DriverModule for UsbHidModule {
         }
 
         if claimed == 0 {
+            detect_usb_mass_storage_after_descriptor_enumeration();
             USB_DRIVER_STACK
                 .lock()
                 .registry
                 .set_status(USB_HID_MODULE, DriverStatus::Skipped);
             return Err(DriverError::NoHid);
         }
+        detect_usb_mass_storage_after_descriptor_enumeration();
 
         USB_DRIVER_STACK
             .lock()
@@ -757,6 +794,44 @@ impl DriverModule for UsbHidModule {
 
     fn status(&self) -> DriverStatus {
         USB_DRIVER_STACK.lock().registry.status(USB_HID_MODULE)
+    }
+}
+
+fn detect_usb_mass_storage_after_descriptor_enumeration() {
+    let devices = USB_DRIVER_STACK.lock().devices;
+    let mut index = 0usize;
+    while index < devices.len() {
+        if let Some(device) = devices[index] {
+            if device.is_mass_storage_bot_candidate {
+                let record = UsbStorageDeviceRecord {
+                    device_id: device.id,
+                    slot_id: device.slot_id,
+                    interface_number: device.storage_interface_number,
+                    bulk_in_endpoint: device.bulk_in_endpoint,
+                    bulk_in_max_packet_size: device.bulk_in_max_packet_size,
+                    bulk_out_endpoint: device.bulk_out_endpoint,
+                    bulk_out_max_packet_size: device.bulk_out_max_packet_size,
+                    configuration_value: device.configuration_value,
+                    bot_ready: false,
+                };
+                if USB_DRIVER_STACK.lock().add_storage(record) {
+                    crate::kprintln!(
+                        "USB STORAGE [DETECTED] device={} slot={} iface={} cfg={} bot_ready={} bulk-in=0x{:02x}/{} bulk-out=0x{:02x}/{}",
+                        record.device_id,
+                        record.slot_id,
+                        record.interface_number,
+                        record.configuration_value,
+                        record.bot_ready,
+                        record.bulk_in_endpoint,
+                        record.bulk_in_max_packet_size,
+                        record.bulk_out_endpoint,
+                        record.bulk_out_max_packet_size
+                    );
+                    crate::kprintln!("USB STORAGE [PENDING: BOT not implemented]");
+                }
+            }
+        }
+        index += 1;
     }
 }
 
@@ -1913,7 +1988,10 @@ unsafe fn enumerate_usb_device(
         id: device_id,
         slot_id,
         port,
-        endpoint_count: if config.interrupt_in.is_some() { 2 } else { 1 },
+        endpoint_count: 1
+            + u8::from(config.interrupt_in.is_some())
+            + u8::from(config.bulk_in.is_some())
+            + u8::from(config.bulk_out.is_some()),
         port_speed,
         hid_interface_number: config
             .hid_boot_keyboard
@@ -1934,6 +2012,26 @@ unsafe fn enumerate_usb_device(
         configuration_value: config.configuration_value,
         is_hid_boot_keyboard_candidate: config.hid_boot_keyboard.is_some()
             && config.interrupt_in.is_some(),
+        storage_interface_number: config
+            .mass_storage_bot
+            .map(|interface| interface.number)
+            .unwrap_or(0),
+        bulk_in_endpoint: config.bulk_in.map(|endpoint| endpoint.address).unwrap_or(0),
+        bulk_in_max_packet_size: config
+            .bulk_in
+            .map(|endpoint| endpoint.max_packet_size)
+            .unwrap_or(0),
+        bulk_out_endpoint: config
+            .bulk_out
+            .map(|endpoint| endpoint.address)
+            .unwrap_or(0),
+        bulk_out_max_packet_size: config
+            .bulk_out
+            .map(|endpoint| endpoint.max_packet_size)
+            .unwrap_or(0),
+        is_mass_storage_bot_candidate: config.mass_storage_bot.is_some()
+            && config.bulk_in.is_some()
+            && config.bulk_out.is_some(),
     })
 }
 
@@ -2695,6 +2793,14 @@ impl UsbEndpointDescriptor {
     pub const fn is_interrupt_in(self) -> bool {
         self.address & 0x80 != 0 && self.attributes & 0x03 == 0x03
     }
+
+    pub const fn is_bulk_in(self) -> bool {
+        self.address & 0x80 != 0 && self.attributes & 0x03 == 0x02
+    }
+
+    pub const fn is_bulk_out(self) -> bool {
+        self.address & 0x80 == 0 && self.attributes & 0x03 == 0x02
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2703,6 +2809,9 @@ pub struct UsbConfigurationScan {
     pub configuration_value: u8,
     pub hid_boot_keyboard: Option<UsbInterfaceDescriptor>,
     pub interrupt_in: Option<UsbEndpointDescriptor>,
+    pub mass_storage_bot: Option<UsbInterfaceDescriptor>,
+    pub bulk_in: Option<UsbEndpointDescriptor>,
+    pub bulk_out: Option<UsbEndpointDescriptor>,
 }
 
 pub fn parse_device_descriptor(bytes: &[u8]) -> Result<UsbDeviceDescriptor, DriverError> {
@@ -2733,6 +2842,9 @@ pub fn scan_configuration_descriptor(bytes: &[u8]) -> Result<UsbConfigurationSca
         configuration_value: bytes[5],
         hid_boot_keyboard: None,
         interrupt_in: None,
+        mass_storage_bot: None,
+        bulk_in: None,
+        bulk_out: None,
     };
     let mut offset = 0usize;
     while offset < total_length as usize {
@@ -2759,6 +2871,12 @@ pub fn scan_configuration_descriptor(bytes: &[u8]) -> Result<UsbConfigurationSca
                 {
                     scan.hid_boot_keyboard = Some(interface);
                 }
+                if interface.class == 0x08
+                    && interface.subclass == 0x06
+                    && interface.protocol == 0x50
+                {
+                    scan.mass_storage_bot = Some(interface);
+                }
             }
             5 if length >= 7 => {
                 let endpoint = UsbEndpointDescriptor {
@@ -2769,6 +2887,12 @@ pub fn scan_configuration_descriptor(bytes: &[u8]) -> Result<UsbConfigurationSca
                 };
                 if endpoint.is_interrupt_in() && endpoint.max_packet_size >= 8 {
                     scan.interrupt_in = Some(endpoint);
+                }
+                if endpoint.is_bulk_in() {
+                    scan.bulk_in = Some(endpoint);
+                }
+                if endpoint.is_bulk_out() {
+                    scan.bulk_out = Some(endpoint);
                 }
             }
             _ => {}
@@ -2822,6 +2946,18 @@ mod tests {
         let scan = scan_configuration_descriptor(&config).unwrap();
         assert!(scan.hid_boot_keyboard.is_some());
         assert!(scan.interrupt_in.unwrap().is_interrupt_in());
+    }
+
+    #[test]
+    fn descriptor_parser_finds_mass_storage_bot_bulk_endpoints() {
+        let config = [
+            9, 2, 32, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 2, 0x08, 0x06, 0x50, 0, 7, 5, 0x81, 0x02,
+            64, 0, 0, 7, 5, 0x02, 0x02, 64, 0, 0,
+        ];
+        let scan = scan_configuration_descriptor(&config).unwrap();
+        assert!(scan.mass_storage_bot.is_some());
+        assert!(scan.bulk_in.unwrap().is_bulk_in());
+        assert!(scan.bulk_out.unwrap().is_bulk_out());
     }
 
     #[test]

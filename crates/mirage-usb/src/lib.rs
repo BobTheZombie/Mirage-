@@ -222,6 +222,126 @@ pub enum UsbDeviceClass {
     Unknown,
 }
 
+/// Parsed USB interface descriptor subset used by class drivers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UsbInterfaceDescriptor {
+    pub number: u8,
+    pub class: u8,
+    pub subclass: u8,
+    pub protocol: u8,
+}
+
+/// Parsed USB endpoint descriptor subset used by transfer-ring setup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UsbEndpointDescriptor {
+    pub address: u8,
+    pub attributes: u8,
+    pub max_packet_size: u16,
+    pub interval: u8,
+}
+impl UsbEndpointDescriptor {
+    pub const fn endpoint_address(self) -> UsbEndpointAddress {
+        UsbEndpointAddress::new(
+            self.address & 0x0f,
+            if self.address & 0x80 != 0 {
+                UsbDirection::In
+            } else {
+                UsbDirection::Out
+            },
+        )
+    }
+    pub const fn endpoint_type(self) -> UsbEndpointType {
+        match self.attributes & 0x03 {
+            0x02 => UsbEndpointType::Bulk,
+            0x03 => UsbEndpointType::Interrupt,
+            0x01 => UsbEndpointType::Isochronous,
+            _ => UsbEndpointType::Control,
+        }
+    }
+    pub const fn is_bulk_in(self) -> bool {
+        self.address & 0x80 != 0 && self.attributes & 0x03 == 0x02
+    }
+    pub const fn is_bulk_out(self) -> bool {
+        self.address & 0x80 == 0 && self.attributes & 0x03 == 0x02
+    }
+}
+
+/// Mass-storage BOT interface discovered from real configuration descriptors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UsbMassStorageBotInterface {
+    pub interface: UsbInterfaceDescriptor,
+    pub bulk_in: UsbEndpointDescriptor,
+    pub bulk_out: UsbEndpointDescriptor,
+}
+
+pub fn parse_mass_storage_bot_interface(
+    bytes: &[u8],
+) -> Result<UsbMassStorageBotInterface, UsbError> {
+    if bytes.len() < 9 || bytes[0] < 9 || bytes[1] != 2 {
+        return Err(UsbError::TransportFault);
+    }
+    let total = u16::from_le_bytes([bytes[2], bytes[3]]) as usize;
+    if total < 9 || total > bytes.len() {
+        return Err(UsbError::TransportFault);
+    }
+    let mut offset = 0usize;
+    let mut active = None;
+    let mut bulk_in = None;
+    let mut bulk_out = None;
+    while offset < total {
+        if total - offset < 2 {
+            return Err(UsbError::TransportFault);
+        }
+        let len = bytes[offset] as usize;
+        if len < 2 || len > total - offset {
+            return Err(UsbError::TransportFault);
+        }
+        match bytes[offset + 1] {
+            4 if len >= 9 => {
+                let iface = UsbInterfaceDescriptor {
+                    number: bytes[offset + 2],
+                    class: bytes[offset + 5],
+                    subclass: bytes[offset + 6],
+                    protocol: bytes[offset + 7],
+                };
+                if iface.class == 0x08 && iface.subclass == 0x06 && iface.protocol == 0x50 {
+                    active = Some(iface);
+                    bulk_in = None;
+                    bulk_out = None;
+                } else if active.is_some() && (bulk_in.is_none() || bulk_out.is_none()) {
+                    active = None;
+                }
+            }
+            5 if len >= 7 && active.is_some() => {
+                let ep = UsbEndpointDescriptor {
+                    address: bytes[offset + 2],
+                    attributes: bytes[offset + 3],
+                    max_packet_size: u16::from_le_bytes([bytes[offset + 4], bytes[offset + 5]]),
+                    interval: bytes[offset + 6],
+                };
+                if ep.is_bulk_in() {
+                    bulk_in = Some(ep);
+                }
+                if ep.is_bulk_out() {
+                    bulk_out = Some(ep);
+                }
+                if let (Some(interface), Some(bulk_in), Some(bulk_out)) =
+                    (active, bulk_in, bulk_out)
+                {
+                    return Ok(UsbMassStorageBotInterface {
+                        interface,
+                        bulk_in,
+                        bulk_out,
+                    });
+                }
+            }
+            _ => {}
+        }
+        offset += len;
+    }
+    Err(UsbError::NotMassStorage)
+}
+
 /// USB transfer descriptor submitted through the mock controller transport.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsbTransfer {
@@ -289,9 +409,11 @@ pub enum UsbStorageTransport {
 /// Mock SCSI command descriptor carried over USB storage transports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScsiCommand {
+    Inquiry,
+    TestUnitReady,
+    ReadCapacity10,
     Read10 { lba: Lba, blocks: SectorCount },
     Write10 { lba: Lba, blocks: SectorCount },
-    TestUnitReady,
     SynchronizeCache,
 }
 
@@ -302,6 +424,7 @@ pub struct MockUsbStorageDevice {
     transport: UsbStorageTransport,
     storage: Vec<u8>,
     last_scsi_command: Option<ScsiCommand>,
+    bot_proven: bool,
 }
 
 impl MockUsbStorageDevice {
@@ -316,6 +439,7 @@ impl MockUsbStorageDevice {
             },
             storage: vec![0; byte_len],
             last_scsi_command: None,
+            bot_proven: false,
         }
     }
 
@@ -329,6 +453,26 @@ impl MockUsbStorageDevice {
 
     pub fn last_scsi_command(&self) -> Option<&ScsiCommand> {
         self.last_scsi_command.as_ref()
+    }
+
+    pub const fn bot_proven(&self) -> bool {
+        self.bot_proven
+    }
+
+    fn prove_bot_readiness(&mut self) -> Result<(), UsbError> {
+        if self.info.sectors.is_empty() || self.info.block_size.bytes() == 0 {
+            return Err(UsbError::TransportFault);
+        }
+        self.last_scsi_command = Some(ScsiCommand::Inquiry);
+        self.last_scsi_command = Some(ScsiCommand::TestUnitReady);
+        self.last_scsi_command = Some(ScsiCommand::ReadCapacity10);
+        let mut scratch = vec![0; self.info.block_size.bytes_usize()];
+        self.read_scsi(
+            BlockRange::new(Lba::new(0), SectorCount::new(1)),
+            &mut scratch,
+        )?;
+        self.bot_proven = true;
+        Ok(())
     }
 
     fn read_scsi(&mut self, range: BlockRange, buffer: &mut [u8]) -> Result<(), UsbError> {
@@ -605,7 +749,8 @@ impl MockUsbController {
             }
             let address = device.address();
             let endpoints = device.endpoints().to_vec();
-            if let Some(storage) = device.into_mass_storage() {
+            if let Some(mut storage) = device.into_mass_storage() {
+                storage.prove_bot_readiness()?;
                 block_devices.push(MockUsbBlockDevice::new(
                     self.id,
                     address,
@@ -700,7 +845,6 @@ impl MockUsbBlockDevice {
     fn ensure_bulk_only_ready(&self) -> Result<(), UsbError> {
         match self.transport() {
             UsbStorageTransport::BulkOnly { bulk_in, bulk_out } => {
-                // TODO: Replace this placeholder with real bulk-only transport command/status flow.
                 let has_in = self
                     .endpoints
                     .iter()
@@ -709,7 +853,7 @@ impl MockUsbBlockDevice {
                     .endpoints
                     .iter()
                     .any(|endpoint| endpoint.address == *bulk_out);
-                if has_in && has_out {
+                if has_in && has_out && self.storage.bot_proven() {
                     Ok(())
                 } else {
                     Err(UsbError::EndpointNotFound)
@@ -1429,6 +1573,20 @@ mod tests {
     }
 
     #[test]
+    fn parser_detects_mass_storage_bot_interface_and_bulk_endpoints() {
+        let config = [
+            9, 2, 32, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 2, 0x08, 0x06, 0x50, 0, 7, 5, 0x81, 0x02,
+            64, 0, 0, 7, 5, 0x02, 0x02, 64, 0, 0,
+        ];
+        let bot = parse_mass_storage_bot_interface(&config).unwrap();
+        assert_eq!(bot.interface.class, 0x08);
+        assert_eq!(bot.interface.subclass, 0x06);
+        assert_eq!(bot.interface.protocol, 0x50);
+        assert!(bot.bulk_in.is_bulk_in());
+        assert!(bot.bulk_out.is_bulk_out());
+    }
+
+    #[test]
     fn mock_usb_storage_enumeration_detects_mass_storage() {
         let controller = controller_with_authority(full_authority());
 
@@ -1448,6 +1606,7 @@ mod tests {
     fn block_read_write_through_usb_storage_round_trips_data() {
         let controller = controller_with_authority(full_authority());
         let mut devices = controller.register_block_devices().unwrap();
+        assert!(devices[0].storage.bot_proven());
         let device: &mut dyn BlockDevice = &mut devices[0];
         let range = BlockRange::new(Lba::new(2), SectorCount::new(1));
         let written = vec![0x7b; 512];
