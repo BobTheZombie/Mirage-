@@ -36,6 +36,8 @@ const WAIT_LIMIT: usize = 1_000_000;
 const EVENT_POLL_LIMIT: usize = 250_000;
 const MAX_USB_DEVICES: usize = 8;
 const MAX_HID_DEVICES: usize = 4;
+const XHCI_PAGE_SIZE: usize = crate::kernel::memory::PAGE_SIZE;
+const XHCI_MAX_SCRATCHPADS: usize = 1024;
 
 const XHCI_MODULE: usize = 0;
 const USB_CORE_MODULE: usize = 1;
@@ -1502,13 +1504,8 @@ unsafe fn bring_up_xhci(
         return Err(UsbKbdError::InvalidMmio("xHCI reports zero root ports"));
     }
     let context_size = if hccparams1 & (1 << 2) != 0 { 64 } else { 32 };
-    let max_scratchpads = (((hcsparams2 >> 21) & 0x1f) << 5) | ((hcsparams2 >> 27) & 0x1f);
-    if max_scratchpads != 0 {
-        return Err(UsbKbdError::InvalidMmio(
-            "xHCI scratchpad buffers require DMA allocator integration",
-        ));
-    }
-    configure_static_xhci_rings(op, base.add(rtsoff))?;
+    let max_scratchpads = decode_max_scratchpad_buffers(hcsparams2);
+    configure_static_xhci_rings(op, base.add(rtsoff), max_scratchpads)?;
     mmio_write32(op, 0x38, max_slots as u32);
 
     cmd = mmio_read32(op, 0x00) | USBCMD_RUN | USBCMD_INTE;
@@ -1534,7 +1531,19 @@ unsafe fn bring_up_xhci(
 #[repr(C, align(64))]
 struct XhciAlignedU64<const N: usize>([u64; N]);
 
+#[derive(Clone, Copy)]
+#[repr(C, align(4096))]
+struct XhciAlignedPageU64<const N: usize>([u64; N]);
+
+#[derive(Clone, Copy)]
+#[repr(C, align(4096))]
+struct XhciPage([u8; XHCI_PAGE_SIZE]);
+
 static mut XHCI_DCBAA: XhciAlignedU64<256> = XhciAlignedU64([0; 256]);
+static mut XHCI_SCRATCHPAD_POINTERS: XhciAlignedPageU64<XHCI_MAX_SCRATCHPADS> =
+    XhciAlignedPageU64([0; XHCI_MAX_SCRATCHPADS]);
+static mut XHCI_SCRATCHPAD_BUFFERS: [XhciPage; XHCI_MAX_SCRATCHPADS] =
+    [const { XhciPage([0; XHCI_PAGE_SIZE]) }; XHCI_MAX_SCRATCHPADS];
 static mut XHCI_COMMAND_RING: XhciAlignedU64<64> = XhciAlignedU64([0; 64]);
 static mut XHCI_EVENT_RING: XhciAlignedU64<64> = XhciAlignedU64([0; 64]);
 static mut XHCI_ERST: XhciAlignedU64<2> = XhciAlignedU64([0; 2]);
@@ -1556,8 +1565,19 @@ enum UsbEnumerationError {
     EndpointSetupFailed,
 }
 
-unsafe fn configure_static_xhci_rings(op: *mut u8, runtime: *mut u8) -> Result<(), UsbKbdError> {
+const fn decode_max_scratchpad_buffers(hcsparams2: u32) -> usize {
+    let high = ((hcsparams2 >> 21) & 0x1f) as usize;
+    let low = ((hcsparams2 >> 27) & 0x1f) as usize;
+    (high << 5) | low
+}
+
+unsafe fn configure_static_xhci_rings(
+    op: *mut u8,
+    runtime: *mut u8,
+    max_scratchpads: usize,
+) -> Result<(), UsbKbdError> {
     XHCI_DCBAA.0.fill(0);
+    configure_xhci_scratchpads(max_scratchpads)?;
     XHCI_COMMAND_RING.0.fill(0);
     XHCI_EVENT_RING.0.fill(0);
     XHCI_ERST.0.fill(0);
@@ -1590,10 +1610,85 @@ unsafe fn configure_static_xhci_rings(op: *mut u8, runtime: *mut u8) -> Result<(
     Ok(())
 }
 
+/// Configure xHCI scratchpad buffers before the controller is started.
+///
+/// Mirage's early xHCI path uses statically reserved kernel memory for the
+/// scratchpad pointer array and buffers.  The pages are part of the kernel
+/// image/BSS reservation, are page-aligned, and are translated to DMA-visible
+/// physical addresses through the active kernel paging translator before they
+/// are handed to the controller.
+///
+/// IOMMU assumption: this early boot driver does not program per-device IOMMU
+/// mappings.  It therefore requires either no active IOMMU translation for the
+/// xHCI PCI function or an existing identity/DMA mapping that makes these
+/// physical addresses reachable by the controller before USBCMD.RUN is set.
+/// Once Mirage grows a supervised DMA/IOMMU allocator, this static reservation
+/// should move behind that capability-managed allocator.
+unsafe fn configure_xhci_scratchpads(max_scratchpads: usize) -> Result<(), UsbKbdError> {
+    XHCI_SCRATCHPAD_POINTERS.0.fill(0);
+    if max_scratchpads == 0 {
+        XHCI_DCBAA.0[0] = 0;
+        return Ok(());
+    }
+    if max_scratchpads > XHCI_MAX_SCRATCHPADS {
+        return Err(UsbKbdError::InvalidMmio(
+            "xHCI scratchpad count exceeds reserved DMA capacity",
+        ));
+    }
+
+    let pointer_array_virt = core::ptr::addr_of_mut!(XHCI_SCRATCHPAD_POINTERS.0) as u64;
+    if pointer_array_virt as usize & (XHCI_PAGE_SIZE - 1) != 0 {
+        return Err(UsbKbdError::InvalidMmio(
+            "xHCI scratchpad pointer array is not page aligned",
+        ));
+    }
+    let pointer_array_dma = try_dma_address(pointer_array_virt).ok_or(UsbKbdError::InvalidMmio(
+        "xHCI scratchpad pointer array physical translation failed",
+    ))?;
+    let pointer_array_bytes = max_scratchpads * core::mem::size_of::<u64>();
+    let pointer_array_pages = (pointer_array_bytes + XHCI_PAGE_SIZE - 1) / XHCI_PAGE_SIZE;
+    let mut page = 1usize;
+    while page < pointer_array_pages {
+        let page_virt = pointer_array_virt + (page * XHCI_PAGE_SIZE) as u64;
+        let page_dma = try_dma_address(page_virt).ok_or(UsbKbdError::InvalidMmio(
+            "xHCI scratchpad pointer array page physical translation failed",
+        ))?;
+        if page_dma != pointer_array_dma + (page * XHCI_PAGE_SIZE) as u64 {
+            return Err(UsbKbdError::InvalidMmio(
+                "xHCI scratchpad pointer array is not physically contiguous",
+            ));
+        }
+        page += 1;
+    }
+
+    let mut index = 0usize;
+    while index < max_scratchpads {
+        XHCI_SCRATCHPAD_BUFFERS[index].0.fill(0);
+        let buffer_virt = core::ptr::addr_of_mut!(XHCI_SCRATCHPAD_BUFFERS[index].0) as u64;
+        if buffer_virt as usize & (XHCI_PAGE_SIZE - 1) != 0 {
+            return Err(UsbKbdError::InvalidMmio(
+                "xHCI scratchpad buffer is not page aligned",
+            ));
+        }
+        let buffer_dma = try_dma_address(buffer_virt).ok_or(UsbKbdError::InvalidMmio(
+            "xHCI scratchpad buffer physical translation failed",
+        ))?;
+        XHCI_SCRATCHPAD_POINTERS.0[index] = buffer_dma;
+        index += 1;
+    }
+
+    XHCI_DCBAA.0[0] = pointer_array_dma;
+    Ok(())
+}
+
 fn dma_address(virtual_address: u64) -> u64 {
     crate::arch::x86_64::paging::translate_kernel_address(virtual_address).unwrap_or_else(|| {
         crate::arch::x86_64::paging::active_translator().physical_for_virtual(virtual_address)
     })
+}
+
+fn try_dma_address(virtual_address: u64) -> Option<u64> {
+    crate::arch::x86_64::paging::translate_kernel_address(virtual_address)
 }
 
 unsafe fn submit_noop_command_and_wait(controller: &mut XhciController) -> Result<(), UsbKbdError> {
