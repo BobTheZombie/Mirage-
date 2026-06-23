@@ -101,6 +101,7 @@ pub struct Mtss<
     threads: [Option<Thread>; MAX_THREADS],
     run_queue: RunQueue<MtssThreadScheduleRecord<ThreadId, TaskId, Priority>, RUN_QUEUE_DEPTH>,
     stats: MtssStats,
+    need_resched: bool,
     events: [Option<MtssEvent>; EVENT_QUEUE_DEPTH],
     event_head: usize,
     event_len: usize,
@@ -124,6 +125,7 @@ impl<
             threads: [None; MAX_THREADS],
             run_queue: RunQueue::new(),
             stats: MtssStats::new(),
+            need_resched: false,
             events: [None; EVENT_QUEUE_DEPTH],
             event_head: 0,
             event_len: 0,
@@ -139,6 +141,11 @@ impl<
     /// Return the currently running thread, if any.
     pub const fn current(&self) -> Option<ThreadId> {
         self.current
+    }
+
+    /// Return whether the current CPU owes a reschedule after a deferred preemption.
+    pub const fn need_resched(&self) -> bool {
+        self.need_resched
     }
 
     /// Return the number of queued MTSS events waiting to be drained.
@@ -261,11 +268,25 @@ impl<
             .map(Some)
     }
 
-    /// Account one timer tick and preempt the current thread when its slice expires.
+    /// Account one timer tick and request/perform preemption only when a slice expires.
     pub fn on_timer_tick(&mut self) -> Result<Option<ScheduleDecision>, MtssError> {
+        self.on_timer_tick_with_preemption_disabled(false)
+    }
+
+    /// Account one timer tick without blocking or allocating in the interrupt path.
+    ///
+    /// The tick advances MTSS time, charges the running thread and its task, and
+    /// consumes one tick of the running thread's time slice.  When the slice
+    /// expires, MTSS sets `need_resched`. If preemption is disabled, rescheduling
+    /// is deferred; otherwise MTSS requeues the current thread and picks a
+    /// replacement immediately.
+    pub fn on_timer_tick_with_preemption_disabled(
+        &mut self,
+        preemption_disabled: bool,
+    ) -> Result<Option<ScheduleDecision>, MtssError> {
         self.now = Timestamp::from_ticks(self.now.ticks().saturating_add(1));
         let Some(current) = self.current else {
-            return self.pick_next();
+            return Ok(None);
         };
 
         let expired = {
@@ -285,6 +306,7 @@ impl<
             return Ok(None);
         }
 
+        self.need_resched = true;
         self.stats = self.stats.with_preemption();
         let task = self.thread(current)?.task;
         self.emit(MtssEvent::thread(
@@ -294,6 +316,20 @@ impl<
             Some(self.config.cpu),
             self.now,
         ));
+
+        if preemption_disabled {
+            return Ok(None);
+        }
+
+        self.reschedule_if_needed()
+    }
+
+    /// Complete a deferred preemption once the kernel leaves a non-preemptible section.
+    pub fn reschedule_if_needed(&mut self) -> Result<Option<ScheduleDecision>, MtssError> {
+        if !self.need_resched {
+            return Ok(None);
+        }
+        self.need_resched = false;
         self.yield_current()
     }
 
