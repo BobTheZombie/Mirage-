@@ -287,7 +287,7 @@ pub mod scheduler {
             LifecycleEvent::thread(
                 thread,
                 Some(self.cpu),
-                Some(ThreadState::Created),
+                Some(ThreadState::New),
                 ThreadState::Ready,
                 LifecycleReason::Admitted,
                 at,
@@ -433,6 +433,9 @@ pub mod types {
     pub struct TaskId(u64);
 
     impl TaskId {
+        pub const IDLE: Self = Self(0);
+        pub const FIRST_USERSPACE: Self = Self(1);
+
         pub const fn new(raw: u64) -> Self {
             Self(raw)
         }
@@ -481,6 +484,24 @@ pub mod types {
     pub struct ThreadId(u64);
 
     impl ThreadId {
+        pub const IDLE: Self = Self(0);
+
+        pub const fn new(raw: u64) -> Self {
+            Self(raw)
+        }
+        pub const fn get(self) -> u64 {
+            self.0
+        }
+        pub const fn raw(&self) -> u64 {
+            self.0
+        }
+    }
+
+    /// Stable identifier for a Mirage process.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    pub struct ProcessId(u64);
+
+    impl ProcessId {
         pub const fn new(raw: u64) -> Self {
             Self(raw)
         }
@@ -550,17 +571,12 @@ pub mod types {
         Runnable,
         Running,
         Blocked,
-        Sleeping,
-        Suspended,
-        Suspect,
-        Contained,
-        Terminated,
-        Reaped,
+        Exited,
     }
 
     impl TaskState {
         pub const fn is_terminal(self) -> bool {
-            matches!(self, Self::Terminated | Self::Reaped)
+            matches!(self, Self::Exited)
         }
 
         pub const fn may_schedule(self) -> bool {
@@ -571,18 +587,41 @@ pub mod types {
     /// Scheduler-visible micro-thread state.
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
     pub enum ThreadState {
-        Created,
+        New,
         Ready,
         Running,
         Blocked,
         Sleeping,
+        Zombie,
         Dead,
     }
 
     impl ThreadState {
         pub const fn is_terminal(self) -> bool {
-            matches!(self, Self::Dead)
+            matches!(self, Self::Zombie | Self::Dead)
         }
+        pub const fn may_schedule(self) -> bool {
+            matches!(self, Self::Ready | Self::Running)
+        }
+    }
+
+    /// Scheduler-visible process state.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    pub enum ProcessState {
+        New,
+        Ready,
+        Running,
+        Waiting,
+        Zombie,
+        Dead,
+        Failed,
+    }
+
+    impl ProcessState {
+        pub const fn is_terminal(self) -> bool {
+            matches!(self, Self::Dead | Self::Failed)
+        }
+
         pub const fn may_schedule(self) -> bool {
             matches!(self, Self::Ready | Self::Running)
         }
@@ -650,22 +689,22 @@ pub mod types {
             self.transition(TaskState::Blocked)
         }
         pub fn sleep(&mut self) -> Result<TaskState, MtssError> {
-            self.transition(TaskState::Sleeping)
+            self.transition(TaskState::Blocked)
         }
         pub fn suspend(&mut self) -> Result<TaskState, MtssError> {
-            self.transition(TaskState::Suspended)
+            self.transition(TaskState::Blocked)
         }
         pub fn suspect(&mut self) -> Result<TaskState, MtssError> {
-            self.transition(TaskState::Suspect)
+            self.transition(TaskState::Blocked)
         }
         pub fn contain(&mut self) -> Result<TaskState, MtssError> {
-            self.transition(TaskState::Contained)
+            self.transition(TaskState::Blocked)
         }
         pub fn terminate(&mut self) -> Result<TaskState, MtssError> {
-            self.transition(TaskState::Terminated)
+            self.transition(TaskState::Exited)
         }
         pub fn reap(&mut self) -> Result<TaskState, MtssError> {
-            self.transition(TaskState::Reaped)
+            self.transition(TaskState::Exited)
         }
         pub fn wake(&mut self) -> Result<TaskState, MtssError> {
             self.transition(TaskState::Runnable)
@@ -717,7 +756,7 @@ pub mod types {
             Self {
                 id,
                 task,
-                state: ThreadState::Created,
+                state: ThreadState::New,
                 priority,
                 timeslice,
                 cpu_time_ticks: 0,
@@ -775,31 +814,10 @@ pub mod types {
     pub const fn valid_task_transition(from: TaskState, to: TaskState) -> bool {
         use TaskState::*;
         match (from, to) {
-            (Created, Runnable) | (Created, Suspended) | (Created, Terminated) => true,
-            (Runnable, Running)
-            | (Runnable, Blocked)
-            | (Runnable, Sleeping)
-            | (Runnable, Suspended)
-            | (Runnable, Suspect)
-            | (Runnable, Terminated) => true,
-            (Running, Runnable)
-            | (Running, Blocked)
-            | (Running, Sleeping)
-            | (Running, Suspended)
-            | (Running, Suspect)
-            | (Running, Terminated) => true,
-            (Blocked, Runnable)
-            | (Blocked, Suspended)
-            | (Blocked, Suspect)
-            | (Blocked, Terminated) => true,
-            (Sleeping, Runnable)
-            | (Sleeping, Suspended)
-            | (Sleeping, Suspect)
-            | (Sleeping, Terminated) => true,
-            (Suspended, Runnable) | (Suspended, Terminated) => true,
-            (Suspect, Runnable) | (Suspect, Contained) | (Suspect, Terminated) => true,
-            (Contained, Runnable) | (Contained, Terminated) => true,
-            (Terminated, Reaped) => true,
+            (Created, Runnable) | (Created, Exited) => true,
+            (Runnable, Running) | (Runnable, Blocked) | (Runnable, Exited) => true,
+            (Running, Runnable) | (Running, Blocked) | (Running, Exited) => true,
+            (Blocked, Runnable) | (Blocked, Exited) => true,
             (state, next) if state as u8 == next as u8 => true,
             _ => false,
         }
@@ -808,12 +826,33 @@ pub mod types {
     pub const fn valid_thread_transition(from: ThreadState, to: ThreadState) -> bool {
         use ThreadState::*;
         match (from, to) {
-            (Created, Ready) | (Created, Dead) => true,
-            (Ready, Running) | (Ready, Blocked) | (Ready, Sleeping) | (Ready, Dead) => true,
-            (Running, Ready) | (Running, Blocked) | (Running, Sleeping) | (Running, Dead) => true,
-            (Blocked, Ready) | (Blocked, Dead) => true,
-            (Sleeping, Ready) | (Sleeping, Dead) => true,
-            (Dead, Dead) => true,
+            (New, Ready) | (New, Dead) => true,
+            (Ready, Running)
+            | (Ready, Blocked)
+            | (Ready, Sleeping)
+            | (Ready, Zombie)
+            | (Ready, Dead) => true,
+            (Running, Ready)
+            | (Running, Blocked)
+            | (Running, Sleeping)
+            | (Running, Zombie)
+            | (Running, Dead) => true,
+            (Blocked, Ready) | (Blocked, Zombie) | (Blocked, Dead) => true,
+            (Sleeping, Ready) | (Sleeping, Zombie) | (Sleeping, Dead) => true,
+            (Zombie, Dead) | (Dead, Dead) => true,
+            (state, next) if state as u8 == next as u8 => true,
+            _ => false,
+        }
+    }
+
+    pub const fn valid_process_transition(from: ProcessState, to: ProcessState) -> bool {
+        use ProcessState::*;
+        match (from, to) {
+            (New, Ready) | (New, Failed) => true,
+            (Ready, Running) | (Ready, Waiting) | (Ready, Zombie) | (Ready, Failed) => true,
+            (Running, Ready) | (Running, Waiting) | (Running, Zombie) | (Running, Failed) => true,
+            (Waiting, Ready) | (Waiting, Zombie) | (Waiting, Failed) => true,
+            (Zombie, Dead) => true,
             (state, next) if state as u8 == next as u8 => true,
             _ => false,
         }
@@ -878,8 +917,9 @@ pub use task_core::{
     UserProgramImage, DEFAULT_READY_QUEUE_SIZE, DEFAULT_TASK_TABLE_SIZE, DEFAULT_THREAD_TABLE_SIZE,
 };
 pub use types::{
-    AddressSpaceId, CpuId, MtssError, Priority, RunQueueId, Task, TaskId, TaskState, Thread,
-    ThreadDescriptor, ThreadId, ThreadState, TimeSlice, Timeslice, Timestamp,
+    valid_process_transition, valid_task_transition, valid_thread_transition, AddressSpaceId,
+    CpuId, MtssError, Priority, ProcessId, ProcessState, RunQueueId, Task, TaskId, TaskState,
+    Thread, ThreadDescriptor, ThreadId, ThreadState, TimeSlice, Timeslice, Timestamp,
 };
 
 #[cfg(test)]
@@ -1352,7 +1392,7 @@ mod tests {
         assert_eq!(
             err,
             MtssError::InvalidThreadTransition {
-                from: ThreadState::Created,
+                from: ThreadState::New,
                 to: ThreadState::Blocked,
             }
         );
@@ -1364,7 +1404,7 @@ mod tests {
             err,
             MtssError::InvalidTaskTransition {
                 from: TaskState::Runnable,
-                to: TaskState::Reaped,
+                to: TaskState::Exited,
             }
         );
     }
@@ -1473,5 +1513,55 @@ mod tests {
         assert_eq!(stats.wakeups, 2);
         assert_eq!(stats.suspensions, 0);
         assert_eq!(stats.containments, 1);
+    }
+
+    #[test]
+    fn canonical_state_transition_validators_reject_invalid_edges() {
+        assert!(valid_task_transition(
+            TaskState::Created,
+            TaskState::Runnable
+        ));
+        assert!(!valid_task_transition(
+            TaskState::Created,
+            TaskState::Running
+        ));
+        assert!(!valid_task_transition(
+            TaskState::Exited,
+            TaskState::Runnable
+        ));
+
+        assert!(valid_thread_transition(
+            ThreadState::New,
+            ThreadState::Ready
+        ));
+        assert!(valid_thread_transition(
+            ThreadState::Zombie,
+            ThreadState::Dead
+        ));
+        assert!(!valid_thread_transition(
+            ThreadState::New,
+            ThreadState::Running
+        ));
+        assert!(!valid_thread_transition(
+            ThreadState::Dead,
+            ThreadState::Ready
+        ));
+
+        assert!(valid_process_transition(
+            ProcessState::New,
+            ProcessState::Ready
+        ));
+        assert!(valid_process_transition(
+            ProcessState::Running,
+            ProcessState::Failed
+        ));
+        assert!(!valid_process_transition(
+            ProcessState::New,
+            ProcessState::Running
+        ));
+        assert!(!valid_process_transition(
+            ProcessState::Dead,
+            ProcessState::Ready
+        ));
     }
 }

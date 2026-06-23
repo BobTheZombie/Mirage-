@@ -5,42 +5,14 @@
 //! the architecture backend.  It is deliberately allocation-free and suitable
 //! for `no_std` kernel use.
 
-use crate::types::AddressSpaceId;
+use crate::types::{AddressSpaceId, TaskId, TaskState, ThreadId, ThreadState};
 
 pub const DEFAULT_TASK_TABLE_SIZE: usize = 64;
 pub const DEFAULT_THREAD_TABLE_SIZE: usize = 128;
 pub const DEFAULT_READY_QUEUE_SIZE: usize = 128;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct CoreTaskId(pub u64);
-
-impl CoreTaskId {
-    pub const IDLE: Self = Self(0);
-    pub const FIRST_USERSPACE: Self = Self(1);
-
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct CoreThreadId(pub u64);
-
-impl CoreThreadId {
-    pub const IDLE: Self = Self(0);
-
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
+pub type CoreTaskId = TaskId;
+pub type CoreThreadId = ThreadId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum TaskKind {
@@ -48,16 +20,7 @@ pub enum TaskKind {
     Userspace,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum CoreTaskState {
-    New,
-    Ready,
-    Running,
-    Blocked,
-    Sleeping,
-    Exited,
-    Faulted,
-}
+pub type CoreTaskState = TaskState;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct StackRange {
@@ -167,7 +130,7 @@ pub struct CoreTask {
 pub struct CoreThread {
     pub id: CoreThreadId,
     pub task: CoreTaskId,
-    pub state: CoreTaskState,
+    pub state: ThreadState,
     pub kernel_stack: StackRange,
     pub user_stack: Option<StackRange>,
     pub context: CpuContext,
@@ -238,7 +201,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         let idle_task = CoreTask {
             id: CoreTaskId::IDLE,
             kind: TaskKind::Kernel,
-            state: CoreTaskState::Ready,
+            state: TaskState::Runnable,
             address_space: None,
             main_thread: CoreThreadId::IDLE,
             name: "idle",
@@ -246,7 +209,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         let idle_thread = CoreThread {
             id: CoreThreadId::IDLE,
             task: CoreTaskId::IDLE,
-            state: CoreTaskState::Ready,
+            state: ThreadState::Ready,
             kernel_stack,
             user_stack: None,
             context: CpuContext::kernel_placeholder(0, kernel_stack.top),
@@ -282,7 +245,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         let task = CoreTask {
             id: task_id,
             kind: TaskKind::Userspace,
-            state: CoreTaskState::Ready,
+            state: TaskState::Runnable,
             address_space: Some(program.address_space),
             main_thread: thread_id,
             name,
@@ -290,7 +253,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         let thread = CoreThread {
             id: thread_id,
             task: task_id,
-            state: CoreTaskState::Ready,
+            state: ThreadState::Ready,
             kernel_stack,
             user_stack: Some(program.user_stack),
             context: CpuContext::userspace_entry(
@@ -317,20 +280,20 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         };
         if let Some(current) = self.current {
             if let Some(thread) = self.thread_mut(current) {
-                if matches!(thread.state, CoreTaskState::Running) {
-                    thread.state = CoreTaskState::Ready;
+                if matches!(thread.state, ThreadState::Running) {
+                    thread.state = ThreadState::Ready;
                     let _ = self.enqueue(current);
                 }
             }
         }
         let mut task_to_run = None;
         if let Some(thread) = self.thread_mut(next) {
-            thread.state = CoreTaskState::Running;
+            thread.state = ThreadState::Running;
             task_to_run = Some(thread.task);
         }
         if let Some(task_id) = task_to_run {
             if let Some(task) = self.task_mut(task_id) {
-                task.state = CoreTaskState::Running;
+                task.state = TaskState::Running;
             }
         }
         self.current = Some(next);
@@ -342,13 +305,13 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
             return Ok(None);
         };
         let task = if let Some(thread) = self.thread_mut(current) {
-            thread.state = CoreTaskState::Exited;
+            thread.state = ThreadState::Zombie;
             thread.task
         } else {
             return Err(CoreMtssError::UnknownThread);
         };
         if let Some(task) = self.task_mut(task) {
-            task.state = CoreTaskState::Exited;
+            task.state = TaskState::Exited;
         }
         Ok(Some(current))
     }
@@ -378,13 +341,13 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
     }
 
     fn allocate_pid(&mut self) -> CoreTaskId {
-        let id = CoreTaskId(self.next_pid);
+        let id = CoreTaskId::new(self.next_pid);
         self.next_pid = self.next_pid.saturating_add(1);
         id
     }
 
     fn allocate_tid(&mut self) -> CoreThreadId {
-        let id = CoreThreadId(self.next_tid);
+        let id = CoreThreadId::new(self.next_tid);
         self.next_tid = self.next_tid.saturating_add(1);
         id
     }
@@ -475,7 +438,7 @@ mod tests {
         assert_eq!(pid, CoreTaskId::FIRST_USERSPACE);
         let task = mtss.task(pid).unwrap();
         assert_eq!(task.kind, TaskKind::Userspace);
-        assert_eq!(task.state, CoreTaskState::Ready);
+        assert_eq!(task.state, TaskState::Runnable);
     }
 
     #[test]
