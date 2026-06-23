@@ -1044,6 +1044,44 @@ mod tests {
     }
 
     #[test]
+    fn timer_tick_expiry_defers_reschedule_while_preemption_disabled() {
+        let mut mtss: TestMtss<16> = Mtss::new(
+            MtssConfig::new(CPU)
+                .with_initial_time(Timestamp::from_ticks(7))
+                .with_default_timeslice(Timeslice::from_ticks(1)),
+        );
+        create_task(&mut mtss);
+        create_thread(&mut mtss, THREAD_A);
+        create_thread(&mut mtss, THREAD_B);
+        mtss.enqueue_thread(THREAD_A).unwrap();
+        mtss.enqueue_thread(THREAD_B).unwrap();
+        assert_eq!(mtss.pick_next().unwrap().unwrap().next, THREAD_A);
+        drain(&mut mtss);
+
+        assert_eq!(mtss.on_timer_tick_with_preemption_disabled(true), Ok(None));
+
+        assert_eq!(mtss.current(), Some(THREAD_A));
+        assert!(mtss.need_resched());
+        assert_eq!(mtss.stats().preemptions, 1);
+        assert_eq!(mtss.stats().context_switches, 1);
+        assert_event(
+            mtss.drain_event().unwrap(),
+            MtssEventKind::TimesliceExpired,
+            Some(TASK),
+            Some(THREAD_A),
+            Some(CPU),
+            8,
+        );
+
+        let decision = mtss.reschedule_if_needed().unwrap().unwrap();
+
+        assert_eq!(decision.previous, Some(THREAD_A));
+        assert_eq!(decision.next, THREAD_B);
+        assert!(!mtss.need_resched());
+        assert_eq!(mtss.stats().context_switches, 2);
+    }
+
+    #[test]
     fn timer_tick_expires_timeslice_requeues_current_and_dispatches_next() {
         let mut mtss: TestMtss<16> = Mtss::new(
             MtssConfig::new(CPU)

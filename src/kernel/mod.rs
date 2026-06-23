@@ -1094,11 +1094,21 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         })
     }
 
-    /// Let MTSS observe the timer tick before kernel-owned timer, wakeup, and
+    /// Let MTSS account the timer tick before kernel-owned timer, wakeup, and
     /// interrupt-delivery mechanics run.
+    ///
+    /// The MTSS call is the interrupt-path accounting API: it advances MTSS time,
+    /// decrements the running micro-thread's time slice, sets `need_resched` on
+    /// expiry, and avoids blocking or heap allocation.  This milestone has no
+    /// architecture preemption-disable counter wired into `Kernel`, so the tick
+    /// is reported as preemptible; MTSS still supports deferred rescheduling when
+    /// a backend passes `preemption_disabled = true`.
     pub fn kernel_on_timer_tick(&mut self) {
         if self.mtss_initialized {
             self.mtss_ticks = self.mtss_ticks.saturating_add(1);
+            let _ = self
+                .mtss_scheduler
+                .on_timer_tick_with_preemption_disabled(false);
         }
     }
 
