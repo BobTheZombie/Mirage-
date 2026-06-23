@@ -89,6 +89,10 @@ pub enum DriverError {
     DependencyFailed(&'static str),
     NoController,
     NoDevice,
+    NoConnectedPorts,
+    PortResetTimeout,
+    AddressDeviceFailed,
+    DescriptorReadFailed,
     NoHid,
     NoKeyboard,
     InvalidMmio(&'static str),
@@ -104,6 +108,10 @@ impl DriverError {
             Self::DependencyFailed(name) => name,
             Self::NoController => "no xHCI controller",
             Self::NoDevice => "no USB devices",
+            Self::NoConnectedPorts => "no connected USB ports",
+            Self::PortResetTimeout => "port reset timeout",
+            Self::AddressDeviceFailed => "address-device failure",
+            Self::DescriptorReadFailed => "descriptor read failure",
             Self::NoHid => "no HID devices",
             Self::NoKeyboard => "no HID boot keyboard",
             Self::InvalidMmio(stage) => stage,
@@ -435,6 +443,13 @@ impl DriverModule for UsbCoreModule {
                 .set_status(USB_CORE_MODULE, DriverStatus::Failed);
             return Err(DriverError::DependencyFailed("xhci-host0 failed"));
         }
+        if XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Online {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::DependencySkipped("xhci-host0 not online"));
+        }
         let controller = match USB_DRIVER_STACK.lock().xhci {
             Some(controller) => controller,
             None => {
@@ -446,35 +461,106 @@ impl DriverModule for UsbCoreModule {
             }
         };
 
+        validate_root_hub_register_access(controller).map_err(|error| match error {
+            UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
+            UsbKbdError::Timeout(stage) => DriverError::Timeout(stage),
+        })?;
+        crate::kprintln!(
+            "[usb] root hub registers validated; ports={}",
+            controller.max_ports
+        );
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(USB_CORE_MODULE, DriverStatus::Initialized);
+        Ok(())
+    }
+
+    fn start(&self) -> Result<(), DriverError> {
+        if XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Online {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::DependencySkipped("xhci-host0 not online"));
+        }
+        if self.status() != DriverStatus::Initialized {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::DependencySkipped(
+                "usb-core0 root hub registers not validated",
+            ));
+        }
+
+        let mut stack = USB_DRIVER_STACK.lock();
+        let Some(mut controller) = stack.xhci else {
+            stack
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::DependencySkipped("xhci-host0 unavailable"));
+        };
+        drop(stack);
+
         crate::kprintln!("[usb] port scan: {} ports", controller.max_ports);
-        let mut found = 0usize;
+        let mut connected = 0usize;
+        let mut reset = 0usize;
+        let mut enumerated = 0usize;
+        let mut saw_address_failure = false;
+        let mut saw_descriptor_failure = false;
         let mut port = 0u8;
-        while port < controller.max_ports && found < MAX_USB_DEVICES {
-            match unsafe { scan_and_reset_port(controller, port) } {
+        while port < controller.max_ports && enumerated < MAX_USB_DEVICES {
+            match unsafe { port_connected(controller, port) } {
                 Ok(true) => {
-                    crate::kprintln!("[usb] device found on port {}", port + 1);
-                    let device_id = (found + 1) as u8;
+                    connected += 1;
+                    crate::kprintln!("[usb] connected port {}", port + 1);
+                    if let Err(error) = unsafe { reset_connected_port(controller, port) } {
+                        USB_DRIVER_STACK
+                            .lock()
+                            .registry
+                            .set_status(USB_CORE_MODULE, DriverStatus::Failed);
+                        crate::kprintln!(
+                            "[usb] port {} reset failed: {}",
+                            port + 1,
+                            error.message()
+                        );
+                        return Err(match error {
+                            UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
+                            UsbKbdError::Timeout(_) => DriverError::PortResetTimeout,
+                        });
+                    }
+                    reset += 1;
+                    crate::kprintln!("[usb] port {} reset complete", port + 1);
+                    let device_id = (enumerated + 1) as u8;
                     match unsafe { enumerate_usb_device(&mut controller, device_id, port) } {
                         Ok(record) => {
+                            crate::kprintln!(
+                                "[usb] device {} descriptor enumeration succeeded",
+                                device_id
+                            );
                             if USB_DRIVER_STACK.lock().add_device(record) {
-                                found += 1;
+                                enumerated += 1;
                             }
                         }
                         Err(UsbEnumerationError::AddressDeviceFailed) => {
+                            saw_address_failure = true;
                             crate::kprintln!(
-                                "USB DEVICE {} [FAILED: address device command failed]",
+                                "USB DEVICE {} [FAILED: address-device failure]",
                                 device_id
                             );
                         }
                         Err(UsbEnumerationError::DescriptorReadFailed) => {
+                            saw_descriptor_failure = true;
                             crate::kprintln!(
-                                "USB DEVICE {} [FAILED: descriptor read failed]",
+                                "USB DEVICE {} [FAILED: descriptor read failure]",
                                 device_id
                             );
                         }
                         Err(UsbEnumerationError::EndpointSetupFailed) => {
+                            saw_descriptor_failure = true;
                             crate::kprintln!(
-                                "USB DEVICE {} [FAILED: endpoint setup failed]",
+                                "USB DEVICE {} [FAILED: endpoint setup failed before descriptor completion]",
                                 device_id
                             );
                         }
@@ -494,36 +580,43 @@ impl DriverModule for UsbCoreModule {
             }
             port += 1;
         }
+        crate::kprintln!(
+            "[usb] port scan completed: connected={} reset={} enumerated={}",
+            connected,
+            reset,
+            enumerated
+        );
 
-        {
-            let mut stack = USB_DRIVER_STACK.lock();
-            stack.xhci = Some(controller);
+        let mut stack = USB_DRIVER_STACK.lock();
+        stack.xhci = Some(controller);
+        if enumerated > 0 {
             stack
                 .registry
-                .set_status(USB_CORE_MODULE, DriverStatus::Initialized);
-        }
-        if found == 0 {
-            return Err(DriverError::NoDevice);
-        }
-        Ok(())
-    }
-
-    fn start(&self) -> Result<(), DriverError> {
-        if XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Online
-            && XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Started
-            && XHCI_HOST_MODULE_INSTANCE.status() != DriverStatus::Initialized
-        {
-            USB_DRIVER_STACK
-                .lock()
+                .set_status(USB_CORE_MODULE, DriverStatus::Online);
+            crate::kprintln!("[usb] online: successful descriptor enumeration");
+            Ok(())
+        } else if connected == 0 {
+            stack
                 .registry
                 .set_status(USB_CORE_MODULE, DriverStatus::Skipped);
-            return Err(DriverError::DependencySkipped("xhci-host0 not online"));
+            crate::kprintln!("[usb] skipped: no connected ports");
+            Err(DriverError::NoConnectedPorts)
+        } else if saw_address_failure {
+            stack
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Failed);
+            Err(DriverError::AddressDeviceFailed)
+        } else if saw_descriptor_failure {
+            stack
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Failed);
+            Err(DriverError::DescriptorReadFailed)
+        } else {
+            stack
+                .registry
+                .set_status(USB_CORE_MODULE, DriverStatus::Failed);
+            Err(DriverError::NoDevice)
         }
-        USB_DRIVER_STACK
-            .lock()
-            .registry
-            .set_status(USB_CORE_MODULE, DriverStatus::Online);
-        Ok(())
     }
 
     fn stop(&self) -> Result<(), DriverError> {
@@ -837,6 +930,7 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
                 DriverError::DependencySkipped(_)
                     | DriverError::NoController
                     | DriverError::NoDevice
+                    | DriverError::NoConnectedPorts
                     | DriverError::NoHid
                     | DriverError::NoKeyboard
             );
@@ -965,6 +1059,14 @@ pub enum XhciKeyboardStatus {
 enum UsbKbdError {
     InvalidMmio(&'static str),
     Timeout(&'static str),
+}
+
+impl UsbKbdError {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::InvalidMmio(stage) | Self::Timeout(stage) => stage,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1853,17 +1955,27 @@ unsafe fn wait_transfer_completion(
     Err(UsbKbdError::Timeout(stage))
 }
 
-unsafe fn scan_and_reset_port(controller: XhciController, port: u8) -> Result<bool, UsbKbdError> {
+unsafe fn validate_root_hub_register_access(controller: XhciController) -> Result<(), UsbKbdError> {
+    if controller.max_ports == 0 {
+        return Err(UsbKbdError::InvalidMmio("root hub reports zero ports"));
+    }
+    let last_port = controller.max_ports - 1;
+    let _ = mmio_read32(controller.op as *mut u8, portsc_offset(0));
+    let _ = mmio_read32(controller.op as *mut u8, portsc_offset(last_port));
+    Ok(())
+}
+
+unsafe fn port_connected(controller: XhciController, port: u8) -> Result<bool, UsbKbdError> {
+    let portsc = mmio_read32(controller.op as *mut u8, portsc_offset(port));
+    Ok(portsc & PORTSC_CCS != 0)
+}
+
+unsafe fn reset_connected_port(controller: XhciController, port: u8) -> Result<(), UsbKbdError> {
     let registers = XhciRegisters {
         op: controller.op as *mut u8,
         max_ports: controller.max_ports,
     };
-    let portsc = mmio_read32(registers.op, portsc_offset(port));
-    if portsc & PORTSC_CCS == 0 {
-        return Ok(false);
-    }
-    reset_port(registers, port)?;
-    Ok(true)
+    reset_port(registers, port)
 }
 
 unsafe fn read_port_speed(controller: XhciController, port: u8) -> u8 {
