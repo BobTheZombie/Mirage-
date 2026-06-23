@@ -87,6 +87,7 @@ pub struct DriverModuleDescriptor {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriverError {
+    DmaAllocationFailed,
     DependencySkipped(&'static str),
     DependencyFailed(&'static str),
     NoController,
@@ -106,6 +107,7 @@ pub enum DriverError {
 impl DriverError {
     const fn message(self) -> &'static str {
         match self {
+            Self::DmaAllocationFailed => "DMA allocation failed",
             Self::DependencySkipped(name) => name,
             Self::DependencyFailed(name) => name,
             Self::NoController => "no xHCI controller",
@@ -363,6 +365,10 @@ impl DriverModule for XhciHostModule {
 
         let controller = unsafe { bring_up_xhci(mmio as *mut u8, function, bar0 as usize) }
             .map_err(|error| match error {
+                UsbKbdError::DmaAllocationFailed => {
+                    crate::kprintln!("AMD XHCI RINGS [FAILED: DMA allocation failed]");
+                    DriverError::DmaAllocationFailed
+                }
                 UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
                 UsbKbdError::Timeout(stage) => DriverError::Timeout(stage),
             })?;
@@ -393,6 +399,7 @@ impl DriverModule for XhciHostModule {
         };
         drop(stack);
         unsafe { submit_noop_command_and_wait(&mut controller) }.map_err(|error| match error {
+            UsbKbdError::DmaAllocationFailed => DriverError::DmaAllocationFailed,
             UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
             UsbKbdError::Timeout(stage) => DriverError::Timeout(stage),
         })?;
@@ -464,6 +471,7 @@ impl DriverModule for UsbCoreModule {
         };
 
         validate_root_hub_register_access(controller).map_err(|error| match error {
+            UsbKbdError::DmaAllocationFailed => DriverError::DmaAllocationFailed,
             UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
             UsbKbdError::Timeout(stage) => DriverError::Timeout(stage),
         })?;
@@ -1059,6 +1067,7 @@ pub enum XhciKeyboardStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UsbKbdError {
+    DmaAllocationFailed,
     InvalidMmio(&'static str),
     Timeout(&'static str),
 }
@@ -1558,6 +1567,69 @@ static mut XHCI_EP0_CYCLE: [bool; MAX_USB_DEVICES] = [true; MAX_USB_DEVICES];
 static mut USB_DESCRIPTOR_BUFFER: [XhciAlignedU64<64>; MAX_USB_DEVICES] =
     [const { XhciAlignedU64([0; 64]) }; MAX_USB_DEVICES];
 
+/// Bounded early-boot xHCI DMA reservation ledger.
+///
+/// This is intentionally not a general heap allocator.  The early x86_64 xHCI
+/// path still uses fixed, aligned BSS objects so boot can run before the kernel
+/// heap and before a supervised `usbd` DMA/IOMMU allocator exist.  The arena
+/// ledger accounts every xHCI DMA object against a small fixed byte budget,
+/// verifies the requested alignment, and translates the virtual address before
+/// any xHCI register receives it.  The migration point for supervised `usbd`
+/// is this interface: replace the fixed-object backend with capability-owned
+/// DMA allocations while preserving the `dma_for_static` contract.
+#[derive(Clone, Copy)]
+struct XhciEarlyDmaArena {
+    cursor: usize,
+}
+
+const XHCI_EARLY_DMA_ARENA_BYTES: usize = core::mem::size_of::<XhciAlignedU64<256>>()
+    + core::mem::size_of::<XhciAlignedPageU64<XHCI_MAX_SCRATCHPADS>>()
+    + core::mem::size_of::<[XhciPage; XHCI_MAX_SCRATCHPADS]>()
+    + core::mem::size_of::<XhciAlignedU64<64>>() * (3 + (MAX_USB_DEVICES * 4));
+
+impl XhciEarlyDmaArena {
+    const fn new() -> Self {
+        Self { cursor: 0 }
+    }
+
+    fn reset(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn dma_for_static(
+        &mut self,
+        virtual_address: u64,
+        bytes: usize,
+        alignment: usize,
+    ) -> Result<u64, UsbKbdError> {
+        if bytes == 0
+            || !alignment.is_power_of_two()
+            || virtual_address as usize & (alignment - 1) != 0
+            || self.cursor.checked_add(bytes).is_none()
+            || self.cursor + bytes > XHCI_EARLY_DMA_ARENA_BYTES
+        {
+            return Err(UsbKbdError::DmaAllocationFailed);
+        }
+
+        let dma = try_dma_address(virtual_address).ok_or(UsbKbdError::DmaAllocationFailed)?;
+        let pages = (bytes + XHCI_PAGE_SIZE - 1) / XHCI_PAGE_SIZE;
+        let mut page = 1usize;
+        while page < pages {
+            let page_virt = virtual_address + (page * XHCI_PAGE_SIZE) as u64;
+            let page_dma = try_dma_address(page_virt).ok_or(UsbKbdError::DmaAllocationFailed)?;
+            if page_dma != dma + (page * XHCI_PAGE_SIZE) as u64 {
+                return Err(UsbKbdError::DmaAllocationFailed);
+            }
+            page += 1;
+        }
+
+        self.cursor += bytes;
+        Ok(dma)
+    }
+}
+
+static mut XHCI_EARLY_DMA_ARENA: XhciEarlyDmaArena = XhciEarlyDmaArena::new();
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UsbEnumerationError {
     AddressDeviceFailed,
@@ -1576,20 +1648,37 @@ unsafe fn configure_static_xhci_rings(
     runtime: *mut u8,
     max_scratchpads: usize,
 ) -> Result<(), UsbKbdError> {
+    XHCI_EARLY_DMA_ARENA.reset();
     XHCI_DCBAA.0.fill(0);
     configure_xhci_scratchpads(max_scratchpads)?;
     XHCI_COMMAND_RING.0.fill(0);
     XHCI_EVENT_RING.0.fill(0);
     XHCI_ERST.0.fill(0);
     let command_ring_virt = core::ptr::addr_of_mut!(XHCI_COMMAND_RING.0) as u64;
-    let command_ring_dma = dma_address(command_ring_virt);
+    let command_ring_dma = xhci_dma_address(
+        command_ring_virt,
+        core::mem::size_of::<XhciAlignedU64<64>>(),
+        64,
+    )?;
     XHCI_COMMAND_RING.0[126] = command_ring_dma;
     XHCI_COMMAND_RING.0[127] = ((6u64) << 10) | (1 << 1) | 1;
 
-    let dcbaa = dma_address(core::ptr::addr_of_mut!(XHCI_DCBAA.0) as u64);
+    let dcbaa = xhci_dma_address(
+        core::ptr::addr_of_mut!(XHCI_DCBAA.0) as u64,
+        core::mem::size_of::<XhciAlignedU64<256>>(),
+        64,
+    )?;
     let command_ring = command_ring_dma | 1;
-    let event_ring = dma_address(core::ptr::addr_of_mut!(XHCI_EVENT_RING.0) as u64);
-    let erst = dma_address(core::ptr::addr_of_mut!(XHCI_ERST.0) as u64);
+    let event_ring = xhci_dma_address(
+        core::ptr::addr_of_mut!(XHCI_EVENT_RING.0) as u64,
+        core::mem::size_of::<XhciAlignedU64<64>>(),
+        64,
+    )?;
+    let erst = xhci_dma_address(
+        core::ptr::addr_of_mut!(XHCI_ERST.0) as u64,
+        core::mem::size_of::<XhciAlignedU64<2>>(),
+        64,
+    )?;
 
     XHCI_ERST.0[0] = event_ring;
     XHCI_ERST.0[1] = 64;
@@ -1612,11 +1701,11 @@ unsafe fn configure_static_xhci_rings(
 
 /// Configure xHCI scratchpad buffers before the controller is started.
 ///
-/// Mirage's early xHCI path uses statically reserved kernel memory for the
+/// Mirage's early xHCI path uses the bounded static DMA arena ledger for the
 /// scratchpad pointer array and buffers.  The pages are part of the kernel
-/// image/BSS reservation, are page-aligned, and are translated to DMA-visible
-/// physical addresses through the active kernel paging translator before they
-/// are handed to the controller.
+/// image/BSS reservation, are page-aligned, accounted against the xHCI DMA
+/// budget, and translated to DMA-visible physical addresses before they are
+/// handed to the controller.
 ///
 /// IOMMU assumption: this early boot driver does not program per-device IOMMU
 /// mappings.  It therefore requires either no active IOMMU translation for the
@@ -1642,24 +1731,9 @@ unsafe fn configure_xhci_scratchpads(max_scratchpads: usize) -> Result<(), UsbKb
             "xHCI scratchpad pointer array is not page aligned",
         ));
     }
-    let pointer_array_dma = try_dma_address(pointer_array_virt).ok_or(UsbKbdError::InvalidMmio(
-        "xHCI scratchpad pointer array physical translation failed",
-    ))?;
     let pointer_array_bytes = max_scratchpads * core::mem::size_of::<u64>();
-    let pointer_array_pages = (pointer_array_bytes + XHCI_PAGE_SIZE - 1) / XHCI_PAGE_SIZE;
-    let mut page = 1usize;
-    while page < pointer_array_pages {
-        let page_virt = pointer_array_virt + (page * XHCI_PAGE_SIZE) as u64;
-        let page_dma = try_dma_address(page_virt).ok_or(UsbKbdError::InvalidMmio(
-            "xHCI scratchpad pointer array page physical translation failed",
-        ))?;
-        if page_dma != pointer_array_dma + (page * XHCI_PAGE_SIZE) as u64 {
-            return Err(UsbKbdError::InvalidMmio(
-                "xHCI scratchpad pointer array is not physically contiguous",
-            ));
-        }
-        page += 1;
-    }
+    let pointer_array_dma =
+        xhci_dma_address(pointer_array_virt, pointer_array_bytes, XHCI_PAGE_SIZE)?;
 
     let mut index = 0usize;
     while index < max_scratchpads {
@@ -1670,9 +1744,7 @@ unsafe fn configure_xhci_scratchpads(max_scratchpads: usize) -> Result<(), UsbKb
                 "xHCI scratchpad buffer is not page aligned",
             ));
         }
-        let buffer_dma = try_dma_address(buffer_virt).ok_or(UsbKbdError::InvalidMmio(
-            "xHCI scratchpad buffer physical translation failed",
-        ))?;
+        let buffer_dma = xhci_dma_address(buffer_virt, XHCI_PAGE_SIZE, XHCI_PAGE_SIZE)?;
         XHCI_SCRATCHPAD_POINTERS.0[index] = buffer_dma;
         index += 1;
     }
@@ -1681,10 +1753,16 @@ unsafe fn configure_xhci_scratchpads(max_scratchpads: usize) -> Result<(), UsbKb
     Ok(())
 }
 
-fn dma_address(virtual_address: u64) -> u64 {
-    crate::arch::x86_64::paging::translate_kernel_address(virtual_address).unwrap_or_else(|| {
-        crate::arch::x86_64::paging::active_translator().physical_for_virtual(virtual_address)
-    })
+unsafe fn xhci_dma_address(
+    virtual_address: u64,
+    bytes: usize,
+    alignment: usize,
+) -> Result<u64, UsbKbdError> {
+    XHCI_EARLY_DMA_ARENA.dma_for_static(virtual_address, bytes, alignment)
+}
+
+unsafe fn dma_address(virtual_address: u64) -> Result<u64, UsbKbdError> {
+    xhci_dma_address(virtual_address, 8, 8)
 }
 
 fn try_dma_address(virtual_address: u64) -> Option<u64> {
@@ -1798,7 +1876,7 @@ unsafe fn address_device(
 ) -> Result<(), UsbKbdError> {
     let input_context = dma_address(core::ptr::addr_of_mut!(
         XHCI_INPUT_CONTEXTS[(device_id - 1) as usize].0
-    ) as u64);
+    ) as u64)?;
     let control = ((slot_id as u64) << 24) | ((TRB_TYPE_ADDRESS_DEVICE_COMMAND as u64) << 10) | 1;
     submit_command_and_wait_raw(
         controller,
@@ -1869,7 +1947,7 @@ unsafe fn wait_command_completion(
         {
             let completion_code = ((status >> 24) & 0xff) as u8;
             let slot_id = ((control >> 24) & 0xff) as u8;
-            acknowledge_event(controller, 1);
+            acknowledge_event(controller, 1)?;
             if completion_code == 1 {
                 return Ok(XhciCommandEvent {
                     completion_code,
@@ -1884,14 +1962,18 @@ unsafe fn wait_command_completion(
     Err(UsbKbdError::Timeout(stage))
 }
 
-unsafe fn acknowledge_event(controller: XhciController, consumed_trbs: usize) {
+unsafe fn acknowledge_event(
+    controller: XhciController,
+    consumed_trbs: usize,
+) -> Result<(), UsbKbdError> {
     let erdp =
-        dma_address(core::ptr::addr_of!(XHCI_EVENT_RING.0[consumed_trbs * 2]) as u64) | (1 << 3);
+        dma_address(core::ptr::addr_of!(XHCI_EVENT_RING.0[consumed_trbs * 2]) as u64)? | (1 << 3);
     let interrupter = (controller.runtime as *mut u8).add(0x20);
     mmio_write32(interrupter, 0x18, erdp as u32);
     mmio_write32(interrupter, 0x1c, (erdp >> 32) as u32);
     let sts = mmio_read32(controller.op as *mut u8, 0x04);
     mmio_write32(controller.op as *mut u8, 0x04, sts | USBSTS_EINT);
+    Ok(())
 }
 
 unsafe fn prepare_device_contexts(
@@ -1911,7 +1993,8 @@ unsafe fn prepare_device_contexts(
     XHCI_EP0_DEQUEUE_INDEX[index] = 0;
     XHCI_EP0_CYCLE[index] = true;
 
-    let device_context = dma_address(core::ptr::addr_of_mut!(XHCI_DEVICE_CONTEXTS[index].0) as u64);
+    let device_context =
+        dma_address(core::ptr::addr_of_mut!(XHCI_DEVICE_CONTEXTS[index].0) as u64)?;
     XHCI_DCBAA.0[slot_id as usize] = device_context;
 
     write_context_u32(controller, &mut XHCI_INPUT_CONTEXTS[index], 0, 0, 0);
@@ -1929,7 +2012,7 @@ unsafe fn prepare_device_contexts(
     );
 
     let ep0_ring_dma =
-        dma_address(core::ptr::addr_of_mut!(XHCI_EP0_TRANSFER_RINGS[index].0) as u64);
+        dma_address(core::ptr::addr_of_mut!(XHCI_EP0_TRANSFER_RINGS[index].0) as u64)?;
     XHCI_EP0_TRANSFER_RINGS[index].0[126] = ep0_ring_dma;
     XHCI_EP0_TRANSFER_RINGS[index].0[127] = ((6u64) << 42) | (1u64 << 33) | 1;
 
@@ -1992,7 +2075,7 @@ unsafe fn ep0_get_descriptor(
     let index = (device_id - 1) as usize;
     let buffer = &mut USB_DESCRIPTOR_BUFFER[index].0;
     buffer.fill(0);
-    let buffer_dma = dma_address(buffer.as_mut_ptr() as u64);
+    let buffer_dma = dma_address(buffer.as_mut_ptr() as u64)?;
     let ring = &mut XHCI_EP0_TRANSFER_RINGS[index].0;
     let start = XHCI_EP0_DEQUEUE_INDEX[index].min(57);
     let cycle = u64::from(XHCI_EP0_CYCLE[index]);
@@ -2038,7 +2121,7 @@ unsafe fn wait_transfer_completion(
             && ((control >> 10) & 0x3f) as u8 == TRB_TYPE_TRANSFER_EVENT
             && ((control >> 24) & 0xff) as u8 == slot_id
         {
-            acknowledge_event(*controller, 1);
+            acknowledge_event(*controller, 1)?;
             if ((status >> 24) & 0xff) as u8 == 1 {
                 return Ok(());
             }
