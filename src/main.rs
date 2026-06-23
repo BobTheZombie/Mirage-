@@ -75,18 +75,22 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     }
     if !deps.root_fs_online {
         deps.userspace_launch_deferred = true;
+        mirage::kprintln!("SPIDER-RS PID1 [PENDING: root FS not online]");
         return Ok(Pid1LaunchState::Deferred("root FS not online"));
     }
     if !deps.supervisor_online {
         deps.userspace_launch_deferred = true;
+        mirage::kprintln!("SPIDER-RS PID1 [PENDING: supervisor not online]");
         return Ok(Pid1LaunchState::Deferred("supervisor not online"));
     }
     if !deps.mtss_online {
         deps.userspace_launch_deferred = true;
+        mirage::kprintln!("SPIDER-RS PID1 [PENDING: MTSS not online]");
         return Ok(Pid1LaunchState::Deferred("MTSS not online"));
     }
     if !deps.spider_rt_available {
         deps.userspace_launch_deferred = true;
+        mirage::kprintln!("SPIDER-RS PID1 [PENDING: spider runtime unavailable]");
         return Ok(Pid1LaunchState::Deferred("spider runtime unavailable"));
     }
 
@@ -97,6 +101,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         Some(fs) => fs,
         None => {
             deps.userspace_launch_deferred = true;
+            mirage::kprintln!("SPIDER-RS PID1 [PENDING: spider runtime unavailable]");
             return Ok(Pid1LaunchState::Deferred("spider runtime unavailable"));
         }
     };
@@ -107,9 +112,10 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     ) {
         Ok(len) => len,
         Err(_) => {
+            mirage::kprintln!("SPIDER-RS PID1 [FAILED: Spider-rs binary missing]");
             return Err(mirage::supervisor::pid1::SpiderPid1LaunchError::Handoff(
                 mirage::supervisor::pid1::SpiderPid1HandoffError::SpiderBinaryMissing,
-            ))
+            ));
         }
     };
     boot_phase_ok(BootPhase::UserspaceLoader);
@@ -128,11 +134,19 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
             mtss_online: deps.mtss_online,
             userspace_loader_ready: deps.userspace_loader_started,
         },
-    )?;
-    deps.userspace_launch_deferred = false;
-    deps.spider_elf_ok = true;
-    deps.pid1_created = true;
-    deps.pid1_runnable = true;
+    );
+    deps.userspace_launch_deferred = report.blocker().is_some();
+    deps.spider_elf_ok = report.entry_preflight_ok;
+    deps.pid1_created = report.process_created;
+    deps.pid1_runnable = report.accepted_into_run_queue;
+    if let Some(blocker) = report.blocker() {
+        if report.process_created || report.main_thread_created || report.entry_preflight_ok {
+            mirage::kprintln!("SPIDER-RS PID1 [PENDING: {}]", blocker);
+            return Ok(Pid1LaunchState::Deferred(blocker));
+        }
+        mirage::kprintln!("SPIDER-RS PID1 [FAILED: {}]", blocker);
+        return Ok(Pid1LaunchState::Deferred(blocker));
+    }
     boot_phase_ok(BootPhase::SpiderRs);
     boot_phase_ok(BootPhase::Pid1);
     boot_phase_start(BootPhase::SystemDispatcher);
@@ -156,7 +170,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     mirage::kprintln!(
         "[pid1] process created pid={:?} entry={:#x} bytes={} path={}",
         report.pid,
-        report.entry.0,
+        report.entry.map(|entry| entry.0).unwrap_or(0),
         report.image_len,
         report.runtime_path
     );
