@@ -190,21 +190,29 @@ struct XhciController {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct UsbDeviceRecord {
     id: u8,
+    slot_id: u8,
     port: u8,
     endpoint_count: u8,
     port_speed: u8,
     hid_interface_number: u8,
     interrupt_in_endpoint: u8,
     interrupt_in_max_packet_size: u16,
+    interrupt_in_interval: u8,
+    configuration_value: u8,
     is_hid_boot_keyboard_candidate: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HidDeviceRecord {
     device_id: u8,
+    slot_id: u8,
     interface_number: u8,
     interrupt_in_endpoint: u8,
     max_packet_size: u16,
+    interval: u8,
+    configuration_value: u8,
+    polling_live: bool,
+    previous_report: HidBootKeyboardReport,
     boot_keyboard: bool,
 }
 
@@ -276,6 +284,19 @@ impl UsbDriverStackState {
         while index < self.hids.len() {
             if let Some(record) = self.hids[index] {
                 if record.boot_keyboard {
+                    return true;
+                }
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn has_live_boot_keyboard_polling(&self) -> bool {
+        let mut index = 0usize;
+        while index < self.hids.len() {
+            if let Some(record) = self.hids[index] {
+                if record.boot_keyboard && record.polling_live {
                     return true;
                 }
             }
@@ -676,8 +697,13 @@ impl DriverModule for UsbHidModule {
                     let hid = HidDeviceRecord {
                         device_id: device.id,
                         interface_number: device.hid_interface_number,
+                        slot_id: device.slot_id,
                         interrupt_in_endpoint: device.interrupt_in_endpoint,
                         max_packet_size: device.interrupt_in_max_packet_size,
+                        interval: device.interrupt_in_interval,
+                        configuration_value: device.configuration_value,
+                        polling_live: false,
+                        previous_report: HidBootKeyboardReport::default(),
                         boot_keyboard: true,
                     };
                     if USB_DRIVER_STACK.lock().add_hid(hid) {
@@ -764,9 +790,45 @@ impl DriverModule for UsbKeyboardModule {
                 .set_status(USB_KBD_MODULE, DriverStatus::Skipped);
             return Err(DriverError::NoKeyboard);
         }
-        crate::kprintln!("[usbkbd] endpoint configured");
-        USB_DRIVER_STACK
-            .lock()
+        let mut stack = USB_DRIVER_STACK.lock();
+        let Some(mut controller) = stack.xhci else {
+            stack
+                .registry
+                .set_status(USB_KBD_MODULE, DriverStatus::Failed);
+            return Err(DriverError::NoController);
+        };
+        let mut hids = stack.hids;
+        drop(stack);
+
+        let mut configured = false;
+        let mut index = 0usize;
+        while index < hids.len() {
+            if let Some(mut hid) = hids[index] {
+                unsafe { configure_hid_boot_keyboard_endpoint(&mut controller, &mut hid) }
+                    .map_err(|_| DriverError::EndpointSetupFailed)?;
+                hid.polling_live = true;
+                hids[index] = Some(hid);
+                configured = true;
+                crate::kprintln!(
+                    "[usbkbd] interrupt IN ep={} max_packet={} interval={} configured",
+                    hid.interrupt_in_endpoint & 0x0f,
+                    hid.max_packet_size,
+                    hid.interval
+                );
+            }
+            index += 1;
+        }
+
+        let mut stack = USB_DRIVER_STACK.lock();
+        stack.xhci = Some(controller);
+        stack.hids = hids;
+        if !configured {
+            stack
+                .registry
+                .set_status(USB_KBD_MODULE, DriverStatus::Skipped);
+            return Err(DriverError::NoKeyboard);
+        }
+        stack
             .registry
             .set_status(USB_KBD_MODULE, DriverStatus::Initialized);
         Ok(())
@@ -779,6 +841,14 @@ impl DriverModule for UsbKeyboardModule {
                 .registry
                 .set_status(USB_KBD_MODULE, DriverStatus::Skipped);
             return Err(DriverError::NoKeyboard);
+        }
+        poll_configured_hid_keyboards();
+        if !USB_DRIVER_STACK.lock().has_live_boot_keyboard_polling() {
+            USB_DRIVER_STACK
+                .lock()
+                .registry
+                .set_status(USB_KBD_MODULE, DriverStatus::Failed);
+            return Err(DriverError::EndpointSetupFailed);
         }
         mark_source_online(InputRawSource::UsbHid);
         {
@@ -800,7 +870,9 @@ impl DriverModule for UsbKeyboardModule {
         Ok(())
     }
 
-    fn poll(&self) {}
+    fn poll(&self) {
+        poll_configured_hid_keyboards();
+    }
 
     fn status(&self) -> DriverStatus {
         USB_DRIVER_STACK.lock().registry.status(USB_KBD_MODULE)
@@ -1564,8 +1636,14 @@ static mut XHCI_EP0_TRANSFER_RINGS: [XhciAlignedU64<64>; MAX_USB_DEVICES] =
     [const { XhciAlignedU64([0; 64]) }; MAX_USB_DEVICES];
 static mut XHCI_EP0_DEQUEUE_INDEX: [usize; MAX_USB_DEVICES] = [0; MAX_USB_DEVICES];
 static mut XHCI_EP0_CYCLE: [bool; MAX_USB_DEVICES] = [true; MAX_USB_DEVICES];
+static mut XHCI_INTERRUPT_IN_RINGS: [XhciAlignedU64<64>; MAX_USB_DEVICES] =
+    [const { XhciAlignedU64([0; 64]) }; MAX_USB_DEVICES];
+static mut XHCI_INTERRUPT_IN_DEQUEUE_INDEX: [usize; MAX_USB_DEVICES] = [0; MAX_USB_DEVICES];
+static mut XHCI_INTERRUPT_IN_CYCLE: [bool; MAX_USB_DEVICES] = [true; MAX_USB_DEVICES];
 static mut USB_DESCRIPTOR_BUFFER: [XhciAlignedU64<64>; MAX_USB_DEVICES] =
     [const { XhciAlignedU64([0; 64]) }; MAX_USB_DEVICES];
+static mut USB_INTERRUPT_REPORT_BUFFER: [XhciAlignedU64<1>; MAX_USB_DEVICES] =
+    [const { XhciAlignedU64([0; 1]) }; MAX_USB_DEVICES];
 
 /// Bounded early-boot xHCI DMA reservation ledger.
 ///
@@ -1585,7 +1663,8 @@ struct XhciEarlyDmaArena {
 const XHCI_EARLY_DMA_ARENA_BYTES: usize = core::mem::size_of::<XhciAlignedU64<256>>()
     + core::mem::size_of::<XhciAlignedPageU64<XHCI_MAX_SCRATCHPADS>>()
     + core::mem::size_of::<[XhciPage; XHCI_MAX_SCRATCHPADS]>()
-    + core::mem::size_of::<XhciAlignedU64<64>>() * (3 + (MAX_USB_DEVICES * 4));
+    + core::mem::size_of::<XhciAlignedU64<64>>() * (3 + (MAX_USB_DEVICES * 5))
+    + core::mem::size_of::<XhciAlignedU64<1>>() * MAX_USB_DEVICES;
 
 impl XhciEarlyDmaArena {
     const fn new() -> Self {
@@ -1832,6 +1911,7 @@ unsafe fn enumerate_usb_device(
 
     Ok(UsbDeviceRecord {
         id: device_id,
+        slot_id,
         port,
         endpoint_count: if config.interrupt_in.is_some() { 2 } else { 1 },
         port_speed,
@@ -1847,6 +1927,11 @@ unsafe fn enumerate_usb_device(
             .interrupt_in
             .map(|endpoint| endpoint.max_packet_size)
             .unwrap_or(0),
+        interrupt_in_interval: config
+            .interrupt_in
+            .map(|endpoint| endpoint.interval)
+            .unwrap_or(0),
+        configuration_value: config.configuration_value,
         is_hid_boot_keyboard_candidate: config.hid_boot_keyboard.is_some()
             && config.interrupt_in.is_some(),
     })
@@ -1992,6 +2077,10 @@ unsafe fn prepare_device_contexts(
     XHCI_EP0_TRANSFER_RINGS[index].0.fill(0);
     XHCI_EP0_DEQUEUE_INDEX[index] = 0;
     XHCI_EP0_CYCLE[index] = true;
+    XHCI_INTERRUPT_IN_RINGS[index].0.fill(0);
+    XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index] = 0;
+    XHCI_INTERRUPT_IN_CYCLE[index] = true;
+    USB_INTERRUPT_REPORT_BUFFER[index].0.fill(0);
 
     let device_context =
         dma_address(core::ptr::addr_of_mut!(XHCI_DEVICE_CONTEXTS[index].0) as u64)?;
@@ -2131,6 +2220,258 @@ unsafe fn wait_transfer_completion(
         count += 1;
     }
     Err(UsbKbdError::Timeout(stage))
+}
+
+unsafe fn ep0_control_no_data(
+    controller: &mut XhciController,
+    device_id: u8,
+    slot_id: u8,
+    request_type: u8,
+    request: u8,
+    value: u16,
+    index_value: u16,
+    stage: &'static str,
+) -> Result<(), UsbKbdError> {
+    let index = (device_id - 1) as usize;
+    let ring = &mut XHCI_EP0_TRANSFER_RINGS[index].0;
+    let start = XHCI_EP0_DEQUEUE_INDEX[index].min(57);
+    let cycle = u64::from(XHCI_EP0_CYCLE[index]);
+    let setup = (request_type as u64)
+        | ((request as u64) << 8)
+        | ((value as u64) << 16)
+        | ((index_value as u64) << 32);
+    ring[start * 2] = setup;
+    ring[start * 2 + 1] = ((8u64) | ((2u64) << 16)) | (((2u64 << 10) | cycle) << 32);
+    ring[start * 2 + 2] = 0;
+    ring[start * 2 + 3] = ((4u64 << 10) | (1u64 << 16) | cycle) << 32;
+    XHCI_EVENT_RING.0[0] = 0;
+    XHCI_EVENT_RING.0[1] = 0;
+    mmio_write32(
+        (controller.doorbells as *mut u8).add(slot_id as usize * 4),
+        0,
+        1,
+    );
+    wait_transfer_completion(controller, slot_id, stage)?;
+    XHCI_EP0_DEQUEUE_INDEX[index] += 2;
+    if XHCI_EP0_DEQUEUE_INDEX[index] >= 58 {
+        XHCI_EP0_DEQUEUE_INDEX[index] = 0;
+        XHCI_EP0_CYCLE[index] = !XHCI_EP0_CYCLE[index];
+    }
+    Ok(())
+}
+
+unsafe fn configure_hid_boot_keyboard_endpoint(
+    controller: &mut XhciController,
+    hid: &mut HidDeviceRecord,
+) -> Result<(), UsbKbdError> {
+    ep0_control_no_data(
+        controller,
+        hid.device_id,
+        hid.slot_id,
+        0x00,
+        9,
+        hid.configuration_value as u16,
+        0,
+        "USB Set Configuration",
+    )?;
+    ep0_control_no_data(
+        controller,
+        hid.device_id,
+        hid.slot_id,
+        0x21,
+        11,
+        0,
+        hid.interface_number as u16,
+        "HID Set Protocol boot",
+    )?;
+    ep0_control_no_data(
+        controller,
+        hid.device_id,
+        hid.slot_id,
+        0x21,
+        10,
+        0,
+        hid.interface_number as u16,
+        "HID Set Idle",
+    )?;
+    configure_interrupt_in_endpoint_context(controller, hid)?;
+    prime_interrupt_in_transfer(controller, hid)?;
+    Ok(())
+}
+
+unsafe fn configure_interrupt_in_endpoint_context(
+    controller: &mut XhciController,
+    hid: &HidDeviceRecord,
+) -> Result<(), UsbKbdError> {
+    let device_index = (hid.device_id - 1) as usize;
+    let endpoint_number = (hid.interrupt_in_endpoint & 0x0f) as usize;
+    if endpoint_number == 0 || endpoint_number > 15 || hid.max_packet_size < 8 {
+        return Err(UsbKbdError::InvalidMmio("invalid HID interrupt endpoint"));
+    }
+    let endpoint_context_index = endpoint_number * 2 + 1;
+    XHCI_INPUT_CONTEXTS[device_index].0.fill(0);
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[device_index],
+        0,
+        1,
+        1u32 << endpoint_context_index,
+    );
+    let ring_dma =
+        dma_address(core::ptr::addr_of_mut!(XHCI_INTERRUPT_IN_RINGS[device_index].0) as u64)?;
+    XHCI_INTERRUPT_IN_RINGS[device_index].0[126] = ring_dma;
+    XHCI_INTERRUPT_IN_RINGS[device_index].0[127] = ((6u64) << 42) | (1u64 << 33) | 1;
+    let interval = hid.interval.max(1) as u32;
+    let ep_type_interrupt_in = 7u32 << 3;
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[device_index],
+        endpoint_context_index,
+        0,
+        interval << 16,
+    );
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[device_index],
+        endpoint_context_index,
+        1,
+        ep_type_interrupt_in | (3 << 1) | ((hid.max_packet_size as u32) << 16),
+    );
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[device_index],
+        endpoint_context_index,
+        2,
+        (ring_dma as u32) | 1,
+    );
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[device_index],
+        endpoint_context_index,
+        3,
+        (ring_dma >> 32) as u32,
+    );
+    write_context_u32(
+        controller,
+        &mut XHCI_INPUT_CONTEXTS[device_index],
+        endpoint_context_index,
+        4,
+        hid.max_packet_size as u32,
+    );
+    let input_context =
+        dma_address(core::ptr::addr_of_mut!(XHCI_INPUT_CONTEXTS[device_index].0) as u64)?;
+    let control =
+        ((hid.slot_id as u64) << 24) | ((TRB_TYPE_CONFIGURE_ENDPOINT_COMMAND as u64) << 10) | 1;
+    submit_command_and_wait_raw(
+        controller,
+        input_context,
+        0,
+        control,
+        "xHCI Configure Endpoint command",
+    )?;
+    Ok(())
+}
+
+unsafe fn prime_interrupt_in_transfer(
+    controller: &mut XhciController,
+    hid: &HidDeviceRecord,
+) -> Result<(), UsbKbdError> {
+    let index = (hid.device_id - 1) as usize;
+    let ring = &mut XHCI_INTERRUPT_IN_RINGS[index].0;
+    let start = XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index].min(125);
+    let cycle = u64::from(XHCI_INTERRUPT_IN_CYCLE[index]);
+    let report = &mut USB_INTERRUPT_REPORT_BUFFER[index].0;
+    report.fill(0);
+    let report_dma = dma_address(report.as_mut_ptr() as u64)?;
+    ring[start * 2] = report_dma;
+    ring[start * 2 + 1] = (8u64) | (((1u64 << 10) | (1u64 << 5) | cycle) << 32);
+    XHCI_EVENT_RING.0[0] = 0;
+    XHCI_EVENT_RING.0[1] = 0;
+    mmio_write32(
+        (controller.doorbells as *mut u8).add(hid.slot_id as usize * 4),
+        0,
+        hid.interrupt_in_endpoint & 0x0f,
+    );
+    Ok(())
+}
+
+fn poll_configured_hid_keyboards() {
+    let mut stack = USB_DRIVER_STACK.lock();
+    let Some(mut controller) = stack.xhci else {
+        return;
+    };
+    let mut hids = stack.hids;
+    drop(stack);
+    let mut index = 0usize;
+    while index < hids.len() {
+        if let Some(mut hid) = hids[index] {
+            if hid.polling_live {
+                unsafe {
+                    let _ = poll_hid_keyboard_once(&mut controller, &mut hid);
+                }
+                hids[index] = Some(hid);
+            }
+        }
+        index += 1;
+    }
+    let mut stack = USB_DRIVER_STACK.lock();
+    stack.xhci = Some(controller);
+    stack.hids = hids;
+}
+
+unsafe fn poll_hid_keyboard_once(
+    controller: &mut XhciController,
+    hid: &mut HidDeviceRecord,
+) -> Result<(), UsbKbdError> {
+    let mut count = 0usize;
+    while count < 128 {
+        let event1 = core::ptr::read_volatile(core::ptr::addr_of!(XHCI_EVENT_RING.0[1]));
+        let status = event1 as u32;
+        let control = (event1 >> 32) as u32;
+        if (control & 1) == controller.event_cycle as u32
+            && ((control >> 10) & 0x3f) as u8 == TRB_TYPE_TRANSFER_EVENT
+            && ((control >> 24) & 0xff) as u8 == hid.slot_id
+        {
+            acknowledge_event(*controller, 1)?;
+            if ((status >> 24) & 0xff) as u8 == 1 {
+                let index = (hid.device_id - 1) as usize;
+                let bytes = core::slice::from_raw_parts(
+                    USB_INTERRUPT_REPORT_BUFFER[index].0.as_ptr() as *const u8,
+                    8,
+                );
+                if let Some(report) = decode_boot_keyboard_report(bytes) {
+                    for event in diff_hid_boot_reports(hid.previous_report, report)
+                        .into_iter()
+                        .flatten()
+                    {
+                        publish_keyboard_event(event);
+                    }
+                    hid.previous_report = report;
+                }
+                XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index] += 1;
+                if XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index] >= 126 {
+                    XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index] = 0;
+                    XHCI_INTERRUPT_IN_CYCLE[index] = !XHCI_INTERRUPT_IN_CYCLE[index];
+                }
+                prime_interrupt_in_transfer(controller, hid)?;
+            }
+            return Ok(());
+        }
+        core::hint::spin_loop();
+        count += 1;
+    }
+    Ok(())
+}
+
+pub fn decode_boot_keyboard_report(bytes: &[u8]) -> Option<HidBootKeyboardReport> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    Some(HidBootKeyboardReport {
+        modifiers: bytes[0],
+        reserved: bytes[1],
+        keys: [bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]],
+    })
 }
 
 unsafe fn validate_root_hub_register_access(controller: XhciController) -> Result<(), UsbKbdError> {
@@ -2359,6 +2700,7 @@ impl UsbEndpointDescriptor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UsbConfigurationScan {
     pub total_length: u16,
+    pub configuration_value: u8,
     pub hid_boot_keyboard: Option<UsbInterfaceDescriptor>,
     pub interrupt_in: Option<UsbEndpointDescriptor>,
 }
@@ -2388,6 +2730,7 @@ pub fn scan_configuration_descriptor(bytes: &[u8]) -> Result<UsbConfigurationSca
 
     let mut scan = UsbConfigurationScan {
         total_length,
+        configuration_value: bytes[5],
         hid_boot_keyboard: None,
         interrupt_in: None,
     };
