@@ -87,8 +87,10 @@ use crate::subkernel::{
 use core::cmp::min;
 use core::ptr::NonNull;
 use mirage_mtss::{
-    CoreMtss, CoreMtssError, CoreTask, CoreTaskId, CoreThread, MtssThreadScheduleRecord, RunQueue,
-    StackRange, UserProgramImage,
+    AddressSpaceId as MtssAddressSpaceId, CoreMtss, CoreMtssError, CoreTask, CoreTaskId,
+    CoreThread, CpuId as MtssCpuId, Mtss, MtssConfig, MtssError, MtssThreadScheduleRecord,
+    Priority as MtssPriority, ScheduleDecision, StackRange, TaskId as MtssTaskId,
+    ThreadId as MtssThreadId, Timeslice as MtssTimeslice, UserProgramImage,
 };
 
 pub type KernelThreadScheduleRecord =
@@ -743,7 +745,7 @@ const EMPTY_DEVICE_DESCRIPTOR: DeviceDescriptor = DeviceDescriptor::new(
 pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     process_table: [Option<ProcessControlBlock<MAX_OPEN_FILES>>; MAX_PROC],
     ipc_queues: [MessageQueue<MSG_DEPTH>; MAX_PROC],
-    scheduler: RunQueue<KernelThreadScheduleRecord, MAX_THREADS>,
+    mtss_scheduler: Mtss<MAX_PROCESSES, MAX_THREADS, MAX_THREADS, MAX_THREADS>,
     mtss_core: CoreMtss<MAX_PROCESSES, MAX_THREADS, MAX_THREADS>,
     mtss_initialized: bool,
     mtss_ticks: u64,
@@ -775,11 +777,88 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         MtssThreadScheduleRecord::new(thread, process, priority, priority.time_slice())
     }
 
+    const fn new_mtss_scheduler() -> Mtss<MAX_PROCESSES, MAX_THREADS, MAX_THREADS, MAX_THREADS> {
+        Mtss::new(
+            MtssConfig::new(MtssCpuId::new(0)).with_default_timeslice(MtssTimeslice::from_ticks(4)),
+        )
+    }
+
+    const fn mtss_task_id(pid: ProcessId) -> MtssTaskId {
+        MtssTaskId::new(pid.raw())
+    }
+
+    const fn mtss_thread_id(thread: ThreadId) -> MtssThreadId {
+        MtssThreadId::new(thread.raw())
+    }
+
+    const fn mtss_priority(priority: ProcessPriority) -> MtssPriority {
+        match priority {
+            ProcessPriority::Critical => MtssPriority::CRITICAL,
+            ProcessPriority::High => MtssPriority::HIGH,
+            ProcessPriority::Normal => MtssPriority::NORMAL,
+            ProcessPriority::Low => MtssPriority::LOW,
+        }
+    }
+
+    fn schedule_record_from_mtss(
+        &self,
+        decision: ScheduleDecision,
+    ) -> Option<KernelThreadScheduleRecord> {
+        let thread = ThreadId::new(decision.next.raw());
+        let index = self.locate_thread(thread).ok()?;
+        let tcb = self.thread_table[index]?;
+        Some(Self::schedule_record(tcb.id, tcb.process, tcb.priority))
+    }
+
+    pub(super) fn mtss_create_task(
+        &mut self,
+        pid: ProcessId,
+        parent: Option<ProcessId>,
+        address_space_root: u64,
+        priority: ProcessPriority,
+    ) -> KernelResult<()> {
+        self.mtss_scheduler
+            .create_task(
+                Self::mtss_task_id(pid),
+                parent.map(Self::mtss_task_id),
+                MtssAddressSpaceId::new(if address_space_root == 0 {
+                    pid.raw()
+                } else {
+                    address_space_root
+                }),
+                Self::mtss_priority(priority),
+            )
+            .map(|_| ())
+            .map_err(map_mtss_error)
+    }
+
+    pub(super) fn mtss_create_thread(
+        &mut self,
+        pid: ProcessId,
+        thread: ThreadId,
+        priority: ProcessPriority,
+    ) -> KernelResult<()> {
+        self.mtss_scheduler
+            .create_thread(
+                Self::mtss_task_id(pid),
+                Self::mtss_thread_id(thread),
+                Self::mtss_priority(priority),
+            )
+            .map(|_| ())
+            .map_err(map_mtss_error)
+    }
+
+    pub(super) fn mtss_enqueue_thread(&mut self, thread: ThreadId) -> KernelResult<()> {
+        self.mtss_scheduler
+            .enqueue_thread(Self::mtss_thread_id(thread))
+            .map_err(map_mtss_error)
+    }
+
     pub const fn new() -> Self {
         Self {
             process_table: [None; MAX_PROC],
             ipc_queues: [MessageQueue::new(); MAX_PROC],
-            scheduler: RunQueue::new(),
+            mtss_scheduler: Self::new_mtss_scheduler(),
             mtss_core: CoreMtss::new(),
             mtss_initialized: false,
             mtss_ticks: 0,
@@ -818,7 +897,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         boot_info: Option<&BootInfo>,
         framebuffer: Option<FramebufferInfo>,
     ) -> KernelResult<()> {
-        self.scheduler.reset();
+        self.mtss_scheduler = Self::new_mtss_scheduler();
         self.mtss_core = CoreMtss::new();
         self.mtss_initialized = false;
         self.mtss_ticks = 0;
@@ -992,6 +1071,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     /// CPU-specific timer/preemption backend for this milestone.
     pub fn kernel_mtss_init(&mut self) -> Result<MtssInitReport, KernelError> {
         self.mtss_core = CoreMtss::new();
+        self.mtss_scheduler = Self::new_mtss_scheduler();
         self.mtss_initialized = false;
         self.mtss_ticks = 0;
 
@@ -1025,7 +1105,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     /// Ask MTSS for the next runnable micro-thread. CPU entry, address-space
     /// switching, syscall entry, and capability checks remain kernel-owned.
     pub fn kernel_schedule_next(&mut self) -> Option<KernelThreadScheduleRecord> {
-        self.scheduler.next()
+        self.mtss_scheduler
+            .pick_next()
+            .ok()
+            .flatten()
+            .and_then(|decision| self.schedule_record_from_mtss(decision))
     }
 
     /// Attempt the Spider-rs PID 1 launch path without faking ring-3 entry.
@@ -1318,13 +1402,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         &mut self,
         mut scheduled: KernelThreadScheduleRecord,
     ) -> Result<(), KernelError> {
-        if scheduled.consume_time_slice() {
-            scheduled.reset_time_slice();
-        }
-
-        self.scheduler
-            .requeue(scheduled)
-            .map_err(|_| KernelError::SchedulerFull)
+        let _ = scheduled.consume_time_slice();
+        self.mtss_scheduler
+            .requeue_current()
+            .map_err(map_mtss_error)
     }
 
     pub fn spawn_initial_process(&mut self, creds: Credentials) -> KernelResult<ProcessId> {
@@ -1386,7 +1467,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 self.process_table[index] = Some(pcb);
             }
             self.ipc_queues[index].clear();
-            self.scheduler.remove_process(pid);
+            let _ = self.mtss_scheduler.terminate_task(Self::mtss_task_id(pid));
             self.remove_threads_for_process(pid);
             memory::release_process(pid);
             self.security.revoke_task(pid);
@@ -1401,7 +1482,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     pub fn terminate_thread(&mut self, thread: ThreadId) {
         if let Ok(index) = self.locate_thread(thread) {
             if let Some(tcb) = self.thread_table[index] {
-                self.scheduler.remove_thread(thread);
+                let _ = self
+                    .mtss_scheduler
+                    .exit_thread(Self::mtss_thread_id(thread));
                 self.futexes.remove_thread(thread);
                 self.remove_thread_from_cores(thread);
                 self.thread_table[index] = None;
@@ -3508,7 +3591,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             pcb.thread_count = 0;
         }
 
-        self.scheduler.remove_process(pid);
+        let _ = self.mtss_scheduler.terminate_task(Self::mtss_task_id(pid));
         let mut kept_thread = current_thread;
         if kept_thread.is_none() {
             let mut idx = 0usize;
@@ -3559,13 +3642,14 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             pcb.thread_count = 1;
             pcb.state = ProcessState::Ready;
         }
-        let priority = self.process_table[index]
+        let pcb = self.process_table[index]
             .as_ref()
-            .ok_or(KernelError::UnknownProcess)?
-            .priority;
-        self.scheduler
-            .enqueue(Self::schedule_record(thread_id, pid, priority))
-            .map_err(|_| KernelError::SchedulerFull)
+            .ok_or(KernelError::UnknownProcess)?;
+        let priority = pcb.priority;
+        let parent = pcb.parent;
+        self.mtss_create_task(pid, parent, address_space_root, priority)
+            .and_then(|_| self.mtss_create_thread(pid, thread_id, priority))
+            .and_then(|_| self.mtss_enqueue_thread(thread_id))
     }
 
     fn wait_for_child(
@@ -4326,7 +4410,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if let Some(tcb) = self.thread_table[index].as_mut() {
             tcb.block();
         }
-        self.scheduler.remove_thread(thread);
+        self.mtss_scheduler
+            .block_thread(Self::mtss_thread_id(thread))
+            .map_err(map_mtss_error)?;
         if !self.has_runnable_thread(process) {
             if let Ok(process_index) = self.locate_process(process) {
                 if let Some(pcb) = self.process_table[process_index].as_mut() {
@@ -4341,18 +4427,17 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
     fn wake_thread(&mut self, thread: ThreadId) -> KernelResult<()> {
         let index = self.locate_thread(thread)?;
-        let mut scheduled = None;
+        let mut process = None;
         if let Some(tcb) = self.thread_table[index].as_mut() {
             if tcb.state == ThreadState::Blocked {
                 tcb.mark_ready();
-                scheduled = Some(Self::schedule_record(tcb.id, tcb.process, tcb.priority));
+                process = Some(tcb.process);
             }
         }
-        if let Some(scheduled_thread) = scheduled {
-            self.scheduler
-                .enqueue(scheduled_thread)
-                .map_err(|_| KernelError::SchedulerFull)?;
-            let process = scheduled_thread.process;
+        if let Some(process) = process {
+            self.mtss_scheduler
+                .wake_thread(Self::mtss_thread_id(thread))
+                .map_err(map_mtss_error)?;
             if let Ok(process_index) = self.locate_process(process) {
                 if let Some(pcb) = self.process_table[process_index].as_mut() {
                     if pcb.state == ProcessState::Blocked {
@@ -4400,7 +4485,6 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if let Some(pcb) = self.process_table[index].as_mut() {
             pcb.state = ProcessState::Blocked;
         }
-        self.scheduler.remove_process(pid);
         self.block_threads_for_process(pid);
     }
 
@@ -4426,12 +4510,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                     if thread.process == pid && thread.state == ThreadState::Blocked {
                         thread.mark_ready();
                         if self
-                            .scheduler
-                            .enqueue(Self::schedule_record(
-                                thread.id,
-                                thread.process,
-                                thread.priority,
-                            ))
+                            .mtss_scheduler
+                            .wake_thread(Self::mtss_thread_id(thread.id))
                             .is_err()
                         {
                             thread.block();
@@ -4453,7 +4533,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 if let Some(thread) = entry.as_mut() {
                     if thread.process == pid && thread.state == ThreadState::Ready {
                         thread.block();
-                        self.scheduler.remove_thread(thread.id);
+                        let _ = self
+                            .mtss_scheduler
+                            .block_thread(Self::mtss_thread_id(thread.id));
                     }
                 }
             }
@@ -4466,7 +4548,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         while idx < Self::THREAD_CAPACITY {
             if let Some(thread) = self.thread_table[idx] {
                 if thread.process == pid {
-                    self.scheduler.remove_thread(thread.id);
+                    let _ = self
+                        .mtss_scheduler
+                        .exit_thread(Self::mtss_thread_id(thread.id));
                     self.futexes.remove_thread(thread.id);
                     self.remove_thread_from_cores(thread.id);
                     self.thread_table[idx] = None;
@@ -5799,6 +5883,24 @@ fn push_user_u64(
         );
     }
     Ok(())
+}
+
+fn map_mtss_error(error: MtssError) -> KernelError {
+    match error {
+        MtssError::RunQueueFull => KernelError::SchedulerFull,
+        MtssError::EmptyRunQueue => KernelError::UnknownThread,
+        MtssError::InvalidTask => KernelError::UnknownProcess,
+        MtssError::InvalidThread => KernelError::UnknownThread,
+        MtssError::TaskTableFull => KernelError::ProcessTableFull,
+        MtssError::ThreadTableFull => KernelError::ThreadTableFull,
+        MtssError::InvalidTaskTransition { .. }
+        | MtssError::InvalidThreadTransition { .. }
+        | MtssError::AlreadyCurrent => KernelError::InvalidArgument,
+        MtssError::BackendUnavailable => KernelError::DeviceFault(DriverError::Unsupported),
+        MtssError::CapabilityDenied => {
+            KernelError::SecurityViolation(IsolationError::CapabilityMissing)
+        }
+    }
 }
 
 fn map_core_mtss_error(error: CoreMtssError) -> KernelError {

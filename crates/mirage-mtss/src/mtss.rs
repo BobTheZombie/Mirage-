@@ -306,6 +306,14 @@ impl<
         self.pick_next()
     }
 
+    /// Return the current thread to the runnable queue without selecting a replacement.
+    pub fn requeue_current(&mut self) -> Result<(), MtssError> {
+        let Some(current) = self.current.take() else {
+            return Ok(());
+        };
+        self.ready_current_for_requeue(current, LifecycleReason::Yielded)
+    }
+
     /// Move a thread to the blocked state and remove it from scheduling.
     pub fn block_thread(&mut self, thread: ThreadId) -> Result<(), MtssError> {
         {

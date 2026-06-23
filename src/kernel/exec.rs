@@ -215,15 +215,30 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
                     return Err(error);
                 }
             };
-        self.scheduler
-            .enqueue(Self::schedule_record(thread, pid, request.priority))
-            .map_err(|_| {
-                self.rollback_thread_creation(thread);
-                if created_process {
-                    self.rollback_process_shell(pid);
-                }
-                KernelError::SchedulerFull
-            })?;
+        let mtss_task_result = if created_process {
+            let address_space_root = self.process_table[self.locate_process(pid)?]
+                .as_ref()
+                .map(|pcb| pcb.address_space_root)
+                .unwrap_or(0);
+            self.mtss_create_task(
+                pid,
+                Some(request.caller),
+                address_space_root,
+                request.priority,
+            )
+        } else {
+            Ok(())
+        };
+        if let Err(error) = mtss_task_result
+            .and_then(|_| self.mtss_create_thread(pid, thread, request.priority))
+            .and_then(|_| self.mtss_enqueue_thread(thread))
+        {
+            self.rollback_thread_creation(thread);
+            if created_process {
+                self.rollback_process_shell(pid);
+            }
+            return Err(error);
+        }
         Ok(thread)
     }
 
@@ -346,17 +361,25 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             pcb.state = ProcessState::Ready;
         }
 
-        if self
-            .scheduler
-            .enqueue(Self::schedule_record(thread_id, pid, priority))
-            .is_err()
+        if let Err(error) = self
+            .mtss_create_task(
+                pid,
+                parent,
+                self.process_table[slot]
+                    .as_ref()
+                    .map(|pcb| pcb.address_space_root)
+                    .unwrap_or(0),
+                priority,
+            )
+            .and_then(|_| self.mtss_create_thread(pid, thread_id, priority))
+            .and_then(|_| self.mtss_enqueue_thread(thread_id))
         {
             self.rollback_thread_creation(thread_id);
             if let Some(mut failed) = self.process_table[slot].take() {
                 self.release_process_file_table(&mut failed.files);
             }
             self.security.revoke_task(pid);
-            return Err(KernelError::SchedulerFull);
+            return Err(error);
         }
 
         Ok(pid)
