@@ -271,7 +271,7 @@ impl Supervisor {
             report.main_thread_created = true;
             report.accepted_into_run_queue = matches!(
                 thread.state,
-                mirage_mtss::CoreTaskState::Ready | mirage_mtss::CoreTaskState::Running
+                mirage_mtss::ThreadState::Ready | mirage_mtss::ThreadState::Running
             );
         } else {
             report.launch_blocker = Some("MTSS PID1 main thread was not created");
@@ -293,7 +293,7 @@ impl Supervisor {
 mod tests {
     use super::*;
     use crate::kernel::Kernel;
-    use mirage_mtss::{CoreTaskId, CoreTaskState, TaskKind};
+    use mirage_mtss::{CoreTaskId, TaskKind, TaskState, ThreadState};
 
     fn minimal_spider_elf() -> [u8; 128] {
         let mut image = [0u8; 128];
@@ -339,20 +339,23 @@ mod tests {
         assert!(report.entry_preflight_ok);
         assert!(report.stack_preflight_ok);
         assert_eq!(report.mtss_task_id, Some(CoreTaskId::FIRST_USERSPACE));
-        assert_eq!(report.mtss_thread_id, Some(mirage_mtss::CoreThreadId(1)));
+        assert_eq!(
+            report.mtss_thread_id,
+            Some(mirage_mtss::CoreThreadId::new(1))
+        );
         assert!(report.accepted_into_run_queue);
 
         let task = kernel.mtss_pid1_task().expect("pid1 is visible to MTSS");
         assert_eq!(task.id, CoreTaskId::FIRST_USERSPACE);
         assert_eq!(task.kind, TaskKind::Userspace);
-        assert_eq!(task.state, CoreTaskState::Ready);
+        assert_eq!(task.state, TaskState::Runnable);
         assert_eq!(task.name, "spider-rs");
 
         let thread = kernel
             .mtss_pid1_main_thread()
             .expect("pid1 main thread is visible to MTSS");
         assert_eq!(thread.task, CoreTaskId::FIRST_USERSPACE);
-        assert_eq!(thread.state, CoreTaskState::Ready);
+        assert_eq!(thread.state, ThreadState::Ready);
         assert_eq!(thread.context.rip, 0x401000);
     }
 }

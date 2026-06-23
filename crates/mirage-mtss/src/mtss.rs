@@ -399,7 +399,7 @@ impl<
             thread.sleep()?;
             thread.task
         };
-        self.refresh_task_wait_state(task, TaskState::Sleeping)?;
+        self.refresh_task_wait_state(task, TaskState::Blocked)?;
         self.stats = self.stats.with_sleep();
         self.emit(MtssEvent::thread(
             MtssEventKind::ThreadSleeping,
@@ -433,7 +433,7 @@ impl<
             }
             idx += 1;
         }
-        if previous != TaskState::Terminated {
+        if previous != TaskState::Exited {
             self.stats = self.stats.with_task_completion();
         }
         self.emit(MtssEvent::task(
@@ -468,7 +468,7 @@ impl<
     pub fn contain_task(&mut self, task: TaskId) -> Result<(), MtssError> {
         {
             let task = self.task_mut(task)?;
-            if task.state != TaskState::Suspect {
+            if task.state != TaskState::Blocked {
                 task.suspect()?;
             }
         }
@@ -496,12 +496,12 @@ impl<
     pub fn reap_task(&mut self, task: TaskId) -> Result<(), MtssError> {
         let task_index = self.find_task_index(task).ok_or(MtssError::InvalidTask)?;
         let task_state = self.tasks[task_index].ok_or(MtssError::InvalidTask)?.state;
-        crate::types::valid_task_transition(task_state, TaskState::Reaped)
-            .then_some(())
-            .ok_or(MtssError::InvalidTaskTransition {
+        if task_state != TaskState::Exited {
+            return Err(MtssError::InvalidTaskTransition {
                 from: task_state,
-                to: TaskState::Reaped,
-            })?;
+                to: TaskState::Exited,
+            });
+        }
 
         let mut idx = 0;
         while idx < MAX_THREADS {
@@ -626,7 +626,7 @@ impl<
 
     fn wake_task_if_waiting(&mut self, task: TaskId) -> Result<(), MtssError> {
         let task = self.task_mut(task)?;
-        if matches!(task.state, TaskState::Blocked | TaskState::Sleeping) {
+        if matches!(task.state, TaskState::Blocked) {
             task.wake()?;
         }
         Ok(())
