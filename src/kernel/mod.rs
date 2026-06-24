@@ -90,7 +90,7 @@ use mirage_mtss::{
     AddressSpaceId as MtssAddressSpaceId, CoreMtss, CoreMtssError, CoreTask, CoreTaskId,
     CoreThread, CpuId as MtssCpuId, Mtss, MtssConfig, MtssError, MtssThreadScheduleRecord,
     Priority as MtssPriority, ScheduleDecision, StackRange, TaskId as MtssTaskId,
-    ThreadId as MtssThreadId, Timeslice as MtssTimeslice, UserProgramImage,
+    ThreadId as MtssThreadId, Timeslice as MtssTimeslice, UserProgramImage, UserThreadPreflight,
 };
 
 pub type KernelThreadScheduleRecord =
@@ -1188,7 +1188,21 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             size: 0x20_000,
         };
         #[cfg(not(test))]
-        self.preflight_pid1_user_entry(address_space_root, entry_point, stack_top)?;
+        let mapping_preflight =
+            self.preflight_pid1_user_entry(address_space_root, entry_point, stack_top)?;
+        #[cfg(test)]
+        let mapping_preflight = UserThreadPreflight {
+            canonical_rip: entry_point < USER_CANONICAL_LIMIT,
+            canonical_rsp: stack_top < USER_CANONICAL_LIMIT && (stack_top & 0xf) == 0,
+            executable_user_rip_mapping: true,
+            writable_user_stack_mapping: true,
+            valid_user_cs: true,
+            valid_user_ss: true,
+            valid_kernel_stack: true,
+            valid_tss_rsp0: true,
+            valid_address_space: address_space_root != 0,
+            valid_cr3: address_space_root != 0,
+        };
         #[cfg(not(test))]
         self.dump_pid1_elf_diagnostics(parsed, true, stack_top, true);
         let user_stack = StackRange::new(stack.bottom.0, stack.top.0);
@@ -1196,6 +1210,13 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if kernel_stack_top == 0 {
             return Err(KernelError::InvalidArgument);
         }
+        let user_entry_preflight = UserThreadPreflight {
+            valid_user_cs: crate::arch::x86_64::gdt::USER_CODE_SELECTOR == 0x1b,
+            valid_user_ss: crate::arch::x86_64::gdt::USER_DATA_SELECTOR == 0x23,
+            valid_kernel_stack: kernel_stack_top != 0,
+            valid_tss_rsp0: crate::arch::x86_64::gdt::tss_rsp0() != 0,
+            ..mapping_preflight
+        };
         let mtss_task = self
             .mtss_core
             .spawn_userspace(
@@ -1207,6 +1228,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                     cr3: address_space_root,
                 },
                 StackRange::new(kernel_stack_top.saturating_sub(0x4000), kernel_stack_top),
+                user_entry_preflight,
             )
             .map_err(map_core_mtss_error)?;
 
@@ -1256,7 +1278,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         address_space_root: u64,
         entry: u64,
         stack_pointer: u64,
-    ) -> KernelResult<()> {
+    ) -> KernelResult<UserThreadPreflight> {
         if address_space_root == 0
             || entry == 0
             || entry >= USER_CANONICAL_LIMIT
@@ -1291,7 +1313,18 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             "[user-entry preflight]\npid=1\nrip={:#x}\nrsp={:#x}\ncr3={:#x}\ncs=ring3-validated-by-arch-pending\nss=ring3-validated-by-arch-pending\nrflags=0x202\nentry_mapped=true\nstack_mapped=true\n",
             entry, stack_pointer, address_space_root
         ));
-        Ok(())
+        Ok(UserThreadPreflight {
+            canonical_rip: true,
+            canonical_rsp: true,
+            executable_user_rip_mapping: true,
+            writable_user_stack_mapping: true,
+            valid_user_cs: false,
+            valid_user_ss: false,
+            valid_kernel_stack: false,
+            valid_tss_rsp0: false,
+            valid_address_space: true,
+            valid_cr3: true,
+        })
     }
 
     fn dump_pid1_elf_diagnostics(
