@@ -152,6 +152,22 @@ PID 1 + service manager + driver manager + recovery manager + security broker
 
 The supervisor is where Mirage becomes more than a kernel.
 
+
+---
+
+## Mirage MTSS Contract
+
+1. MTSS owns portable task, process, micro-thread, scheduler-visible lifecycle, run-queue, priority hint, timeslice, and accounting mechanics.
+2. The kernel owns CPU entry/exit, interrupt/trap entry, raw timer delivery, page-table switching, address-space mechanisms, and architecture context save/restore.
+3. The Supervisor owns launch authorization, service lifecycle policy, crash recovery, capability grant/revoke policy, boot ordering, and service status policy.
+4. MTSS must not grant capabilities, authorize PID1/services, validate signed modules as policy, directly mutate hardware privilege state, or fake service progress.
+5. Scheduler state transitions must be explicit and truthful: Created/New before admission, Runnable/Ready only after preflight and queue insertion, Running only after actual dispatch, Exited/Zombie only after real exit, and Reaped only after real cleanup.
+6. Preemption must flow from a bounded hardware timer/interrupt source through kernel delivery into MTSS scheduling hooks; MTSS must not program raw hardware timers directly.
+7. Context switching must preserve the architecture ABI: saved CPU context, canonical user RIP/RSP, valid selectors, valid kernel stack/TSS state, and valid CR3/address-space proof before user entry.
+8. Userspace task creation must validate every PT_LOAD segment, mapped executable entry, mapped writable aligned stack, address-space handle, CR3, and kernel stack before making a task runnable.
+9. PID1 handoff must load `/spider-rt/sbin/spider-rs`, obtain Supervisor approval, create real kernel/MTSS process and thread records, and report Created/Runnable/Running only when each real stage has executed.
+10. MTSS changes must document limitations and test evidence, including state-transition/unit tests where possible and fresh QEMU/image-validation results with `MIRAGE_REUSE_IMAGE=0` before claiming boot/runtime acceptance.
+
 ---
 
 ## Driver Model
