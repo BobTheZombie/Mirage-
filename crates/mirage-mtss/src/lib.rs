@@ -627,6 +627,125 @@ pub mod types {
         }
     }
 
+    /// Opaque handle to kernel/supervisor-owned credential material.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    pub struct CredentialHandle(u64);
+
+    impl CredentialHandle {
+        pub const fn new(raw: u64) -> Self {
+            Self(raw)
+        }
+        pub const fn raw(self) -> u64 {
+            self.0
+        }
+    }
+
+    /// Opaque handle to supervisor-issued grants/capability sets.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    pub struct GrantHandle(u64);
+
+    impl GrantHandle {
+        pub const fn new(raw: u64) -> Self {
+            Self(raw)
+        }
+        pub const fn raw(self) -> u64 {
+            self.0
+        }
+    }
+
+    /// Fixed-capacity scheduler-visible process record owned by MTSS.
+    ///
+    /// Kernel-owned material such as file descriptors, signal dispositions,
+    /// concrete credentials, and memory objects stays outside this record. MTSS
+    /// keeps only handles and lifecycle fields needed for portable process and
+    /// scheduler accounting.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    pub struct ProcessRecord<const MAX_CHILDREN: usize = 16, const MAX_THREADS: usize = 32> {
+        pub pid: ProcessId,
+        pub parent_pid: Option<ProcessId>,
+        pub children: [Option<ProcessId>; MAX_CHILDREN],
+        pub child_count: usize,
+        pub threads: [Option<ThreadId>; MAX_THREADS],
+        pub thread_count: usize,
+        pub state: ProcessState,
+        pub exit_code: Option<i32>,
+        pub address_space: Option<AddressSpaceId>,
+        pub credentials: Option<CredentialHandle>,
+        pub grants: Option<GrantHandle>,
+        pub name: &'static str,
+        pub path: &'static str,
+    }
+
+    impl<const MAX_CHILDREN: usize, const MAX_THREADS: usize> ProcessRecord<MAX_CHILDREN, MAX_THREADS> {
+        pub const fn new(
+            pid: ProcessId,
+            parent_pid: Option<ProcessId>,
+            address_space: Option<AddressSpaceId>,
+            name: &'static str,
+            path: &'static str,
+        ) -> Self {
+            Self {
+                pid,
+                parent_pid,
+                children: [None; MAX_CHILDREN],
+                child_count: 0,
+                threads: [None; MAX_THREADS],
+                thread_count: 0,
+                state: ProcessState::New,
+                exit_code: None,
+                address_space,
+                credentials: None,
+                grants: None,
+                name,
+                path,
+            }
+        }
+
+        pub fn transition(&mut self, next: ProcessState) -> Result<ProcessState, MtssError> {
+            if !valid_process_transition(self.state, next) {
+                return Err(MtssError::InvalidProcessTransition {
+                    from: self.state,
+                    to: next,
+                });
+            }
+            let previous = self.state;
+            self.state = next;
+            Ok(previous)
+        }
+
+        pub fn add_child(&mut self, child: ProcessId) -> Result<(), MtssError> {
+            let mut idx = 0;
+            while idx < MAX_CHILDREN {
+                if self.children[idx] == Some(child) {
+                    return Ok(());
+                }
+                if self.children[idx].is_none() {
+                    self.children[idx] = Some(child);
+                    self.child_count = self.child_count.saturating_add(1);
+                    return Ok(());
+                }
+                idx += 1;
+            }
+            Err(MtssError::ProcessRecordFull)
+        }
+
+        pub fn add_thread(&mut self, thread: ThreadId) -> Result<(), MtssError> {
+            let mut idx = 0;
+            while idx < MAX_THREADS {
+                if self.threads[idx] == Some(thread) {
+                    return Ok(());
+                }
+                if self.threads[idx].is_none() {
+                    self.threads[idx] = Some(thread);
+                    self.thread_count = self.thread_count.saturating_add(1);
+                    return Ok(());
+                }
+                idx += 1;
+            }
+            Err(MtssError::ProcessRecordFull)
+        }
+    }
+
     /// Minimal priority hint. Policy crates decide how hints are interpreted.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
     pub struct Priority(u8);
@@ -893,8 +1012,19 @@ pub mod types {
         InvalidThread,
         TaskTableFull,
         ThreadTableFull,
-        InvalidTaskTransition { from: TaskState, to: TaskState },
-        InvalidThreadTransition { from: ThreadState, to: ThreadState },
+        InvalidTaskTransition {
+            from: TaskState,
+            to: TaskState,
+        },
+        InvalidThreadTransition {
+            from: ThreadState,
+            to: ThreadState,
+        },
+        InvalidProcessTransition {
+            from: ProcessState,
+            to: ProcessState,
+        },
+        ProcessRecordFull,
         BackendUnavailable,
         CapabilityDenied,
     }
@@ -919,8 +1049,9 @@ pub use task_core::{
 };
 pub use types::{
     valid_process_transition, valid_task_transition, valid_thread_transition, AddressSpaceId,
-    CpuId, MtssError, Priority, ProcessId, ProcessState, RunQueueId, Task, TaskId, TaskState,
-    Thread, ThreadDescriptor, ThreadId, ThreadState, TimeSlice, Timeslice, Timestamp,
+    CpuId, CredentialHandle, GrantHandle, MtssError, Priority, ProcessId, ProcessRecord,
+    ProcessState, RunQueueId, Task, TaskId, TaskState, Thread, ThreadDescriptor, ThreadId,
+    ThreadState, TimeSlice, Timeslice, Timestamp,
 };
 
 #[cfg(test)]
@@ -1564,5 +1695,38 @@ mod tests {
             ProcessState::Dead,
             ProcessState::Ready
         ));
+    }
+
+    #[test]
+    fn process_record_tracks_scheduler_visible_process_metadata() {
+        let mut process = ProcessRecord::<1, 1>::new(
+            ProcessId::new(42),
+            Some(ProcessId::new(7)),
+            Some(AddressSpaceId::new(99)),
+            "spider-rs",
+            "/spider-rt/sbin/spider-rs",
+        );
+
+        process.credentials = Some(CredentialHandle::new(3));
+        process.grants = Some(GrantHandle::new(4));
+        process.transition(ProcessState::Ready).unwrap();
+        process.add_child(ProcessId::new(43)).unwrap();
+        process.add_thread(ThreadId::new(100)).unwrap();
+
+        assert_eq!(process.pid, ProcessId::new(42));
+        assert_eq!(process.parent_pid, Some(ProcessId::new(7)));
+        assert_eq!(process.children[0], Some(ProcessId::new(43)));
+        assert_eq!(process.threads[0], Some(ThreadId::new(100)));
+        assert_eq!(process.state, ProcessState::Ready);
+        assert_eq!(process.address_space, Some(AddressSpaceId::new(99)));
+        assert_eq!(process.credentials.unwrap().raw(), 3);
+        assert_eq!(process.grants.unwrap().raw(), 4);
+        assert_eq!(process.name, "spider-rs");
+        assert_eq!(process.path, "/spider-rt/sbin/spider-rs");
+
+        assert_eq!(
+            process.add_child(ProcessId::new(44)),
+            Err(MtssError::ProcessRecordFull)
+        );
     }
 }

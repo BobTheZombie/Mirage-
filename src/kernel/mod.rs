@@ -855,6 +855,54 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .map_err(map_mtss_error)
     }
 
+    fn mtss_mark_process_running(&mut self, pid: ProcessId) -> KernelResult<()> {
+        match self
+            .mtss_scheduler
+            .mark_task_running(Self::mtss_task_id(pid))
+        {
+            Ok(()) | Err(MtssError::InvalidTask) => Ok(()),
+            Err(err) => Err(map_mtss_error(err)),
+        }
+    }
+
+    fn mtss_mark_process_ready(&mut self, pid: ProcessId) -> KernelResult<()> {
+        match self.mtss_scheduler.mark_task_ready(Self::mtss_task_id(pid)) {
+            Ok(()) | Err(MtssError::InvalidTask) => Ok(()),
+            Err(err) => Err(map_mtss_error(err)),
+        }
+    }
+
+    fn mtss_block_process(&mut self, pid: ProcessId) -> KernelResult<()> {
+        match self.mtss_scheduler.block_task(Self::mtss_task_id(pid)) {
+            Ok(()) | Err(MtssError::InvalidTask) => Ok(()),
+            Err(err) => Err(map_mtss_error(err)),
+        }
+    }
+
+    fn set_process_ready_via_mtss(&mut self, pid: ProcessId, index: usize) -> KernelResult<()> {
+        self.mtss_mark_process_ready(pid)?;
+        if let Some(pcb) = self.process_table[index].as_mut() {
+            pcb.state = ProcessState::Ready;
+        }
+        Ok(())
+    }
+
+    fn set_process_running_via_mtss(&mut self, pid: ProcessId, index: usize) -> KernelResult<()> {
+        self.mtss_mark_process_running(pid)?;
+        if let Some(pcb) = self.process_table[index].as_mut() {
+            pcb.state = ProcessState::Running;
+        }
+        Ok(())
+    }
+
+    fn set_process_blocked_via_mtss(&mut self, pid: ProcessId, index: usize) -> KernelResult<()> {
+        self.mtss_block_process(pid)?;
+        if let Some(pcb) = self.process_table[index].as_mut() {
+            pcb.state = ProcessState::Blocked;
+        }
+        Ok(())
+    }
+
     pub const fn new() -> Self {
         Self {
             process_table: [None; MAX_PROC],
@@ -1694,9 +1742,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .map_err(|MessageQueueError::Full| KernelError::MessageQueueFull)?;
 
         let mut wake_threads = false;
-        if let Some(pcb) = self.process_table[queue_index].as_mut() {
+        if let Some(pcb) = self.process_table[queue_index].as_ref() {
             if pcb.state == ProcessState::Blocked {
-                pcb.state = ProcessState::Ready;
+                self.set_process_ready_via_mtss(receiver, queue_index)?;
                 wake_threads = true;
             }
         }
@@ -1706,9 +1754,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 // Sending to a blocked process is transactional: if the wakeup cannot be
                 // scheduled, the receiver stays blocked and the just-enqueued message is
                 // removed so callers can retry without duplicating delivery.
-                if let Some(pcb) = self.process_table[queue_index].as_mut() {
-                    pcb.state = ProcessState::Blocked;
-                }
+                let _ = self.set_process_blocked_via_mtss(receiver, queue_index);
                 let _ = self.ipc_queues[queue_index].rollback_last_push();
                 return Err(err);
             }
@@ -3701,7 +3747,6 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
         if let Some(pcb) = self.process_table[index].as_mut() {
             pcb.thread_count = 1;
-            pcb.state = ProcessState::Ready;
         }
         let pcb = self.process_table[index]
             .as_ref()
@@ -3710,7 +3755,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let parent = pcb.parent;
         self.mtss_create_task(pid, parent, address_space_root, priority)
             .and_then(|_| self.mtss_create_thread(pid, thread_id, priority))
-            .and_then(|_| self.mtss_enqueue_thread(thread_id))
+            .and_then(|_| self.mtss_enqueue_thread(thread_id))?;
+        self.set_process_ready_via_mtss(pid, index)
     }
 
     fn wait_for_child(
@@ -4279,9 +4325,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn wake_process_for_timeout(&mut self, pid: ProcessId) -> KernelResult<()> {
         let index = self.locate_process(pid)?;
         let mut wake_threads = false;
-        if let Some(pcb) = self.process_table[index].as_mut() {
+        if let Some(pcb) = self.process_table[index].as_ref() {
             if pcb.state == ProcessState::Blocked {
-                pcb.state = ProcessState::Ready;
+                self.set_process_ready_via_mtss(pid, index)?;
                 wake_threads = true;
             }
         }
@@ -4364,8 +4410,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 return;
             }
 
+            self.set_process_running_via_mtss(scheduled.process, process_index)
+                .unwrap_or_else(|_| {
+                    self.handle_isolation_fault(scheduled.process, IsolationError::PolicyViolation)
+                });
             if let Some(pcb) = self.process_table[process_index].as_mut() {
-                pcb.state = ProcessState::Running;
                 pcb.cpu_time = pcb.cpu_time.saturating_add(1);
             }
 
@@ -4396,13 +4445,13 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             }
 
             let process_has_runnable_threads = self.has_runnable_thread(scheduled.process);
-            if let Some(pcb) = self.process_table[process_index].as_mut() {
+            if let Some(pcb) = self.process_table[process_index].as_ref() {
                 if pcb.state == ProcessState::Running {
-                    pcb.state = if process_has_runnable_threads {
-                        ProcessState::Ready
+                    if process_has_runnable_threads {
+                        let _ = self.set_process_ready_via_mtss(scheduled.process, process_index);
                     } else {
-                        ProcessState::Blocked
-                    };
+                        let _ = self.set_process_blocked_via_mtss(scheduled.process, process_index);
+                    }
                 }
             }
 
@@ -4492,14 +4541,18 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if let Some(tcb) = self.thread_table[index].as_mut() {
             tcb.block();
         }
-        self.mtss_scheduler
+        match self
+            .mtss_scheduler
             .block_thread(Self::mtss_thread_id(thread))
-            .map_err(map_mtss_error)?;
+        {
+            Ok(()) | Err(MtssError::InvalidThread) => {}
+            Err(err) => return Err(map_mtss_error(err)),
+        }
         if !self.has_runnable_thread(process) {
             if let Ok(process_index) = self.locate_process(process) {
-                if let Some(pcb) = self.process_table[process_index].as_mut() {
+                if let Some(pcb) = self.process_table[process_index].as_ref() {
                     if pcb.state != ProcessState::Zombie {
-                        pcb.state = ProcessState::Blocked;
+                        let _ = self.set_process_blocked_via_mtss(process, process_index);
                     }
                 }
             }
@@ -4517,13 +4570,17 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             }
         }
         if let Some(process) = process {
-            self.mtss_scheduler
+            match self
+                .mtss_scheduler
                 .wake_thread(Self::mtss_thread_id(thread))
-                .map_err(map_mtss_error)?;
+            {
+                Ok(()) | Err(MtssError::InvalidThread) => {}
+                Err(err) => return Err(map_mtss_error(err)),
+            }
             if let Ok(process_index) = self.locate_process(process) {
-                if let Some(pcb) = self.process_table[process_index].as_mut() {
+                if let Some(pcb) = self.process_table[process_index].as_ref() {
                     if pcb.state == ProcessState::Blocked {
-                        pcb.state = ProcessState::Ready;
+                        self.set_process_ready_via_mtss(process, process_index)?;
                     }
                 }
             }
@@ -4564,9 +4621,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn block_process_at_index(&mut self, pid: ProcessId, index: usize) {
-        if let Some(pcb) = self.process_table[index].as_mut() {
-            pcb.state = ProcessState::Blocked;
-        }
+        let _ = self.set_process_blocked_via_mtss(pid, index);
         self.block_threads_for_process(pid);
     }
 
@@ -5995,7 +6050,9 @@ fn map_mtss_error(error: MtssError) -> KernelError {
         MtssError::ThreadTableFull => KernelError::ThreadTableFull,
         MtssError::InvalidTaskTransition { .. }
         | MtssError::InvalidThreadTransition { .. }
+        | MtssError::InvalidProcessTransition { .. }
         | MtssError::AlreadyCurrent => KernelError::InvalidArgument,
+        MtssError::ProcessRecordFull => KernelError::ProcessTableFull,
         MtssError::BackendUnavailable => KernelError::DeviceFault(DriverError::Unsupported),
         MtssError::CapabilityDenied => {
             KernelError::SecurityViolation(IsolationError::CapabilityMissing)

@@ -350,6 +350,34 @@ impl<
         self.ready_current_for_requeue(current, LifecycleReason::Yielded)
     }
 
+    /// Mark a scheduler-visible task running without touching kernel-owned process material.
+    pub fn mark_task_running(&mut self, task: TaskId) -> Result<(), MtssError> {
+        let task = self.task_mut(task)?;
+        if task.state == TaskState::Runnable {
+            task.mark_running()?;
+        }
+        Ok(())
+    }
+
+    /// Mark a scheduler-visible task runnable after yield or wakeup.
+    pub fn mark_task_ready(&mut self, task: TaskId) -> Result<(), MtssError> {
+        let task = self.task_mut(task)?;
+        if task.state == TaskState::Running || task.state == TaskState::Blocked {
+            task.wake()?;
+        }
+        Ok(())
+    }
+
+    /// Mark a scheduler-visible task blocked when it has no runnable threads.
+    pub fn block_task(&mut self, task: TaskId) -> Result<(), MtssError> {
+        let task = self.task_mut(task)?;
+        if task.state != TaskState::Exited && task.state != TaskState::Blocked {
+            task.block()?;
+            self.stats = self.stats.with_task_block();
+        }
+        Ok(())
+    }
+
     /// Move a thread to the blocked state and remove it from scheduling.
     pub fn block_thread(&mut self, thread: ThreadId) -> Result<(), MtssError> {
         {
