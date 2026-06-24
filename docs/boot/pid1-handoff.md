@@ -1,13 +1,44 @@
-# PID1 handoff boot order
+# PID1 Handoff Through MTSS
 
-Mirage previously attempted userspace init after the root filesystem and Supervisor were online, but before MTSS had completed its handoff. The boot log showed `userspace init launch deferred: root FS and supervisor are online; MTSS handoff not reached yet`, then `MTSS initialized`, and no retry followed.
+Mirage launches PID1 as a real userspace task handoff, not as a kernel function call. The canonical PID1 image is `/spider-rt/sbin/spider-rs`, and the dispatcher daemon `/spider-rt/sbin/spider-rsd` is a required runtime follow-on service.
 
-The boot path now keeps explicit runtime dependencies: root FS, Supervisor, MTSS, Spider Runtime availability, loader start, deferred launch, PID1 creation, PID1 runnable state, and dispatcher state. `maybe_launch_pid1` refuses to launch until all required dependencies are true and records an honest deferred reason.
+## Required order
 
-The critical retry point is immediately after `kernel.kernel_mtss_init()` reports `MTSS initialized` and `MTSS [Online]`. At that point the same coordinator is called again, so a launch deferred only because MTSS was offline is retried.
+```text
+bootloader
+    -> Mirage kernel mechanisms
+    -> RuntimeVfs / rootfs availability
+    -> Mirage Supervisor online
+    -> MTSS online
+    -> userspace loader starts
+    -> read /spider-rt/sbin/spider-rs
+    -> validate ELF64 x86_64 executable and PT_LOAD mappings
+    -> Supervisor authorizes PID1 launch
+    -> kernel creates address space/process/thread records
+    -> MTSS admits PID1 runnable
+    -> architecture backend enters ring 3
+    -> spider-rs starts spider-rsd
+```
 
-PID1 is located at `/spider-rt/sbin/spider-rs` through RuntimeVfs. The userspace loader reads that image, validates ELF64 x86_64 executable structure, and only then asks the Supervisor to authorize the PID1 launch. The Supervisor records policy approval and calls the kernel MTSS handoff path; it does not mutate run queues directly.
+`maybe_launch_pid1` is the boot coordinator gate. It must refuse launch until root filesystem access, Supervisor, MTSS, Spider Runtime availability, loader start, and PID1 image validation are all true. A launch deferred before MTSS comes online must be retried immediately after MTSS transitions online.
 
-The kernel creates the process/thread through the existing MTSS-backed `spawn_task` route. PID1 is marked `Created` only after process creation succeeds and `Runnable` only after scheduler insertion succeeds.
+## Status truth rules
 
-Ring-3 dispatch is still pending. The boot status remains `Dispatcher [Pending: user-mode transition not implemented]` rather than claiming full userspace isolation is online.
+* `SPIDER-RS [FOUND]` means `/spider-rt/sbin/spider-rs` was read from RuntimeVfs/rootfs.
+* `PID1 [CREATED]` means a real kernel process record exists.
+* `PID1 [RUNNABLE]` means MTSS admitted a real task/thread to a runnable queue.
+* `PID1 [RUNNING]` requires that architecture user-mode execution actually began.
+* `SYSTEM DISPATCHER [RUNNING]` requires that real Spider-rs code spawned `spider-rsd`.
+* `M1 TERMINAL [RUNNING]` requires real userspace app launch through Spider-rs/spider-rsd, not kernel-authored fake output.
+
+## Supervisor boundary
+
+The Supervisor authorizes Spider-rs as PID1 and records policy approval. It does not directly mutate MTSS run queues. Kernel/MTSS admission performs process/thread creation and runnable insertion. The architecture backend performs the final ring-3 transition.
+
+## Current status
+
+The current documented milestone supports honest PID1 discovery, ELF validation, Supervisor approval, process/task/thread creation, and MTSS runnable admission. The full user-mode transition remains pending. Therefore boot reports must stop at runnable/pending states rather than claiming Spider-rs, spider-rsd, or M1 Terminal are online.
+
+## Failure handling
+
+Failures must be exact and typed: RuntimeVfs unavailable, missing Spider-rs, unsupported ELF, invalid PT_LOAD mapping, stack preflight failure, Supervisor denial, MTSS spawn/admission failure, dispatcher unavailable, or missing user-mode transition. A missing `/spider-rt/sbin/spider-rs` or `/spider-rt/sbin/spider-rsd` is a build failure.
