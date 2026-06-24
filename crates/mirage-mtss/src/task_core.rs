@@ -144,6 +144,35 @@ pub struct UserProgramImage {
     pub cr3: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UserThreadPreflight {
+    pub canonical_rip: bool,
+    pub canonical_rsp: bool,
+    pub executable_user_rip_mapping: bool,
+    pub writable_user_stack_mapping: bool,
+    pub valid_user_cs: bool,
+    pub valid_user_ss: bool,
+    pub valid_kernel_stack: bool,
+    pub valid_tss_rsp0: bool,
+    pub valid_address_space: bool,
+    pub valid_cr3: bool,
+}
+
+impl UserThreadPreflight {
+    pub const fn complete(self) -> bool {
+        self.canonical_rip
+            && self.canonical_rsp
+            && self.executable_user_rip_mapping
+            && self.writable_user_stack_mapping
+            && self.valid_user_cs
+            && self.valid_user_ss
+            && self.valid_kernel_stack
+            && self.valid_tss_rsp0
+            && self.valid_address_space
+            && self.valid_cr3
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CoreMtssError {
     TaskTableFull,
@@ -226,6 +255,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         name: &'static str,
         program: UserProgramImage,
         kernel_stack: StackRange,
+        preflight: UserThreadPreflight,
     ) -> Result<CoreTaskId, CoreMtssError> {
         if program.address_space.raw() == 0 || program.cr3 == 0 {
             return Err(CoreMtssError::InvalidAddressSpace);
@@ -236,7 +266,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         if !program.user_stack.is_valid() || !is_canonical_user(program.user_stack.top) {
             return Err(CoreMtssError::InvalidStack);
         }
-        if !kernel_stack.is_valid() {
+        if !kernel_stack.is_valid() || !preflight.valid_kernel_stack {
             return Err(CoreMtssError::InvalidStack);
         }
 
@@ -245,7 +275,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         let task = CoreTask {
             id: task_id,
             kind: TaskKind::Userspace,
-            state: TaskState::Runnable,
+            state: TaskState::Created,
             address_space: Some(program.address_space),
             main_thread: thread_id,
             name,
@@ -253,7 +283,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         let thread = CoreThread {
             id: thread_id,
             task: task_id,
-            state: ThreadState::Ready,
+            state: ThreadState::New,
             kernel_stack,
             user_stack: Some(program.user_stack),
             context: CpuContext::userspace_entry(
@@ -264,6 +294,27 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
         };
         self.insert_task(task)?;
         self.insert_thread(thread)?;
+
+        if !preflight.complete() {
+            return Err(if !preflight.valid_address_space || !preflight.valid_cr3 {
+                CoreMtssError::InvalidAddressSpace
+            } else if !preflight.canonical_rip || !preflight.executable_user_rip_mapping {
+                CoreMtssError::InvalidEntry
+            } else {
+                CoreMtssError::InvalidStack
+            });
+        }
+
+        if self.ready_len == READY {
+            return Err(CoreMtssError::ReadyQueueFull);
+        }
+
+        if let Some(task) = self.task_mut(task_id) {
+            task.state = TaskState::Runnable;
+        }
+        if let Some(thread) = self.thread_mut(thread_id) {
+            thread.state = ThreadState::Ready;
+        }
         self.enqueue(thread_id)?;
         Ok(task_id)
     }
@@ -418,6 +469,19 @@ pub const fn is_canonical_user(address: u64) -> bool {
 mod tests {
     use super::*;
 
+    const VALID_PREFLIGHT: UserThreadPreflight = UserThreadPreflight {
+        canonical_rip: true,
+        canonical_rsp: true,
+        executable_user_rip_mapping: true,
+        writable_user_stack_mapping: true,
+        valid_user_cs: true,
+        valid_user_ss: true,
+        valid_kernel_stack: true,
+        valid_tss_rsp0: true,
+        valid_address_space: true,
+        valid_cr3: true,
+    };
+
     #[test]
     fn task_id_allocation_starts_at_userspace_pid_one() {
         let mut mtss: CoreMtss<4, 4, 4> = CoreMtss::new();
@@ -433,12 +497,43 @@ mod tests {
                     cr3: 0x1000,
                 },
                 StackRange::new(0x9000, 0xa000),
+                VALID_PREFLIGHT,
             )
             .unwrap();
         assert_eq!(pid, CoreTaskId::FIRST_USERSPACE);
         let task = mtss.task(pid).unwrap();
         assert_eq!(task.kind, TaskKind::Userspace);
         assert_eq!(task.state, TaskState::Runnable);
+    }
+
+    #[test]
+    fn incomplete_preflight_keeps_userspace_thread_new_and_off_run_queue() {
+        let mut mtss: CoreMtss<4, 4, 4> = CoreMtss::new();
+        mtss.init_with_idle(StackRange::new(0x8000, 0x9000))
+            .unwrap();
+
+        let mut preflight = VALID_PREFLIGHT;
+        preflight.executable_user_rip_mapping = false;
+        let error = mtss
+            .spawn_userspace(
+                "spider-rs",
+                UserProgramImage {
+                    entry: 0x401000,
+                    address_space: AddressSpaceId::new(42),
+                    user_stack: StackRange::new(0x7000_0000, 0x7000_4000),
+                    cr3: 0x1000,
+                },
+                StackRange::new(0x9000, 0xa000),
+                preflight,
+            )
+            .unwrap_err();
+
+        assert_eq!(error, CoreMtssError::InvalidEntry);
+        let task = mtss.task(CoreTaskId::FIRST_USERSPACE).unwrap();
+        let thread = mtss.thread(task.main_thread).unwrap();
+        assert_eq!(task.state, TaskState::Created);
+        assert_eq!(thread.state, ThreadState::New);
+        assert_eq!(mtss.ready_len(), 1);
     }
 
     #[test]
@@ -464,6 +559,7 @@ mod tests {
                     cr3: 0x1000,
                 },
                 StackRange::new(0x9000, 0xa000),
+                VALID_PREFLIGHT,
             )
             .unwrap_err();
         assert_eq!(error, CoreMtssError::InvalidEntry);

@@ -84,6 +84,18 @@ pub fn initialize() {
     }
 }
 
+pub fn tss_rsp0() -> u64 {
+    #[cfg(not(test))]
+    unsafe {
+        TSS.privilege_stack_table[0]
+    }
+
+    #[cfg(test)]
+    {
+        kernel_stack_top(0)
+    }
+}
+
 pub fn set_current_kernel_stack(core_index: usize) {
     #[cfg(not(test))]
     unsafe {

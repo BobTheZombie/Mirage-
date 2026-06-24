@@ -914,7 +914,8 @@ pub use stats::{MtssStats, SchedulerStats};
 pub use task_core::{
     is_canonical_user, CoreMtss, CoreMtssError, CoreTask, CoreTaskId, CoreTaskState, CoreThread,
     CoreThreadId, CpuContext as MtssCpuContext, SavedRegisters, StackRange, TaskKind,
-    UserProgramImage, DEFAULT_READY_QUEUE_SIZE, DEFAULT_TASK_TABLE_SIZE, DEFAULT_THREAD_TABLE_SIZE,
+    UserProgramImage, UserThreadPreflight, DEFAULT_READY_QUEUE_SIZE, DEFAULT_TASK_TABLE_SIZE,
+    DEFAULT_THREAD_TABLE_SIZE,
 };
 pub use types::{
     valid_process_transition, valid_task_transition, valid_thread_transition, AddressSpaceId,
