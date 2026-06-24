@@ -148,7 +148,10 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         return Ok(Pid1LaunchState::Deferred(blocker));
     }
     boot_phase_ok(BootPhase::SpiderRs);
-    boot_phase_ok(BootPhase::Pid1);
+    boot_phase_stub(
+        BootPhase::Pid1,
+        "PENDING: ring3 transition not implemented after MTSS admission",
+    );
     boot_phase_start(BootPhase::SystemDispatcher);
     boot_phase_stub(
         BootPhase::SystemDispatcher,
@@ -162,6 +165,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     mirage::kprintln!("SPIDER-RS ELF [OK]");
     mirage::kprintln!("SPIDER-RS PID1 [CREATED]");
     mirage::kprintln!("SPIDER-RS PID1 [RUNNABLE]");
+    mirage::kprintln!("SPIDER-RS PID1 [ PENDING: ring3 transition not implemented ]");
     deps.dispatcher_started = false;
     deps.dispatcher_pending = true;
     mirage::kprintln!("SPIDER-RSD [PENDING: user-mode transition not implemented]");
@@ -177,7 +181,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     // Ring-3 dispatch is still pending. Do not print the terminal payload here;
     // m1-terminal must be launched by spider-rsd once dispatcher child
     // launch and the console ABI exist.
-    mirage::kprintln!("Userspace [Started: bootstrap dispatcher mode]");
+    mirage::kprintln!("Userspace [PENDING: user-mode transition not implemented]");
     Ok(Pid1LaunchState::Runnable)
 }
 
