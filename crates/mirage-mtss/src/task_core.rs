@@ -201,6 +201,7 @@ pub struct CoreMtss<
     ready_tail: usize,
     ready_len: usize,
     current: Option<CoreThreadId>,
+    per_cpu_idle_thread: Option<CoreThreadId>,
     initialized: bool,
 }
 
@@ -216,6 +217,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
             ready_tail: 0,
             ready_len: 0,
             current: None,
+            per_cpu_idle_thread: None,
             initialized: false,
         }
     }
@@ -235,7 +237,7 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
             main_thread: CoreThreadId::IDLE,
             name: "idle",
         };
-        let idle_thread = CoreThread {
+        let per_cpu_idle_thread = CoreThread {
             id: CoreThreadId::IDLE,
             task: CoreTaskId::IDLE,
             state: ThreadState::Ready,
@@ -244,8 +246,8 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
             context: CpuContext::kernel_placeholder(0, kernel_stack.top),
         };
         self.insert_task(idle_task)?;
-        self.insert_thread(idle_thread)?;
-        self.enqueue(CoreThreadId::IDLE)?;
+        self.insert_thread(per_cpu_idle_thread)?;
+        self.per_cpu_idle_thread = Some(CoreThreadId::IDLE);
         self.initialized = true;
         Ok(())
     }
@@ -324,29 +326,17 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
     }
 
     pub fn schedule_next(&mut self) -> Result<Option<CoreThreadId>, CoreMtssError> {
-        let next = match self.dequeue() {
-            Ok(next) => next,
-            Err(CoreMtssError::ReadyQueueEmpty) => return Ok(None),
-            Err(error) => return Err(error),
+        self.return_current_to_ready_queue()?;
+
+        let next = match self.dequeue_non_idle_runnable()? {
+            Some(next) => next,
+            None => match self.per_cpu_idle_thread {
+                Some(idle) => idle,
+                None => return Ok(None),
+            },
         };
-        if let Some(current) = self.current {
-            if let Some(thread) = self.thread_mut(current) {
-                if matches!(thread.state, ThreadState::Running) {
-                    thread.state = ThreadState::Ready;
-                    let _ = self.enqueue(current);
-                }
-            }
-        }
-        let mut task_to_run = None;
-        if let Some(thread) = self.thread_mut(next) {
-            thread.state = ThreadState::Running;
-            task_to_run = Some(thread.task);
-        }
-        if let Some(task_id) = task_to_run {
-            if let Some(task) = self.task_mut(task_id) {
-                task.state = TaskState::Running;
-            }
-        }
+
+        self.mark_thread_running(next)?;
         self.current = Some(next);
         Ok(Some(next))
     }
@@ -389,6 +379,63 @@ impl<const TASKS: usize, const THREADS: usize, const READY: usize> CoreMtss<TASK
 
     pub const fn ready_len(&self) -> usize {
         self.ready_len
+    }
+
+    fn return_current_to_ready_queue(&mut self) -> Result<(), CoreMtssError> {
+        let Some(current) = self.current else {
+            return Ok(());
+        };
+
+        let is_idle = Some(current) == self.per_cpu_idle_thread;
+        let mut task_to_ready = None;
+        if let Some(thread) = self.thread_mut(current) {
+            if matches!(thread.state, ThreadState::Running) {
+                thread.state = ThreadState::Ready;
+                task_to_ready = Some(thread.task);
+                if !is_idle {
+                    self.enqueue(current)?;
+                }
+            }
+        }
+        if let Some(task_id) = task_to_ready {
+            if let Some(task) = self.task_mut(task_id) {
+                task.state = TaskState::Runnable;
+            }
+        }
+        Ok(())
+    }
+
+    fn dequeue_non_idle_runnable(&mut self) -> Result<Option<CoreThreadId>, CoreMtssError> {
+        let candidates = self.ready_len;
+        let mut checked = 0usize;
+        while checked < candidates {
+            let thread_id = self.dequeue()?;
+            if Some(thread_id) == self.per_cpu_idle_thread {
+                checked += 1;
+                continue;
+            }
+            if self
+                .thread(thread_id)
+                .is_some_and(|thread| matches!(thread.state, ThreadState::Ready))
+            {
+                return Ok(Some(thread_id));
+            }
+            checked += 1;
+        }
+        Ok(None)
+    }
+
+    fn mark_thread_running(&mut self, thread_id: CoreThreadId) -> Result<(), CoreMtssError> {
+        let task_id = if let Some(thread) = self.thread_mut(thread_id) {
+            thread.state = ThreadState::Running;
+            thread.task
+        } else {
+            return Err(CoreMtssError::UnknownThread);
+        };
+        if let Some(task) = self.task_mut(task_id) {
+            task.state = TaskState::Running;
+        }
+        Ok(())
     }
 
     fn allocate_pid(&mut self) -> CoreTaskId {
@@ -482,6 +529,23 @@ mod tests {
         valid_cr3: true,
     };
 
+    fn spawn_test_user(mtss: &mut CoreMtss<4, 4, 4>, name: &'static str) -> CoreThreadId {
+        let pid = mtss
+            .spawn_userspace(
+                name,
+                UserProgramImage {
+                    entry: 0x401000,
+                    address_space: AddressSpaceId::new(42),
+                    user_stack: StackRange::new(0x7000_0000, 0x7000_4000),
+                    cr3: 0x1000,
+                },
+                StackRange::new(0x9000, 0xa000),
+                VALID_PREFLIGHT,
+            )
+            .unwrap();
+        mtss.task(pid).unwrap().main_thread
+    }
+
     #[test]
     fn task_id_allocation_starts_at_userspace_pid_one() {
         let mut mtss: CoreMtss<4, 4, 4> = CoreMtss::new();
@@ -533,17 +597,41 @@ mod tests {
         let thread = mtss.thread(task.main_thread).unwrap();
         assert_eq!(task.state, TaskState::Created);
         assert_eq!(thread.state, ThreadState::New);
-        assert_eq!(mtss.ready_len(), 1);
+        assert_eq!(mtss.ready_len(), 0);
     }
 
     #[test]
-    fn scheduler_queue_enqueues_and_dequeues_round_robin() {
+    fn idle_selected_when_no_runnable_task() {
         let mut mtss: CoreMtss<4, 4, 4> = CoreMtss::new();
         mtss.init_with_idle(StackRange::new(0x8000, 0x9000))
             .unwrap();
-        assert_eq!(mtss.ready_len(), 1);
+
+        assert_eq!(mtss.ready_len(), 0);
         assert_eq!(mtss.schedule_next().unwrap(), Some(CoreThreadId::IDLE));
         assert_eq!(mtss.current(), Some(CoreThreadId::IDLE));
+        assert_eq!(mtss.ready_len(), 0);
+    }
+
+    #[test]
+    fn idle_does_not_starve_real_runnable_threads() {
+        let mut mtss: CoreMtss<4, 4, 4> = CoreMtss::new();
+        mtss.init_with_idle(StackRange::new(0x8000, 0x9000))
+            .unwrap();
+        assert_eq!(mtss.schedule_next().unwrap(), Some(CoreThreadId::IDLE));
+
+        let real_thread = spawn_test_user(&mut mtss, "spider-rs");
+
+        assert_eq!(mtss.ready_len(), 1);
+        assert_eq!(mtss.schedule_next().unwrap(), Some(real_thread));
+        assert_eq!(mtss.current(), Some(real_thread));
+        assert_eq!(
+            mtss.thread(CoreThreadId::IDLE).unwrap().state,
+            ThreadState::Ready
+        );
+        assert_eq!(
+            mtss.thread(real_thread).unwrap().state,
+            ThreadState::Running
+        );
     }
 
     #[test]
