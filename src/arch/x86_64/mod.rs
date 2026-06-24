@@ -23,10 +23,9 @@ use crate::kernel::boot_phase::{
 use crate::kernel::cpu::MAX_CORES;
 #[cfg(not(feature = "emergency-boot"))]
 use crate::kernel::memory;
+use crate::kernel::process::ProcessId;
 use crate::kernel::syscall::{SyscallFrame, SYSCALL_MAX_ARGS};
-use crate::kernel::thread::{
-    CpuContext, ThreadControlBlock, ThreadId, SYSCALL_TRAP_VECTOR, TIMER_INTERRUPT_VECTOR,
-};
+use crate::kernel::thread::{CpuContext, ThreadId, SYSCALL_TRAP_VECTOR, TIMER_INTERRUPT_VECTOR};
 
 #[cfg(feature = "hw-laptop-hotkeys")]
 pub mod acpi_ec;
@@ -78,6 +77,21 @@ pub enum ThreadRunOutcome {
     TimerPreempted,
     UserEntryInvalid,
     Syscall(SyscallTrap),
+}
+
+/// Explicit kernel-to-architecture handoff for a single MTSS-selected slice.
+///
+/// The kernel scheduler constructs this only after MTSS selects a runnable
+/// thread. The architecture layer consumes the already-made policy decision and
+/// performs only CPU mechanism: address-space switch, TSS.rsp0 update, frame
+/// validation, and context restore.
+pub struct ThreadSliceRunContext<'a> {
+    pub core_index: usize,
+    pub thread: ThreadId,
+    pub process: ProcessId,
+    pub address_space_root: u64,
+    pub kernel_stack_top: u64,
+    pub context: &'a mut CpuContext,
 }
 
 #[repr(C, align(64))]
@@ -198,26 +212,26 @@ fn initialize_framebuffer_console(_boot_info: &BootInfo) {
 /// Control comes back only after an interrupt or syscall entry stub saves a new
 /// frame in the same context. Unit tests use the same register ABI by staging a
 /// trap frame in the thread context before invoking the scheduler.
-pub fn run_thread_slice(core_index: usize, thread: &mut ThreadControlBlock) -> ThreadRunOutcome {
+pub fn run_thread_slice(mut run_context: ThreadSliceRunContext<'_>) -> ThreadRunOutcome {
     let timer_epoch = idt::timer_ticks();
 
     #[cfg(not(test))]
-    if thread.context.privilege_mode == crate::kernel::thread::PrivilegeMode::User
-        && thread.context.sanitize_user_return_frame().is_none()
+    if run_context.context.privilege_mode == crate::kernel::thread::PrivilegeMode::User
+        && run_context.context.sanitize_user_return_frame().is_none()
     {
         return ThreadRunOutcome::UserEntryInvalid;
     }
 
-    enter_thread_slice(core_index, thread);
+    enter_thread_slice(&mut run_context);
 
-    match thread.context.trap_vector {
+    match run_context.context.trap_vector {
         SYSCALL_TRAP_VECTOR => ThreadRunOutcome::Syscall(SyscallTrap {
-            thread: thread.id,
-            number: SyscallFrame::from_cpu_context(&thread.context).number,
-            args: SyscallFrame::from_cpu_context(&thread.context).args,
+            thread: run_context.thread,
+            number: SyscallFrame::from_cpu_context(run_context.context).number,
+            args: SyscallFrame::from_cpu_context(run_context.context).args,
         }),
         TIMER_INTERRUPT_VECTOR => {
-            thread.context.clear_trap();
+            run_context.context.clear_trap();
             ThreadRunOutcome::TimerPreempted
         }
         _ if idt::timer_ticks() != timer_epoch => ThreadRunOutcome::TimerPreempted,
@@ -235,8 +249,9 @@ extern "C" {
 /// On hardware this returns only after timer preemption or syscall trap: `__mirage_context_restore` rebuilds
 /// the CPU's interrupt-return frame and executes `iretq`. The interrupt and
 /// syscall stubs save the next frame before re-entering Rust scheduler code.
-pub fn switch_to_thread(thread: &mut ThreadControlBlock) {
-    enter_thread_slice(0, thread);
+#[cfg(not(test))]
+pub fn switch_to_thread(mut run_context: ThreadSliceRunContext<'_>) {
+    enter_thread_slice(&mut run_context);
 }
 
 /// Publish the current hardware scheduler identity and restore a thread frame.
@@ -244,24 +259,32 @@ pub fn switch_to_thread(thread: &mut ThreadControlBlock) {
 /// Interrupt and syscall assembly reads these atomics when it builds a
 /// [`CpuContext`] trap frame, then calls back into Rust to copy that frame into
 /// the running [`ThreadControlBlock`].
-pub fn enter_thread_slice(core_index: usize, thread: &mut ThreadControlBlock) {
-    prepare_core_entry_state(core_index);
+pub fn enter_thread_slice(run_context: &mut ThreadSliceRunContext<'_>) {
+    prepare_core_entry_state(run_context.core_index, run_context.kernel_stack_top);
 
-    __mirage_current_core.store(core_index, Ordering::SeqCst);
-    __mirage_current_thread.store(thread.id.raw(), Ordering::SeqCst);
+    __mirage_current_core.store(run_context.core_index, Ordering::SeqCst);
+    __mirage_current_thread.store(run_context.thread.raw(), Ordering::SeqCst);
     CURRENT_CONTEXT.store(
-        core::ptr::addr_of_mut!(thread.context) as usize,
+        run_context.context as *mut CpuContext as usize,
         Ordering::SeqCst,
     );
 
     #[cfg(not(test))]
-    unsafe {
-        __mirage_context_restore(core::ptr::addr_of_mut!(thread.context));
+    {
+        if paging::switch_address_space(run_context.address_space_root).is_some() {
+            unsafe {
+                __mirage_context_restore(run_context.context as *mut CpuContext);
+            }
+        }
     }
 
     #[cfg(test)]
     {
-        let _ = thread;
+        let _ = (
+            run_context.process,
+            run_context.address_space_root,
+            run_context.kernel_stack_top,
+        );
     }
 
     CURRENT_CONTEXT.store(0, Ordering::SeqCst);
@@ -315,21 +338,24 @@ fn initialize_per_cpu_state() {
         }
         idx += 1;
     }
-    prepare_core_entry_state(0);
+    prepare_core_entry_state(0, gdt::kernel_stack_top(0));
 }
 
-fn prepare_core_entry_state(core_index: usize) {
+fn prepare_core_entry_state(core_index: usize, kernel_stack_top: u64) {
     let index = if core_index < MAX_CORES {
         core_index
     } else {
         0
     };
+    let stack_top = if kernel_stack_top == 0 {
+        gdt::kernel_stack_top(index)
+    } else {
+        kernel_stack_top
+    };
     unsafe {
-        if PER_CPU[index].kernel_stack_top == 0 {
-            PER_CPU[index].kernel_stack_top = gdt::kernel_stack_top(index);
-        }
+        PER_CPU[index].kernel_stack_top = stack_top;
     }
-    gdt::set_current_kernel_stack(index);
+    gdt::set_tss_rsp0(stack_top);
     msr::write_gs_base(per_cpu_state_ptr(index));
     msr::write_kernel_gs_base(per_cpu_state_ptr(index));
 }
@@ -1596,5 +1622,41 @@ mod pci_config_tests {
         assert!(pci_is_multifunction(0x80));
         assert!(pci_is_multifunction(0x81));
         assert!(!pci_is_multifunction(0x00));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::process::ProcessId;
+    use crate::kernel::thread::{CpuContext, PrivilegeMode, ThreadId};
+
+    #[test]
+    fn thread_slice_handoff_carries_scheduler_selected_context() {
+        let mut context = CpuContext::new(0x400000, 0x7fff_ffff_fff0, PrivilegeMode::User);
+        let context_ptr = core::ptr::addr_of_mut!(context) as usize;
+        let mut handoff = ThreadSliceRunContext {
+            core_index: 1,
+            thread: ThreadId::new(42),
+            process: ProcessId::new(7),
+            address_space_root: 0x1234_5000,
+            kernel_stack_top: 0xffff_8000_0000_8000,
+            context: &mut context,
+        };
+
+        enter_thread_slice(&mut handoff);
+
+        assert_eq!(handoff.core_index, 1);
+        assert_eq!(handoff.thread, ThreadId::new(42));
+        assert_eq!(handoff.process, ProcessId::new(7));
+        assert_eq!(handoff.address_space_root, 0x1234_5000);
+        assert_eq!(handoff.kernel_stack_top, 0xffff_8000_0000_8000);
+        assert_eq!(
+            core::ptr::addr_of_mut!(*handoff.context) as usize,
+            context_ptr
+        );
+        assert_eq!(__mirage_current_core.load(Ordering::SeqCst), usize::MAX);
+        assert_eq!(__mirage_current_thread.load(Ordering::SeqCst), 0);
+        assert_eq!(CURRENT_CONTEXT.load(Ordering::SeqCst), 0);
     }
 }
