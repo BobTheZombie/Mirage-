@@ -749,6 +749,7 @@ pub struct Kernel<const MAX_PROC: usize, const MSG_DEPTH: usize> {
     mtss_core: CoreMtss<MAX_PROCESSES, MAX_THREADS, MAX_THREADS>,
     mtss_initialized: bool,
     mtss_ticks: u64,
+    pending_mtss_decision: Option<KernelThreadScheduleRecord>,
     security: SecurityKernel<MAX_PROC>,
     devices: DeviceManager<MAX_DEVICES>,
     service_registry: ServiceRegistry<MAX_SERVICE_REGISTRATIONS, MAX_DEVICE_CLAIMS>,
@@ -862,6 +863,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             mtss_core: CoreMtss::new(),
             mtss_initialized: false,
             mtss_ticks: 0,
+            pending_mtss_decision: None,
             security: SecurityKernel::new(),
             devices: DeviceManager::new(),
             service_registry: ServiceRegistry::new(),
@@ -901,6 +903,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.mtss_core = CoreMtss::new();
         self.mtss_initialized = false;
         self.mtss_ticks = 0;
+        self.pending_mtss_decision = None;
         self.security.reset();
         self.devices.reset();
         self.service_registry.reset();
@@ -1074,6 +1077,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.mtss_scheduler = Self::new_mtss_scheduler();
         self.mtss_initialized = false;
         self.mtss_ticks = 0;
+        self.pending_mtss_decision = None;
 
         let kernel_stack_top = x86_64::kernel_stack_top(0);
         let kernel_stack =
@@ -1115,6 +1119,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     /// Ask MTSS for the next runnable micro-thread. CPU entry, address-space
     /// switching, syscall entry, and capability checks remain kernel-owned.
     pub fn kernel_schedule_next(&mut self) -> Option<KernelThreadScheduleRecord> {
+        if let Some(decision) = self.pending_mtss_decision.take() {
+            return Some(decision);
+        }
         self.mtss_scheduler
             .pick_next()
             .ok()
@@ -1438,17 +1445,28 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         self.mtss_core.thread(task.main_thread)
     }
 
-    /// Return the current micro-thread to MTSS after a cooperative yield or the
-    /// end of this mock slice. Real userspace context switching is intentionally
-    /// out of scope for this milestone.
+    /// Complete a kernel-dispatched slice and hand scheduling authority back to MTSS.
+    ///
+    /// The kernel records the completed slice on its schedule record, but MTSS owns
+    /// runnable-state transitions and selects the next runnable thread. Architecture
+    /// backends must receive only a thread selected by MTSS, never a kernel-local
+    /// requeue choice.
     pub fn kernel_yield_current(
         &mut self,
         mut scheduled: KernelThreadScheduleRecord,
-    ) -> Result<(), KernelError> {
+    ) -> Result<Option<KernelThreadScheduleRecord>, KernelError> {
         let _ = scheduled.consume_time_slice();
-        self.mtss_scheduler
-            .requeue_current()
-            .map_err(map_mtss_error)
+        let decision = self
+            .mtss_scheduler
+            .yield_current()
+            .map_err(map_mtss_error)?;
+        match decision {
+            Some(decision) => self
+                .schedule_record_from_mtss(decision)
+                .map(Some)
+                .ok_or(KernelError::UnknownThread),
+            None => Ok(None),
+        }
     }
 
     pub fn spawn_initial_process(&mut self, creds: Credentials) -> KernelResult<ProcessId> {
@@ -4383,7 +4401,20 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.core_states[core_index].finish_cycle();
 
             if requeue_thread {
-                let _ = self.kernel_yield_current(scheduled);
+                match self.kernel_yield_current(scheduled) {
+                    Ok(Some(next)) => {
+                        // MTSS has already selected the next runnable thread. The
+                        // single-slice core loop defers dispatching that exact MTSS
+                        // decision until the next scheduler tick, where
+                        // `kernel_schedule_next` will expose only MTSS-selected
+                        // threads to the architecture backend.
+                        self.pending_mtss_decision = Some(next);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        self.core_states[core_index].idle_cycle();
+                    }
+                }
             }
         } else {
             self.core_states[core_index].idle_cycle();
@@ -5218,6 +5249,24 @@ mod tests {
             idx += 1;
         }
         saw_thread
+    }
+
+    #[test]
+    fn kernel_yield_current_returns_and_defers_mtss_selected_thread() {
+        let mut kernel = boot_kernel();
+        let first = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let second = kernel
+            .spawn_child_process(first, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+
+        let scheduled = kernel.kernel_schedule_next().unwrap();
+        assert_eq!(scheduled.process, first);
+
+        let next = kernel.kernel_yield_current(scheduled).unwrap().unwrap();
+        assert_eq!(next.process, second);
+
+        kernel.pending_mtss_decision = Some(next);
+        assert_eq!(kernel.kernel_schedule_next().unwrap().process, second);
     }
 
     #[test]
