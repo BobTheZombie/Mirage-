@@ -97,13 +97,17 @@ pub fn tss_rsp0() -> u64 {
 }
 
 pub fn set_current_kernel_stack(core_index: usize) {
+    set_tss_rsp0(kernel_stack_top(core_index));
+}
+
+pub fn set_tss_rsp0(stack_top: u64) {
     #[cfg(not(test))]
     unsafe {
-        TSS.privilege_stack_table[0] = kernel_stack_top(core_index);
+        TSS.privilege_stack_table[0] = stack_top;
     }
 
     #[cfg(test)]
-    let _ = core_index;
+    let _ = stack_top;
 }
 
 pub fn kernel_stack_top(core_index: usize) -> u64 {

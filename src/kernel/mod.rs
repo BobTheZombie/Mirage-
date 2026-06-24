@@ -35,7 +35,7 @@ pub mod userspace;
 use crate::arch::x86_64::{
     self,
     boot::{BootInfo, BootModules, FramebufferInfo},
-    clock, ThreadRunOutcome,
+    clock, ThreadRunOutcome, ThreadSliceRunContext,
 };
 use crate::kernel::boot_phase::{
     boot_phase_detected, boot_phase_failed, boot_phase_online, boot_phase_skipped,
@@ -4325,12 +4325,13 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 .as_ref()
                 .map(|pcb| pcb.address_space_root)
                 .unwrap_or(0);
-            if x86_64::paging::switch_address_space(address_space_root).is_none() {
+            if address_space_root == 0 {
                 self.handle_isolation_fault(scheduled.process, IsolationError::PolicyViolation);
                 return;
             }
 
-            self.core_states[core_index].set_kernel_stack_top(x86_64::kernel_stack_top(core_index));
+            let kernel_stack_top = x86_64::kernel_stack_top(core_index);
+            self.core_states[core_index].set_kernel_stack_top(kernel_stack_top);
             self.core_states[core_index].start_thread(scheduled.thread);
 
             let mut terminated = false;
@@ -4341,7 +4342,14 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                         *entry = None;
                         terminated = true;
                     } else {
-                        run_outcome = x86_64::run_thread_slice(core_index, thread);
+                        run_outcome = x86_64::run_thread_slice(ThreadSliceRunContext {
+                            core_index,
+                            thread: scheduled.thread,
+                            process: scheduled.process,
+                            address_space_root,
+                            kernel_stack_top,
+                            context: &mut thread.context,
+                        });
                         if run_outcome != ThreadRunOutcome::UserEntryInvalid {
                             thread.mark_running();
                             thread.accumulate_cpu_time(1);
