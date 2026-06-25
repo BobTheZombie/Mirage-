@@ -2000,7 +2000,23 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_exit(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        self.exit_task(context.caller, ExitStatus::exited(context.arg(0) as i32));
+        let status = ExitStatus::exited(context.arg(0) as i32);
+        self.exit_task(context.caller, status);
+
+        if let Some(thread) = context.thread {
+            let _ = self
+                .mtss_scheduler
+                .exit_thread(Self::mtss_thread_id(thread));
+            self.remove_thread_from_cores(thread);
+        }
+        let _ = self
+            .mtss_scheduler
+            .terminate_task(Self::mtss_task_id(context.caller));
+
+        if context.caller.raw() == 1 {
+            crate::kprintln!("SPIDER-RS PID1 [FAILED: exited unexpectedly]");
+        }
+
         Ok(0)
     }
 
@@ -4574,8 +4590,26 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                     let result = self
                         .handle_syscall(trap.number, context)
                         .unwrap_or_else(encode_syscall_error);
+                    if !self.syscall_trap_target_can_resume(scheduled.process, trap.thread) {
+                        self.core_states[core_index].finish_cycle();
+                        if let Some(next) = self.kernel_schedule_next() {
+                            self.pending_mtss_decision = Some(next);
+                        } else {
+                            self.core_states[core_index].idle_cycle();
+                        }
+                        return;
+                    }
                     self.write_thread_syscall_result(trap.thread, result);
                     let _ = self.deliver_signal_checkpoint(scheduled.process, trap.thread);
+                    if !self.syscall_trap_target_can_resume(scheduled.process, trap.thread) {
+                        self.core_states[core_index].finish_cycle();
+                        if let Some(next) = self.kernel_schedule_next() {
+                            self.pending_mtss_decision = Some(next);
+                        } else {
+                            self.core_states[core_index].idle_cycle();
+                        }
+                        return;
+                    }
                 }
                 ThreadRunOutcome::TimerPreempted | ThreadRunOutcome::TimeSliceComplete => {}
                 ThreadRunOutcome::UserEntryInvalid => {
@@ -4625,6 +4659,28 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         } else {
             self.core_states[core_index].idle_cycle();
         }
+    }
+
+    fn syscall_trap_target_can_resume(&self, pid: ProcessId, thread: ThreadId) -> bool {
+        let process_index = match self.locate_process(pid) {
+            Ok(index) => index,
+            Err(_) => return false,
+        };
+        if self.process_table[process_index]
+            .as_ref()
+            .map(|pcb| pcb.state == ProcessState::Zombie)
+            .unwrap_or(true)
+        {
+            return false;
+        }
+        let thread_index = match self.locate_thread(thread) {
+            Ok(index) => index,
+            Err(_) => return false,
+        };
+        self.thread_table[thread_index]
+            .as_ref()
+            .map(|tcb| tcb.process == pid && tcb.state != ThreadState::Terminated)
+            .unwrap_or(false)
     }
 
     fn futex_owner_for_process(&self, pid: ProcessId) -> u64 {
@@ -5728,6 +5784,107 @@ mod tests {
                 .child_wait,
             None
         );
+    }
+
+    #[test]
+    fn syscall_exit_marks_zombie_releases_resources_and_wakes_waiter() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::user())
+            .unwrap();
+        let parent_thread = first_thread(&kernel, parent);
+        let child_thread = first_thread(&kernel, child);
+        let fd = kernel
+            .handle_syscall(
+                SyscallNumber::Eventfd.raw(),
+                SyscallContext::new(child, Some(child_thread), [0, 0, 0, 0, 0, 0]),
+            )
+            .unwrap() as usize;
+        let description = kernel.fd_description(child, fd).unwrap();
+        kernel
+            .grant_task_capability(
+                child,
+                CapabilityObject::ServiceControl,
+                CapabilityRights::service_control(),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            kernel.wait_for_child(parent, Some(parent_thread), child.raw() as i64, 0, 0),
+            Err(KernelError::MessageQueueEmpty)
+        ));
+
+        kernel
+            .handle_syscall(
+                SyscallNumber::Exit.raw(),
+                SyscallContext::new(child, Some(child_thread), [23, 0, 0, 0, 0, 0]),
+            )
+            .unwrap();
+
+        assert_eq!(process_state(&kernel, child), ProcessState::Zombie);
+        assert_eq!(process_state(&kernel, parent), ProcessState::Ready);
+        assert!(matches!(
+            kernel.locate_thread(child_thread),
+            Err(KernelError::UnknownThread)
+        ));
+        assert!(matches!(
+            kernel.open_files.ref_count(description),
+            Err(FileTableError::InvalidDescriptor)
+        ));
+        assert!(matches!(
+            kernel.check_service_control_capability(child),
+            Err(KernelError::SecurityViolation(
+                IsolationError::UnknownTask | IsolationError::CapabilityMissing
+            ))
+        ));
+        assert_eq!(
+            kernel.process_table[kernel.locate_process(parent).unwrap()]
+                .unwrap()
+                .child_wait,
+            None
+        );
+    }
+
+    #[test]
+    fn syscall_trap_exit_does_not_resume_or_requeue_exited_thread() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+        let child_thread = first_thread(&kernel, child);
+
+        let scheduled_parent = kernel.kernel_schedule_next().unwrap();
+        assert_eq!(scheduled_parent.process, parent);
+        let scheduled_child = kernel
+            .kernel_yield_current(scheduled_parent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(scheduled_child.process, child);
+        kernel.pending_mtss_decision = Some(scheduled_child);
+
+        let child_index = kernel.locate_thread(child_thread).unwrap();
+        kernel.thread_table[child_index]
+            .as_mut()
+            .unwrap()
+            .prepare_syscall(SyscallNumber::Exit.raw(), [17, 0, 0, 0, 0, 0]);
+
+        kernel.run_core(0);
+
+        assert_eq!(process_state(&kernel, child), ProcessState::Zombie);
+        assert!(matches!(
+            kernel.locate_thread(child_thread),
+            Err(KernelError::UnknownThread)
+        ));
+        assert!(kernel
+            .pending_mtss_decision
+            .map(|record| record.thread != child_thread && record.process != child)
+            .unwrap_or(true));
+        if let Some(record) = kernel.kernel_schedule_next() {
+            assert_ne!(record.thread, child_thread);
+            assert_ne!(record.process, child);
+        }
     }
 
     #[test]
