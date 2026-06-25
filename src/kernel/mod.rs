@@ -59,8 +59,8 @@ use crate::kernel::futex::{FutexKey, FutexTable, MAX_FUTEX_WAITERS};
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
 use crate::kernel::memory::MemoryProtection;
 use crate::kernel::process::{
-    ExecRequest, ExecServiceDaemon, ExecSignatureMetadata, ExecVectorMetadata, ExitStatus,
-    ProcessControlBlock, ProcessFileTableError, ProcessGroupId, ProcessId, ProcessPath,
+    ChildWaitSelector, ExecRequest, ExecServiceDaemon, ExecSignatureMetadata, ExecVectorMetadata,
+    ExitStatus, ProcessControlBlock, ProcessFileTableError, ProcessGroupId, ProcessId, ProcessPath,
     ProcessPriority, ProcessState, SessionId, SignalAction, SignalMask, MAX_EXEC_ARGS,
     MAX_EXEC_ENVS, MAX_SUPPLEMENTARY_GROUPS, SIGCHLD, SIGKILL, SIGTERM,
 };
@@ -1595,6 +1595,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.timers.release_process(pid);
             self.futexes.remove_owner(self.futex_owner_for_process(pid));
             let _ = self.queue_signal_to_parent(pid, SIGCHLD);
+            let _ = self.wake_parent_child_waiters(pid);
             return Some(ProcessExitReport { pid, status });
         }
         None
@@ -1800,7 +1801,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
 
     pub fn wait(&mut self, parent: ProcessId, status: Option<&mut i32>) -> KernelResult<ProcessId> {
         let status_ptr = status.map(|out| out as *mut i32 as u64).unwrap_or(0);
-        self.wait_for_child(parent, -1, status_ptr, 0)
+        self.wait_for_child(parent, None, -1, status_ptr, 0)
             .map(ProcessId::new)
     }
 
@@ -1812,7 +1813,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         options: u64,
     ) -> KernelResult<ProcessId> {
         let status_ptr = status.map(|out| out as *mut i32 as u64).unwrap_or(0);
-        self.wait_for_child(parent, pid, status_ptr, options)
+        self.wait_for_child(parent, None, pid, status_ptr, options)
             .map(ProcessId::new)
     }
 
@@ -2006,6 +2007,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn syscall_wait4(&mut self, context: SyscallContext) -> KernelResult<u64> {
         self.wait_for_child(
             context.caller,
+            context.thread,
             context.arg(0) as i64,
             context.arg(1),
             context.arg(2),
@@ -3820,22 +3822,23 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     fn wait_for_child(
         &mut self,
         parent: ProcessId,
+        current_thread: Option<ThreadId>,
         selector: i64,
         status_ptr: u64,
         options: u64,
     ) -> KernelResult<u64> {
         const WNOHANG: u64 = 1;
-        let mut saw_child = false;
-        let parent_pgid = self.process_table[self.locate_process(parent)?]
+        let parent_index = self.locate_process(parent)?;
+        let parent_pgid = self.process_table[parent_index]
             .as_ref()
             .ok_or(KernelError::UnknownProcess)?
             .process_group;
+        let wait_selector = decode_child_wait_selector(selector, parent_pgid);
+        let mut saw_child = false;
         let mut idx = 0usize;
         while idx < MAX_PROC {
             if let Some(pcb) = self.process_table[idx] {
-                if pcb.parent == Some(parent)
-                    && wait_selector_matches(selector, pcb.pid, pcb.process_group, parent_pgid)
-                {
+                if pcb.parent == Some(parent) && wait_selector.matches(pcb.pid, pcb.process_group) {
                     saw_child = true;
                     if pcb.state == ProcessState::Zombie {
                         let status = pcb.exit_status.unwrap_or(ExitStatus::exited(0));
@@ -3843,6 +3846,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                             write_user_value::<i32>(status_ptr, status.raw())?;
                         }
                         let pid = pcb.pid;
+                        self.clear_child_wait(parent, current_thread);
                         self.reap_process_at(idx);
                         return Ok(pid.raw());
                     }
@@ -3853,10 +3857,97 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         if saw_child && (options & WNOHANG) != 0 {
             Ok(0)
         } else if saw_child {
+            self.record_child_wait(parent, parent_index, current_thread, wait_selector);
             Err(KernelError::MessageQueueEmpty)
         } else {
             Err(KernelError::UnknownProcess)
         }
+    }
+
+    fn record_child_wait(
+        &mut self,
+        parent: ProcessId,
+        parent_index: usize,
+        current_thread: Option<ThreadId>,
+        selector: ChildWaitSelector,
+    ) {
+        if let Some(pcb) = self.process_table[parent_index].as_mut() {
+            pcb.wait_for_child(selector);
+        }
+        if let Some(thread) = current_thread {
+            if let Ok(thread_index) = self.locate_thread(thread) {
+                if let Some(tcb) = self.thread_table[thread_index].as_mut() {
+                    tcb.wait_for_child(selector);
+                    tcb.block();
+                    let _ = self
+                        .mtss_scheduler
+                        .block_thread(Self::mtss_thread_id(thread));
+                }
+            }
+        } else {
+            self.block_threads_for_process(parent);
+        }
+        self.block_process_at_index(parent, parent_index);
+    }
+
+    fn clear_child_wait(&mut self, parent: ProcessId, current_thread: Option<ThreadId>) {
+        if let Ok(parent_index) = self.locate_process(parent) {
+            if let Some(pcb) = self.process_table[parent_index].as_mut() {
+                pcb.clear_child_wait();
+            }
+        }
+        if let Some(thread) = current_thread {
+            if let Ok(thread_index) = self.locate_thread(thread) {
+                if let Some(tcb) = self.thread_table[thread_index].as_mut() {
+                    tcb.clear_child_wait();
+                }
+            }
+        } else {
+            self.clear_child_wait_threads(parent);
+        }
+    }
+
+    fn clear_child_wait_threads(&mut self, parent: ProcessId) {
+        let mut idx = 0usize;
+        while idx < Self::THREAD_CAPACITY {
+            if let Some(thread) = self.thread_table[idx].as_mut() {
+                if thread.process == parent {
+                    thread.clear_child_wait();
+                }
+            }
+            idx += 1;
+        }
+    }
+
+    fn wake_parent_child_waiters(&mut self, child: ProcessId) -> KernelResult<()> {
+        let child_index = self.locate_process(child)?;
+        let Some(child_pcb) = self.process_table[child_index] else {
+            return Err(KernelError::UnknownProcess);
+        };
+        let Some(parent) = child_pcb.parent else {
+            return Ok(());
+        };
+        let parent_index = self.locate_process(parent)?;
+        let should_wake = self.process_table[parent_index]
+            .as_ref()
+            .and_then(|pcb| pcb.child_wait)
+            .map(|selector| selector.matches(child, child_pcb.process_group))
+            .unwrap_or(false);
+        if !should_wake {
+            return Ok(());
+        }
+        if let Some(parent_pcb) = self.process_table[parent_index].as_mut() {
+            parent_pcb.clear_child_wait();
+        }
+        self.clear_child_wait_threads(parent);
+        if self.process_table[parent_index]
+            .as_ref()
+            .map(|pcb| pcb.state == ProcessState::Blocked)
+            .unwrap_or(false)
+        {
+            self.set_process_ready_via_mtss(parent, parent_index)?;
+        }
+        self.make_threads_ready(parent)
     }
 
     fn reap_process_at(&mut self, index: usize) {
@@ -5455,6 +5546,7 @@ mod tests {
         let waited = kernel
             .wait_for_child(
                 parent,
+                None,
                 child.raw() as i64,
                 &mut status as *mut i32 as u64,
                 0,
@@ -5502,7 +5594,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            kernel.wait_for_child(parent, grandchild.raw() as i64, 0, 0),
+            kernel.wait_for_child(parent, None, grandchild.raw() as i64, 0, 0),
             Err(KernelError::UnknownProcess)
         ));
     }
@@ -5513,9 +5605,129 @@ mod tests {
         let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
 
         assert!(matches!(
-            kernel.wait_for_child(parent, -1, 0, 0),
+            kernel.wait_for_child(parent, None, -1, 0, 0),
             Err(KernelError::UnknownProcess)
         ));
+    }
+
+    #[test]
+    fn wait4_blocks_parent_until_child_exits() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+        let thread = first_thread(&kernel, parent);
+
+        assert!(matches!(
+            kernel.wait_for_child(parent, Some(thread), child.raw() as i64, 0, 0),
+            Err(KernelError::MessageQueueEmpty)
+        ));
+
+        assert_eq!(process_state(&kernel, parent), ProcessState::Blocked);
+        assert!(process_threads_blocked(&kernel, parent));
+        assert_eq!(
+            kernel.process_table[kernel.locate_process(parent).unwrap()]
+                .unwrap()
+                .child_wait,
+            Some(ChildWaitSelector::Pid(child))
+        );
+    }
+
+    #[test]
+    fn child_exit_wakes_matching_waiter_without_reaping_zombie() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+        let thread = first_thread(&kernel, parent);
+
+        assert!(matches!(
+            kernel.wait_for_child(parent, Some(thread), child.raw() as i64, 0, 0),
+            Err(KernelError::MessageQueueEmpty)
+        ));
+        kernel.exit_process(child, ExitStatus::exited(9)).unwrap();
+
+        assert_eq!(process_state(&kernel, parent), ProcessState::Ready);
+        assert_eq!(process_state(&kernel, child), ProcessState::Zombie);
+        assert_eq!(
+            kernel.process_table[kernel.locate_process(parent).unwrap()]
+                .unwrap()
+                .child_wait,
+            None
+        );
+    }
+
+    #[test]
+    fn wait_any_reaps_first_zombie_child() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+        let other = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+
+        kernel.exit_process(child, ExitStatus::exited(3)).unwrap();
+
+        assert_eq!(
+            kernel.wait_for_child(parent, None, -1, 0, 0).unwrap(),
+            child.raw()
+        );
+        assert!(matches!(
+            kernel.locate_process(child),
+            Err(KernelError::UnknownProcess)
+        ));
+        assert!(kernel.locate_process(other).is_ok());
+    }
+
+    #[test]
+    fn wait_pid_ignores_other_zombie_children() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let first = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+        let second = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+
+        kernel.exit_process(first, ExitStatus::exited(1)).unwrap();
+        kernel.exit_process(second, ExitStatus::exited(2)).unwrap();
+
+        assert_eq!(
+            kernel
+                .wait_for_child(parent, None, second.raw() as i64, 0, 0)
+                .unwrap(),
+            second.raw()
+        );
+        assert_eq!(process_state(&kernel, first), ProcessState::Zombie);
+    }
+
+    #[test]
+    fn wait_nohang_returns_zero_without_blocking() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+        let thread = first_thread(&kernel, parent);
+
+        assert_eq!(
+            kernel
+                .wait_for_child(parent, Some(thread), child.raw() as i64, 0, 1)
+                .unwrap(),
+            0
+        );
+        assert_eq!(process_state(&kernel, parent), ProcessState::Ready);
+        assert_eq!(
+            kernel.process_table[kernel.locate_process(parent).unwrap()]
+                .unwrap()
+                .child_wait,
+            None
+        );
     }
 
     #[test]
@@ -6261,20 +6473,15 @@ mod tests {
     }
 }
 
-fn wait_selector_matches(
-    selector: i64,
-    child_pid: ProcessId,
-    child_pgid: ProcessGroupId,
-    parent_pgid: ProcessGroupId,
-) -> bool {
+fn decode_child_wait_selector(selector: i64, parent_pgid: ProcessGroupId) -> ChildWaitSelector {
     if selector == -1 {
-        true
+        ChildWaitSelector::Any
     } else if selector == 0 {
-        child_pgid == parent_pgid
+        ChildWaitSelector::ProcessGroup(parent_pgid)
     } else if selector > 0 {
-        child_pid.raw() == selector as u64
+        ChildWaitSelector::Pid(ProcessId::new(selector as u64))
     } else {
-        child_pgid.raw() == (-selector) as u64
+        ChildWaitSelector::ProcessGroup(ProcessGroupId::new((-selector) as u64))
     }
 }
 
