@@ -7,6 +7,9 @@
 //! the userspace ELF loader validates/maps it, and MTSS schedules it as PID 1.
 //! The kernel must never call Spider-rs as a Rust function.
 
+#[cfg(all(any(target_os = "mirage", target_os = "none"), feature = "host-tests"))]
+compile_error!("spider-rs host-tests feature enables host diagnostic stubs and must never be enabled for Mirage target builds");
+
 #[cfg(target_os = "none")]
 extern crate alloc;
 
@@ -54,12 +57,10 @@ mod allocator {
                 if end > HEAP_SIZE {
                     return null_mut();
                 }
-                match self.next.compare_exchange(
-                    current,
-                    end,
-                    Ordering::SeqCst,
-                    Ordering::Relaxed,
-                ) {
+                match self
+                    .next
+                    .compare_exchange(current, end, Ordering::SeqCst, Ordering::Relaxed)
+                {
                     Ok(_) => {
                         let heap = (*self.heap.0.get()).as_mut_ptr();
                         return heap.add(aligned);
@@ -95,17 +96,20 @@ pub mod target;
 pub mod units;
 
 pub mod graph;
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
+#[cfg(all(feature = "host-tests", not(target_os = "none")))]
 pub mod manager;
 pub mod parser;
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
 pub mod process;
 
 pub use graph::{DependencyError, StartupPlan};
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
+#[cfg(all(feature = "host-tests", not(target_os = "none")))]
 pub use manager::{ServiceOutcome, SpiderManager};
 pub use parser::{parse_unit, UnitParseError};
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
-pub use process::{Pid, ProcessSpawner, SpawnError, StubSpawner};
+#[cfg(all(
+    feature = "host-tests",
+    not(any(target_os = "mirage", target_os = "none"))
+))]
+pub use process::StubSpawner;
+pub use process::{MirageSpawner, Pid, ProcessSpawner, SpawnError};
 
 pub use units::{default_units, UnitDescriptor, UnitKind, UnitState};
