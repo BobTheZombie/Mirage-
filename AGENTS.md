@@ -673,6 +673,21 @@ Required rootfs userland:
 
 ---
 
+## Mirage Syscall ABI Contract
+
+1. Target builds must route user-visible syscall ABI entry through real Mirage target syscall handlers that run at the intended privilege boundary, validate process/thread identity, and enforce kernel-owned mechanisms without bypassing MTSS or Supervisor policy.
+2. Host-test-only syscall stubs are permitted only for host unit tests and tooling; they must be clearly gated to host/test configurations, must not be linked into target images, and must not be used as evidence that target syscalls work.
+3. Every syscall that receives a userspace pointer, buffer, string, iovec, or structure must validate canonical address ranges, mapped pages, access permissions, length overflow, and copy-in/copy-out boundaries before dereferencing or exposing kernel memory.
+4. Spawn, exec, and POSIX-compatible process creation syscalls must route launch authorization through the Supervisor, executable loading through the userspace loader, runnable-state admission through MTSS, and capability checks through the kernel capability layer.
+5. Wait, exit, reap, and status-reporting syscalls must reflect real lifecycle transitions: exit records must come from an actual terminating task, wait must observe a real child/service state, and reaping must occur only after MTSS and resource cleanup have completed.
+6. `m1-terminal` output must originate from the real `/usr/bin/m1-terminal` userspace process using the Mirage libc/runtime `SYS_WRITE` path, then flow through the syscall/IPC/capability stack to the console or terminal service; the kernel must not fake terminal output.
+7. `spider-rs` must spawn `/spider-rt/sbin/spider-rsd` through the real spawn/exec syscall path after PID1 is running, with Supervisor approval and truthful MTSS state transitions for the dispatcher process.
+8. `spider-rsd` must launch `/usr/bin/m1-terminal` through the configured unit dependency chain, including `/etc/spider/units/default.target`, `/etc/spider/units/basic.target`, and `/etc/spider/units/m1-terminal.service`; direct kernel-side app launch shortcuts are not acceptable.
+9. Syscall return values, errno values, process IDs, service IDs, bytes-written counts, and child statuses must be derived from real execution results and validated state, not hardcoded success paths or milestone UI assumptions.
+10. If any syscall, spawn, exec, wait, exit, `SYS_WRITE`, `spider-rs`, `spider-rsd`, unit launch, or userspace-output stage is incomplete, blocked, or running under a host-only stub, status must remain FAILED/PENDING/SKIPPED with the exact reason; do not report OK/ONLINE/RUNNING until the target code path has executed.
+
+---
+
 ## Mirage Hardware Driver Contract
 
 1. Hardware drivers must use bounded waits only. No infinite polling loops.
