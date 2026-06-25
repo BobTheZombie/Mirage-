@@ -264,6 +264,23 @@ pub enum ProcessState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildWaitSelector {
+    Any,
+    Pid(ProcessId),
+    ProcessGroup(ProcessGroupId),
+}
+
+impl ChildWaitSelector {
+    pub const fn matches(self, pid: ProcessId, process_group: ProcessGroupId) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Pid(wait_pid) => wait_pid.raw() == pid.raw(),
+            Self::ProcessGroup(wait_pgid) => wait_pgid.raw() == process_group.raw(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessPriority {
     Critical,
     High,
@@ -641,6 +658,7 @@ pub struct ProcessControlBlock<const MAX_FD: usize> {
     pub files: ProcessFileTable<MAX_FD>,
     pub signal_actions: [SignalAction; MAX_SIGNAL_NUMBER + 1],
     pub pending_signals: PendingSignalQueue,
+    pub child_wait: Option<ChildWaitSelector>,
 }
 
 impl<const MAX_FD: usize> ProcessControlBlock<MAX_FD> {
@@ -670,6 +688,7 @@ impl<const MAX_FD: usize> ProcessControlBlock<MAX_FD> {
             files: ProcessFileTable::new(),
             signal_actions: [SignalAction::DEFAULT; MAX_SIGNAL_NUMBER + 1],
             pending_signals: PendingSignalQueue::new(),
+            child_wait: None,
         }
     }
 
@@ -711,6 +730,14 @@ impl<const MAX_FD: usize> ProcessControlBlock<MAX_FD> {
 
     pub fn take_deliverable_signal(&mut self, mask: SignalMask) -> Option<u8> {
         self.pending_signals.take_unmasked(mask)
+    }
+
+    pub fn wait_for_child(&mut self, selector: ChildWaitSelector) {
+        self.child_wait = Some(selector);
+    }
+
+    pub fn clear_child_wait(&mut self) {
+        self.child_wait = None;
     }
 
     pub fn decrement_thread_count(&mut self) {

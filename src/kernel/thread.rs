@@ -1,6 +1,6 @@
 //! Thread management primitives used by the Mirage kernel scheduler.
 
-use crate::kernel::process::{ProcessId, ProcessPriority, SignalMask};
+use crate::kernel::process::{ChildWaitSelector, ProcessId, ProcessPriority, SignalMask};
 use crate::kernel::syscall::SYSCALL_MAX_ARGS;
 
 pub const THREADS_PER_PROCESS: usize = 4;
@@ -241,6 +241,7 @@ pub struct ThreadControlBlock {
     pub gs_base: u64,
     pub shares_address_space: bool,
     pub shares_descriptor_table: bool,
+    pub child_wait: Option<ChildWaitSelector>,
 }
 
 impl ThreadControlBlock {
@@ -270,6 +271,7 @@ impl ThreadControlBlock {
             gs_base: 0,
             shares_address_space: false,
             shares_descriptor_table: false,
+            child_wait: None,
         }
     }
 
@@ -291,6 +293,14 @@ impl ThreadControlBlock {
 
     pub fn block(&mut self) {
         self.state = ThreadState::Blocked;
+    }
+
+    pub fn wait_for_child(&mut self, selector: ChildWaitSelector) {
+        self.child_wait = Some(selector);
+    }
+
+    pub fn clear_child_wait(&mut self) {
+        self.child_wait = None;
     }
 
     pub fn terminate(&mut self) {
