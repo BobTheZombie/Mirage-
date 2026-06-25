@@ -9,7 +9,7 @@ bootloader
     -> Mirage kernel mechanisms
     -> RuntimeVfs / rootfs availability
     -> Mirage Supervisor online
-    -> MTSS online
+    -> MTSS readiness gate
     -> userspace loader starts
     -> read /spider-rt/sbin/spider-rs
     -> validate ELF64 x86_64 executable and PT_LOAD mappings
@@ -20,7 +20,19 @@ bootloader
     -> spider-rs starts spider-rsd
 ```
 
-`maybe_launch_pid1` is the boot coordinator gate. It must refuse launch until root filesystem access, Supervisor, MTSS, Spider Runtime availability, loader start, and PID1 image validation are all true. A launch deferred before MTSS comes online must be retried immediately after MTSS transitions online.
+`maybe_launch_pid1` is the boot coordinator gate. It must refuse launch until root filesystem access, Supervisor approval, Spider Runtime availability, loader start, PID1 image validation, and an eligible MTSS readiness state are all true. A launch deferred before MTSS eligibility must be retried immediately after any MTSS state change: core initialization, scheduler readiness, degraded/cooperative readiness, timer readiness, preemption readiness, or full online readiness.
+
+## MTSS eligibility policy
+
+PID1 handoff does not always have to wait for full `MTSS ONLINE`. `MTSS ONLINE` means full preemptive scheduling only: MTSS core, scheduler, timer, preemption, and architecture context restore are all proven. Stale wording that says PID1 must wait for `MTSS online` should be read as "PID1 must wait for an eligible MTSS readiness state."
+
+A degraded/cooperative MTSS may create PID1 task/thread records and mark PID1 runnable when core readiness, scheduler readiness, idle fallback, and admission APIs are valid. This is allowed only when the boot policy switch `require_preemption_for_userspace` is `false`, which is the default for the current architecture skeleton. If `require_preemption_for_userspace` is `true`, cooperative readiness is insufficient and PID1 handoff waits for preemption readiness.
+
+Exact handoff statuses are:
+
+* `PID1 HANDOFF [ALLOWED: cooperative MTSS]` — core/scheduler/idle/API readiness is valid, policy permits cooperative userspace admission, and PID1 may be created/admitted runnable without claiming `MTSS ONLINE`.
+* `PID1 HANDOFF [ALLOWED: preemptive MTSS]` — full preemptive readiness is valid, so PID1 may launch under the `MTSS ONLINE` contract.
+* `PID1 HANDOFF [PENDING: policy requires preemption before userspace]` — cooperative readiness may be present, but policy requires preemption and preemption readiness is not proven yet.
 
 ## Status truth rules
 

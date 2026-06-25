@@ -57,6 +57,19 @@ Current portable MTSS states are intentionally small:
 
 The architectural target includes richer lifecycle concepts such as contained, terminated, and reaped. Those concepts belong in MTSS-visible lifecycle events and future process/service integration, while recovery decisions remain supervisor policy.
 
+## Readiness vocabulary
+
+MTSS readiness is reported in layers rather than as a single ambiguous boolean:
+
+* **Core readiness** means portable task/thread/process records, idle identity, lifecycle states, accounting storage, and admission preflight APIs are initialized.
+* **Scheduler readiness** means ready-queue insertion, non-idle selection, idle fallback, and truthful Created/New to Runnable/Ready transitions are working.
+* **Timer readiness** means a bounded kernel/architecture timer source can deliver scheduler ticks to MTSS without MTSS owning raw hardware timer programming.
+* **Preemption readiness** means timer delivery can save the active architecture context, enter MTSS scheduling hooks, restore the selected context, and return safely.
+* **Degraded readiness** means core/scheduler/idle/API readiness is valid but full timer/preemption proof is absent, so MTSS is cooperative or boot-stage only.
+* **Online readiness** means full preemptive scheduling is proven. `MTSS ONLINE` means this state only; it must not describe degraded or cooperative MTSS.
+
+A degraded/cooperative MTSS may still create tasks and mark PID1 runnable when core, scheduler, idle, and admission API readiness are valid and Supervisor policy allows it. The boot policy switch `require_preemption_for_userspace` defaults to `false`; setting it to `true` blocks PID1 handoff until preemption readiness is proven. Boot coordination must retry PID1 launch after MTSS readiness state changes so pending cooperative/preemptive policy decisions do not become stale. See [`mtss-readiness.md`](mtss-readiness.md).
+
 ## Supervisor boundary
 
 MTSS may expose events like task created, thread runnable, thread running, blocked, sleeping, faulted, contained, terminated, and reaped. The Supervisor may observe those events and decide whether to restart a service, revoke capabilities, or report boot failure. The Supervisor must not directly mutate MTSS queues, fabricate task state, or mark PID1/service status as online unless the corresponding real MTSS/kernel path executed.
@@ -73,6 +86,7 @@ MTSS is currently a bootable architecture skeleton, not a production scheduler:
 
 See also:
 
+* [`mtss-readiness.md`](mtss-readiness.md)
 * [`mtss-preemption.md`](mtss-preemption.md)
 * [`mtss-process-lifecycle.md`](mtss-process-lifecycle.md)
 * [`../boot/pid1-handoff.md`](../boot/pid1-handoff.md)
