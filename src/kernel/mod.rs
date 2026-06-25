@@ -1799,9 +1799,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     pub fn wait(&mut self, parent: ProcessId, status: Option<&mut i32>) -> KernelResult<ProcessId> {
-        let status_ptr = status
-            .map(|out| out as *mut i32)
-            .unwrap_or(core::ptr::null_mut());
+        let status_ptr = status.map(|out| out as *mut i32 as u64).unwrap_or(0);
         self.wait_for_child(parent, -1, status_ptr, 0)
             .map(ProcessId::new)
     }
@@ -1813,9 +1811,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         status: Option<&mut i32>,
         options: u64,
     ) -> KernelResult<ProcessId> {
-        let status_ptr = status
-            .map(|out| out as *mut i32)
-            .unwrap_or(core::ptr::null_mut());
+        let status_ptr = status.map(|out| out as *mut i32 as u64).unwrap_or(0);
         self.wait_for_child(parent, pid, status_ptr, options)
             .map(ProcessId::new)
     }
@@ -2008,10 +2004,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_wait4(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        self.wait_task(
+        self.wait_for_child(
             context.caller,
             context.arg(0) as i64,
-            context.arg(1) as *mut i32,
+            context.arg(1),
             context.arg(2),
         )
     }
@@ -3825,7 +3821,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         &mut self,
         parent: ProcessId,
         selector: i64,
-        status_out: *mut i32,
+        status_ptr: u64,
         options: u64,
     ) -> KernelResult<u64> {
         const WNOHANG: u64 = 1;
@@ -3843,8 +3839,8 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                     saw_child = true;
                     if pcb.state == ProcessState::Zombie {
                         let status = pcb.exit_status.unwrap_or(ExitStatus::exited(0));
-                        if !status_out.is_null() {
-                            unsafe { status_out.write(status.raw()) };
+                        if status_ptr != 0 {
+                            write_user_value::<i32>(status_ptr, status.raw())?;
                         }
                         let pid = pcb.pid;
                         self.reap_process_at(idx);
@@ -5420,6 +5416,106 @@ mod tests {
             idx += 1;
         }
         saw_thread
+    }
+
+    #[test]
+    fn wait4_null_status_reaps_zombie_child() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+
+        kernel.exit_process(child, ExitStatus::exited(7)).unwrap();
+
+        let waited = kernel
+            .handle_syscall(
+                SyscallNumber::Wait4.raw(),
+                SyscallContext::new(parent, None, [child.raw(), 0, 0, 0, 0, 0]),
+            )
+            .unwrap();
+
+        assert_eq!(waited, child.raw());
+        assert!(matches!(
+            kernel.locate_process(child),
+            Err(KernelError::UnknownProcess)
+        ));
+    }
+
+    #[test]
+    fn wait4_writes_valid_status_pointer() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+        let mut status = 0i32;
+
+        kernel.exit_process(child, ExitStatus::exited(42)).unwrap();
+        let waited = kernel
+            .wait_for_child(
+                parent,
+                child.raw() as i64,
+                &mut status as *mut i32 as u64,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(waited, child.raw());
+        assert_eq!(status, ExitStatus::exited(42).raw());
+    }
+
+    #[test]
+    fn wait4_rejects_invalid_status_pointer() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+
+        kernel.exit_process(child, ExitStatus::exited(1)).unwrap();
+        let error = kernel
+            .handle_syscall(
+                SyscallNumber::Wait4.raw(),
+                SyscallContext::new(parent, None, [child.raw(), 1, 0, 0, 0, 0]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, KernelError::InvalidPointer));
+        assert_eq!(syscall_error_code(error), SyscallErrorCode::BadAddress);
+        assert_eq!(process_state(&kernel, child), ProcessState::Zombie);
+    }
+
+    #[test]
+    fn wait4_rejects_non_child_pid() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let child = kernel
+            .spawn_child_process(parent, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+        let grandchild = kernel
+            .spawn_child_process(child, 0, ProcessPriority::Normal, Credentials::system())
+            .unwrap();
+
+        kernel
+            .exit_process(grandchild, ExitStatus::exited(0))
+            .unwrap();
+
+        assert!(matches!(
+            kernel.wait_for_child(parent, grandchild.raw() as i64, 0, 0),
+            Err(KernelError::UnknownProcess)
+        ));
+    }
+
+    #[test]
+    fn wait4_reports_no_children() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+
+        assert!(matches!(
+            kernel.wait_for_child(parent, -1, 0, 0),
+            Err(KernelError::UnknownProcess)
+        ));
     }
 
     #[test]
