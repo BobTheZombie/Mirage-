@@ -1,0 +1,9 @@
+[package]
+name = "mirage-abi"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "Shared no_std ABI definitions for GNU/Mirage kernel and userspace"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

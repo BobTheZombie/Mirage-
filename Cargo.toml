@@ -3,6 +3,7 @@ members = [
     ".",
     "tools/mirageconfig",
     "tools/mk-runtime-image",
+    "crates/mirage-abi",
     "crates/mirage-acpi",
     "crates/mirage-ahci",
     "crates/mirage-amd-chipset",
@@ -101,6 +102,7 @@ hw-renoir-baremetal-interrupts = ["hw-renoir-kernel-boot", "hw-x86_64-apic", "hw
 # The default kernel build is strictly no_std; the Mirage target builds the
 # Rust `alloc` crate from source so kernel `Box`/`Vec` users route through the
 # skeleton heap allocator instead of implying a production memory subsystem.
+mirage-abi = { path = "crates/mirage-abi" }
 mirage-block = { path = "crates/mirage-block", optional = true }
 mirage-storage = { path = "crates/mirage-storage", optional = true }
 mirage-fb = { path = "crates/mirage-fb", optional = true }
