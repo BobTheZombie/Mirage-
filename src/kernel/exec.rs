@@ -6,7 +6,8 @@
 //! descriptor tables, and address-space bookkeeping.
 
 use crate::kernel::process::{
-    ExecRequest, ExitStatus, ProcessControlBlock, ProcessId, ProcessPriority, ProcessState,
+    ExecRequest, ExecVectorMetadata, ExitStatus, ProcessControlBlock, ProcessId, ProcessPriority,
+    ProcessState,
 };
 use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId};
 use crate::kernel::{memory, Kernel, KernelError, KernelResult};
@@ -115,6 +116,46 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             request.credentials,
             None,
         )
+    }
+
+    /// Spawn a child from a resolved executable image path.
+    pub(super) fn spawn_loaded_task(
+        &mut self,
+        parent: ProcessId,
+        resolved: &crate::kernel::KernelPathBuf,
+        stat: crate::kernel::fs::inode::Stat,
+        argv: ExecVectorMetadata,
+        envp: ExecVectorMetadata,
+        priority: ProcessPriority,
+        credentials: Credentials,
+    ) -> KernelResult<ProcessId> {
+        self.ensure_process_exists(parent)?;
+        self.authorize_task_creation(parent, credentials)?;
+        let child = self.create_process_task(0, priority, Some(parent), credentials, None)?;
+        let image = match self.load_exec_image(child, resolved, stat, argv, envp) {
+            Ok(image) => image,
+            Err(error) => {
+                self.rollback_process_shell(child);
+                return Err(error);
+            }
+        };
+        let child_index = self.locate_process(child)?;
+        if let Some(pcb) = self.process_table[child_index].as_mut() {
+            if pcb.address_space_root != 0 && pcb.address_space_root != image.address_space_root {
+                memory::destroy_user_address_space(pcb.address_space_root);
+            }
+            pcb.entry_point = image.entry_point;
+            pcb.address_space_root = image.address_space_root;
+            pcb.state = ProcessState::Ready;
+        }
+        let thread = self
+            .first_thread_for_process(child)
+            .ok_or(KernelError::UnknownThread)?;
+        let thread_index = self.locate_thread(thread)?;
+        if let Some(tcb) = self.thread_table[thread_index].as_mut() {
+            tcb.replace_exec_image(image.entry_point, image.stack_pointer);
+        }
+        Ok(child)
     }
 
     /// Fork the caller into a new process and preserve POSIX return semantics:
@@ -272,7 +313,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             .map_err(KernelError::SecurityViolation)
     }
 
-    fn current_credentials(&self, pid: ProcessId) -> KernelResult<Credentials> {
+    pub(super) fn current_credentials(&self, pid: ProcessId) -> KernelResult<Credentials> {
         let domain_credentials = self
             .security
             .credentials(pid)
@@ -567,7 +608,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
         self.thread_table[index].map(|tcb| tcb.signal_mask)
     }
 
-    fn first_thread_for_process(&self, pid: ProcessId) -> Option<ThreadId> {
+    pub(super) fn first_thread_for_process(&self, pid: ProcessId) -> Option<ThreadId> {
         let mut idx = 0usize;
         while idx < Self::THREAD_CAPACITY {
             if let Some(thread) = self.thread_table[idx] {
