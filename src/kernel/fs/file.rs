@@ -290,12 +290,19 @@ impl SocketHandle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsoleDescriptor {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DescriptorObject {
     Regular(File),
     Pipe(PipeEndpoint),
     EventFd(EventFdId),
     Device(DeviceHandle),
     Socket(SocketHandle),
+    Console(ConsoleDescriptor),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

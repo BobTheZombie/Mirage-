@@ -50,10 +50,10 @@ use crate::kernel::exec::{CloneTaskRequest, SpawnTaskRequest};
 use crate::kernel::fs::inode::InodeKind;
 use crate::kernel::fs::{
     open_flags_from_libc, permissions_from_libc_mode, syscall_error_code_from_vfs, AccessMode,
-    CDirEntry, CStat, DescriptorFlags, DescriptorObject, DirEntry, EventFdId, Ext4Backend,
-    FileDescriptionId, FileSystem, FileTable, FileTableError, FsCredentials, Path, PathError,
-    PipeDirection, PipeEndpoint, PipeId, QfsFileSystem, SocketHandle, SsdUsbOptions, SuperBlock,
-    VfsError, MAX_PATH_BYTES,
+    CDirEntry, CStat, ConsoleDescriptor, DescriptorFlags, DescriptorObject, DirEntry, EventFdId,
+    Ext4Backend, FileDescriptionId, FileSystem, FileTable, FileTableError, FsCredentials, Path,
+    PathError, PipeDirection, PipeEndpoint, PipeId, QfsFileSystem, SocketHandle, SsdUsbOptions,
+    SuperBlock, VfsError, MAX_PATH_BYTES,
 };
 use crate::kernel::futex::{FutexKey, FutexTable, MAX_FUTEX_WAITERS};
 use crate::kernel::ipc::{Message, MessagePayload, MessageQueue, MessageQueueError};
@@ -2435,7 +2435,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                         .and_then(|entry| *entry)
                         .map(|eventfd| if eventfd.counter > 0 { 8 } else { 0 })
                         .ok_or(KernelError::InvalidArgument)?,
-                    DescriptorObject::Device(_) | DescriptorObject::Socket(_) => 0,
+                    DescriptorObject::Device(_)
+                    | DescriptorObject::Socket(_)
+                    | DescriptorObject::Console(_) => 0,
                 };
                 unsafe { out.write(available) };
                 Ok(0)
@@ -3267,7 +3269,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             DescriptorObject::Device(handle) => self
                 .device_read(context.caller, handle.id(), buffer)
                 .map(|read| read as u64),
-            DescriptorObject::Socket(_) => Err(KernelError::InvalidArgument),
+            DescriptorObject::Socket(_) | DescriptorObject::Console(_) => {
+                Err(KernelError::InvalidArgument)
+            }
         }
     }
 
@@ -3327,6 +3331,10 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             DescriptorObject::Device(handle) => self
                 .device_write(context.caller, handle.id(), data)
                 .map(|written| written as u64),
+            DescriptorObject::Console(console) => {
+                self.write_console_descriptor(console, data);
+                Ok(data.len() as u64)
+            }
             DescriptorObject::Socket(_) => Err(KernelError::InvalidArgument),
         }
     }
@@ -4176,6 +4184,67 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .map_err(map_process_file_table_error)
     }
 
+    fn ensure_process_console_descriptors(
+        &mut self,
+        files: &mut crate::kernel::process::ProcessFileTable<MAX_OPEN_FILES>,
+    ) -> KernelResult<()> {
+        self.ensure_console_descriptor(files, 1, ConsoleDescriptor::Stdout)?;
+        self.ensure_console_descriptor(files, 2, ConsoleDescriptor::Stderr)
+    }
+
+    fn ensure_console_descriptor(
+        &mut self,
+        files: &mut crate::kernel::process::ProcessFileTable<MAX_OPEN_FILES>,
+        fd: usize,
+        console: ConsoleDescriptor,
+    ) -> KernelResult<()> {
+        if files.get(fd).is_ok() {
+            return Ok(());
+        }
+        let description = self
+            .open_files
+            .insert_object(DescriptorObject::Console(console))
+            .map_err(map_file_table_error)?;
+        match files.duplicate_to(fd, description, DescriptorFlags::EMPTY) {
+            Ok(None) => Ok(()),
+            Ok(Some(previous)) => {
+                let _ = self.close_open_description(previous.description());
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.close_open_description(description);
+                Err(map_process_file_table_error(error))
+            }
+        }
+    }
+
+    fn write_console_descriptor(&self, _console: ConsoleDescriptor, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        let mut start = 0usize;
+        let mut idx = 0usize;
+        while idx < data.len() {
+            if data[idx].is_ascii() {
+                idx += 1;
+                continue;
+            }
+            if start < idx {
+                if let Ok(text) = core::str::from_utf8(&data[start..idx]) {
+                    crate::arch::x86_64::early_console::write_fmt(format_args!("{}", text));
+                }
+            }
+            crate::arch::x86_64::early_console::write_fmt(format_args!("�"));
+            idx += 1;
+            start = idx;
+        }
+        if start < data.len() {
+            if let Ok(text) = core::str::from_utf8(&data[start..]) {
+                crate::arch::x86_64::early_console::write_fmt(format_args!("{}", text));
+            }
+        }
+    }
+
     fn inherit_process_file_table(
         &mut self,
         parent: ProcessId,
@@ -4241,7 +4310,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 }
                 DescriptorObject::Pipe(endpoint) => self.release_pipe_endpoint(endpoint),
                 DescriptorObject::EventFd(id) => self.release_eventfd(id),
-                DescriptorObject::Device(_) | DescriptorObject::Socket(_) => {}
+                DescriptorObject::Device(_)
+                | DescriptorObject::Socket(_)
+                | DescriptorObject::Console(_) => {}
             }
         }
         Ok(())
@@ -4399,7 +4470,9 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                     None => revents |= POLLNVAL,
                 }
             }
-            DescriptorObject::Device(_) | DescriptorObject::Socket(_) => {
+            DescriptorObject::Device(_)
+            | DescriptorObject::Socket(_)
+            | DescriptorObject::Console(_) => {
                 if events & (POLLIN | POLLPRI) != 0 {
                     revents |= events & (POLLIN | POLLPRI);
                 }
@@ -5563,6 +5636,87 @@ mod tests {
             idx += 1;
         }
         saw_thread
+    }
+
+    #[test]
+    fn syscall_write_stdout_console_descriptor_accepts_bytes() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let bytes = b"stdout-console-test\n";
+
+        assert_eq!(
+            kernel
+                .handle_syscall(
+                    SyscallNumber::Write.raw(),
+                    SyscallContext::new(
+                        pid,
+                        None,
+                        [1, bytes.as_ptr() as u64, bytes.len() as u64, 0, 0, 0]
+                    ),
+                )
+                .unwrap(),
+            bytes.len() as u64
+        );
+    }
+
+    #[test]
+    fn syscall_write_stderr_console_descriptor_accepts_bytes() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let bytes = b"stderr-console-test\n";
+
+        assert_eq!(
+            kernel
+                .handle_syscall(
+                    SyscallNumber::Write.raw(),
+                    SyscallContext::new(
+                        pid,
+                        None,
+                        [2, bytes.as_ptr() as u64, bytes.len() as u64, 0, 0, 0]
+                    ),
+                )
+                .unwrap(),
+            bytes.len() as u64
+        );
+    }
+
+    #[test]
+    fn syscall_write_invalid_fd_returns_bad_file_descriptor() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let bytes = b"invalid-fd";
+
+        let error = kernel
+            .handle_syscall(
+                SyscallNumber::Write.raw(),
+                SyscallContext::new(
+                    pid,
+                    None,
+                    [99, bytes.as_ptr() as u64, bytes.len() as u64, 0, 0, 0],
+                ),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            syscall_error_code(error),
+            SyscallErrorCode::BadFileDescriptor
+        );
+    }
+
+    #[test]
+    fn syscall_write_zero_length_console_write_returns_zero() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+
+        assert_eq!(
+            kernel
+                .handle_syscall(
+                    SyscallNumber::Write.raw(),
+                    SyscallContext::new(pid, None, [1, 0, 0, 0, 0, 0]),
+                )
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

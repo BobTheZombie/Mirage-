@@ -362,6 +362,10 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
                 }
             }
         }
+        if let Err(error) = self.ensure_process_console_descriptors(&mut pcb.files) {
+            self.release_process_file_table(&mut pcb.files);
+            return Err(error);
+        }
 
         self.security.register_task(pid, creds).map_err(|err| {
             self.release_process_file_table(&mut pcb.files);
@@ -446,6 +450,10 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
             ProcessControlBlock::new(pid, context.rip, request.priority, Some(request.caller));
         pcb.update_credentials(creds);
         pcb.files = self.inherit_process_file_table(request.caller)?;
+        if let Err(error) = self.ensure_process_console_descriptors(&mut pcb.files) {
+            self.release_process_file_table(&mut pcb.files);
+            return Err(error);
+        }
         pcb.process_group = parent_process_group;
         pcb.session = parent_session;
         if request.shares_signal_handlers() {
