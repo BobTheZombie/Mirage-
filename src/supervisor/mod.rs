@@ -292,6 +292,18 @@ impl SupervisorMtssPriorityRequest {
 /// Keep recovery policy here in the supervisor; keep runnable-state, queue, and
 /// scheduling mechanics behind MTSS/kernel integration. In particular,
 /// supervisor code must not inspect or mutate MTSS run queues directly.
+
+/// Supervisor-owned policy gate for replacing a process image with exec.
+///
+/// The kernel prepares and validates the executable image, but the decision to
+/// authorize the image replacement remains supervisor policy.
+pub trait SupervisorExecPolicy {
+    fn supervisor_authorize_exec(
+        &self,
+        request: &crate::kernel::process::ExecRequest,
+    ) -> Result<(), KernelError>;
+}
+
 pub trait SupervisorMtssBoundary {
     fn mtss_spawn_task(&mut self, request: SpawnTaskRequest) -> Result<ProcessId, KernelError>;
     fn mtss_contain_task(&mut self, task: ProcessId) -> Result<(), KernelError>;

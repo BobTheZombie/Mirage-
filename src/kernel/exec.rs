@@ -12,6 +12,7 @@ use crate::kernel::process::{
 use crate::kernel::thread::{CpuContext, ThreadControlBlock, ThreadId};
 use crate::kernel::{memory, Kernel, KernelError, KernelResult};
 use crate::subkernel::Credentials;
+use crate::supervisor::SupervisorExecPolicy;
 
 /// Linux-compatible clone bits that Mirage currently models.
 pub const CLONE_VM: u64 = 0x0000_0100;
@@ -98,6 +99,14 @@ impl CloneTaskRequest {
 
     const fn is_thread_group_clone(self) -> bool {
         (self.flags & CLONE_THREAD) != 0
+    }
+}
+
+impl<const NPROC: usize, const MSG_DEPTH: usize> SupervisorExecPolicy for Kernel<NPROC, MSG_DEPTH> {
+    fn supervisor_authorize_exec(&self, request: &ExecRequest) -> KernelResult<()> {
+        self.security
+            .authorize_exec(request)
+            .map_err(KernelError::SecurityViolation)
     }
 }
 
@@ -193,7 +202,7 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
         request: ExecRequest,
         current_thread: Option<ThreadId>,
     ) -> KernelResult<()> {
-        self.authorize_image_replacement(&request)?;
+        self.supervisor_authorize_exec(&request)?;
         let closed = self.process_files_mut(request.caller)?.close_on_exec();
         self.release_description_ids(&closed);
         let old_root = self.process_table[self.locate_process(request.caller)?]
@@ -304,12 +313,6 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
     ) -> KernelResult<()> {
         self.security
             .authorize_spawn(parent, requested)
-            .map_err(KernelError::SecurityViolation)
-    }
-
-    fn authorize_image_replacement(&self, request: &ExecRequest) -> KernelResult<()> {
-        self.security
-            .authorize_exec(request)
             .map_err(KernelError::SecurityViolation)
     }
 
