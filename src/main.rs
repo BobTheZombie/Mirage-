@@ -7,6 +7,8 @@ extern crate mirage;
 use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
+use mirage::boot::pid1_retry::{decide_pid1_handoff, Pid1HandoffDecision, RetryReadiness};
+#[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
     boot_phase_failed, boot_phase_found, boot_phase_ok, boot_phase_online, boot_phase_pending,
     boot_phase_running, boot_phase_skipped, boot_phase_start, boot_phase_stub,
@@ -124,6 +126,24 @@ impl BootRuntimeDeps {
             Some(blocker) => blocker,
             None => "PID1 handoff allowed",
         }
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+fn pid1_retry_readiness(deps: &BootRuntimeDeps) -> RetryReadiness {
+    RetryReadiness {
+        rootfs_online: deps.root_fs_online,
+        supervisor_online: deps.supervisor_online,
+        boot_runtime_available: deps.spider_rt_available,
+        spider_rs_available: deps.spider_rt_available,
+        mtss_core_ready: deps.mtss.core_ready,
+        mtss_scheduler_ready: deps.mtss.scheduler_ready,
+        mtss_idle_ready: deps.mtss.idle_ready,
+        mtss_task_api_ready: deps.mtss.task_creation_api_ready,
+        mtss_mark_runnable_ready: deps.mtss.mark_runnable_api_ready,
+        mtss_preemption_ready: deps.mtss.preemption_ready,
+        require_preemption_for_userspace: deps.mtss.require_preemption_for_userspace,
+        mtss_failed: deps.mtss.failed,
     }
 }
 
@@ -271,7 +291,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
 }
 
 #[cfg(not(feature = "emergency-boot"))]
-fn continue_after_mtss_online<const NPROC: usize, const MSG_DEPTH: usize>(
+fn maybe_retry_pid1_handoff_after_mtss_change<const NPROC: usize, const MSG_DEPTH: usize>(
     deps: &mut BootRuntimeDeps,
     supervisor: &Supervisor,
     kernel: &mut Kernel<NPROC, MSG_DEPTH>,
@@ -283,6 +303,27 @@ fn continue_after_mtss_online<const NPROC: usize, const MSG_DEPTH: usize>(
     }
 
     deps.root_fs_resolved = true;
+    let handoff_decision = decide_pid1_handoff(pid1_retry_readiness(deps));
+    match handoff_decision {
+        Pid1HandoffDecision::AllowedCooperative | Pid1HandoffDecision::AllowedPreemptive => {
+            deps.userspace_launch_deferred = false;
+            mirage::kprintln!("{}", handoff_decision.status_message());
+        }
+        Pid1HandoffDecision::Pending(reason) => {
+            deps.userspace_launch_deferred = true;
+            mirage::kprintln!("{}", handoff_decision.status_message());
+            if reason != "root FS not online" {
+                boot_phase_skipped(BootPhase::UserspaceLoader, reason);
+                boot_phase_stub(BootPhase::Userspace, reason);
+                boot_phase_stub(BootPhase::SystemDispatcher, reason);
+                mirage::kprintln!("USERSPACE LOADER [SKIPPED: {}]", reason);
+                mirage::kprintln!("SYSTEM DISPATCHER [PENDING: {}]", reason);
+                return BootContinueResult::DispatcherPending(reason);
+            }
+        }
+        Pid1HandoffDecision::Fatal(reason) => return BootContinueResult::Fatal(reason),
+    }
+
     if !deps.root_fs_online {
         boot_phase_skipped(BootPhase::UserspaceLoader, "rootfs unavailable");
         boot_phase_skipped(BootPhase::SpiderRs, "rootfs unavailable");
@@ -479,15 +520,9 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
 
-            boot_phase_stub(
-                BootPhase::Userspace,
-                "PID1 handoff pending: waiting for MTSS online",
-            );
-            boot_phase_stub(
-                BootPhase::SpiderRs,
-                "Spider-rs PID1 handoff pending: userspace loader not started",
-            );
-            mirage::kprintln!("PID1 handoff pending: waiting for MTSS online");
+            boot_phase_stub(BootPhase::Userspace, "PENDING: MTSS scheduler not ready");
+            boot_phase_stub(BootPhase::SpiderRs, "PENDING: MTSS scheduler not ready");
+            mirage::kprintln!("PID1 HANDOFF [PENDING: MTSS scheduler not ready]");
         }
 
         #[cfg(not(feature = "full-boot"))]
@@ -538,15 +573,9 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
 
-            boot_phase_stub(
-                BootPhase::Userspace,
-                "PID1 handoff pending: waiting for MTSS online",
-            );
-            boot_phase_stub(
-                BootPhase::SpiderRs,
-                "Spider-rs PID1 handoff pending: userspace loader not started",
-            );
-            mirage::kprintln!("PID1 handoff pending: waiting for MTSS online");
+            boot_phase_stub(BootPhase::Userspace, "PENDING: MTSS scheduler not ready");
+            boot_phase_stub(BootPhase::SpiderRs, "PENDING: MTSS scheduler not ready");
+            mirage::kprintln!("PID1 HANDOFF [PENDING: MTSS scheduler not ready]");
 
             mirage::kprintln!("loading boot manifest");
             // Temporary compiled-in manifest fixture: replace this with Limine module
@@ -678,7 +707,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         static SPIDER_BOOTRT_IMAGE: mirage::kernel::sync::SpinLock<[u8; 1024 * 1024]> =
             mirage::kernel::sync::SpinLock::new([0; 1024 * 1024]);
         let mut spider_image = SPIDER_BOOTRT_IMAGE.lock();
-        let continuation = continue_after_mtss_online(
+        let continuation = maybe_retry_pid1_handoff_after_mtss_change(
             &mut boot_deps,
             &supervisor,
             &mut kernel,
