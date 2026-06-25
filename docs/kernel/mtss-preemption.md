@@ -53,6 +53,12 @@ Before restoring a userspace frame, the backend sanitizes the return frame:
 
 This is deliberately simple FIFO round-robin behavior for the early architecture skeleton.
 
+## Relationship to MTSS readiness
+
+Preemption readiness is the final gate for `MTSS ONLINE`. Core and scheduler readiness can exist before this document's full hardware path is proven; that earlier state is degraded/cooperative MTSS, not online MTSS. Degraded/cooperative MTSS may admit PID1 runnable only when `require_preemption_for_userspace` is `false` and all PID1 preflight, Supervisor, idle, scheduler, and API readiness checks are valid.
+
+When `require_preemption_for_userspace` is `true`, a boot attempt that reaches cooperative readiness but lacks this preemption path must report `PID1 HANDOFF [PENDING: policy requires preemption before userspace]` and retry after timer/preemption state changes.
+
 ## Safety constraints
 
 * Timer interrupt handling must be bounded; no infinite polling loops.
