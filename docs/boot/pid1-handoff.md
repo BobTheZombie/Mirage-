@@ -42,3 +42,7 @@ The current documented milestone supports honest PID1 discovery, ELF validation,
 ## Failure handling
 
 Failures must be exact and typed: RuntimeVfs unavailable, missing Spider-rs, unsupported ELF, invalid PT_LOAD mapping, stack preflight failure, Supervisor denial, MTSS spawn/admission failure, dispatcher unavailable, or missing user-mode transition. A missing `/spider-rt/sbin/spider-rs` or `/spider-rt/sbin/spider-rsd` is a build failure.
+
+## Zinnia audit follow-up
+
+The Zinnia reference audit highlighted that PID1 launch should be treated as a strict sequence of validated artifacts rather than a best-effort jump. Mirage now documents and checks an additional ELF preflight invariant: `PT_LOAD` page mappings for Spider-rs must not overlap. The initial userspace stack metadata also names the real mounted PID1 path, `/spider-rt/sbin/spider-rs`, so diagnostics and future argv construction match the boot contract.

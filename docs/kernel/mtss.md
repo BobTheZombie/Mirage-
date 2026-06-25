@@ -77,3 +77,7 @@ See also:
 * [`mtss-process-lifecycle.md`](mtss-process-lifecycle.md)
 * [`../boot/pid1-handoff.md`](../boot/pid1-handoff.md)
 * [`../audits/mtss-production-audit.md`](../audits/mtss-production-audit.md)
+
+## External scheduler references
+
+The Zinnia audit reinforced Mirage's existing MTSS boundary: useful scheduler ideas are explicit state transitions, idle task fallback, runnable queues, preemption requests, and reaping/accounting separation. Mirage reimplements these ideas only inside MTSS-owned code. The lower kernel still owns timer interrupt delivery and CPU context mechanics, and the Supervisor still owns launch/recovery policy.

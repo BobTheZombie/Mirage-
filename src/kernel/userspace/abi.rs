@@ -2,7 +2,7 @@
 
 use super::memory::VirtAddr;
 
-pub const SPIDER_INIT_PATH: &str = "/sbin/spider-rs";
+pub const SPIDER_INIT_PATH: &str = "/spider-rt/sbin/spider-rs";
 pub const INITIAL_STACK_WORDS: usize = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +36,9 @@ pub fn build_initial_stack_layout(
     }
     let argv0 = stack_top.0 - string_bytes as u64;
     let sp = (argv0 - words_bytes as u64) & !0xf;
+    if sp < stack_bottom.0 || argv0 < stack_bottom.0 {
+        return Err(StackLayoutError::StackTooSmall);
+    }
     Ok(InitialStackLayout {
         argc: 1,
         argv0_ptr: VirtAddr(argv0),
