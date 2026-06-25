@@ -291,10 +291,10 @@ impl<const NPROC: usize, const MSG_DEPTH: usize> Kernel<NPROC, MSG_DEPTH> {
         &mut self,
         parent: ProcessId,
         selector: i64,
-        status_out: *mut i32,
+        status_ptr: u64,
         options: u64,
     ) -> KernelResult<u64> {
-        self.wait_for_child(parent, selector, status_out, options)
+        self.wait_for_child(parent, selector, status_ptr, options)
     }
 
     fn authorize_task_creation(
