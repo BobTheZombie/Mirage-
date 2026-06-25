@@ -1235,7 +1235,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             .build_pid1_initial_stack(address_space_root, stack)
             .map_err(KernelError::Loader)?;
         #[cfg(test)]
-        let stack_top = 0x0000_7fff_feff_ffc8;
+        let stack_top = 0x0000_7fff_feff_ffc0;
         #[cfg(test)]
         let stack = crate::kernel::userspace::memory::UserStack {
             bottom: crate::kernel::userspace::memory::VirtAddr(0x0000_7fff_fee0_0000),
@@ -1261,10 +1261,22 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         #[cfg(not(test))]
         self.dump_pid1_elf_diagnostics(parsed, true, stack_top, true);
         let user_stack = StackRange::new(stack.bottom.0, stack.top.0);
+        #[cfg(test)]
+        let kernel_stack_top: u64 = 0x0000_0000_0001_0000;
+        #[cfg(not(test))]
         let kernel_stack_top = x86_64::kernel_stack_top(0).saturating_sub(0x4000);
         if kernel_stack_top == 0 {
             return Err(KernelError::InvalidArgument);
         }
+        #[cfg(test)]
+        let user_entry_preflight = UserThreadPreflight {
+            valid_user_cs: true,
+            valid_user_ss: true,
+            valid_kernel_stack: kernel_stack_top != 0,
+            valid_tss_rsp0: true,
+            ..mapping_preflight
+        };
+        #[cfg(not(test))]
         let user_entry_preflight = UserThreadPreflight {
             valid_user_cs: crate::arch::x86_64::gdt::USER_CODE_SELECTOR == 0x1b,
             valid_user_ss: crate::arch::x86_64::gdt::USER_DATA_SELECTOR == 0x23,

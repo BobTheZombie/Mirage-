@@ -38,6 +38,7 @@ pub enum LoadError {
     UnsupportedMachine,
     BadProgramHeaderTable,
     BadLoadSegment,
+    OverlappingLoadSegments,
     NoLoadSegments,
     EntryNotMapped,
     MapSegmentFailed,
@@ -172,6 +173,7 @@ pub fn parse_elf64(image: &[u8]) -> Result<ParsedElf, LoadError> {
     if count == 0 {
         return Err(LoadError::NoLoadSegments);
     }
+    reject_overlapping_load_segments(&segments, count)?;
     Ok(ParsedElf {
         entry,
         segments,
@@ -199,6 +201,32 @@ pub const fn segment_mapping(
 pub const fn segment_page_bounds(vaddr: VirtAddr, mem_size: usize) -> (VirtAddr, usize) {
     let mapping = segment_mapping(vaddr, 0, mem_size);
     (mapping.map_start, mapping.map_len)
+}
+
+fn reject_overlapping_load_segments(
+    segments: &[LoadSegment; 8],
+    count: usize,
+) -> Result<(), LoadError> {
+    let mut i = 0usize;
+    while i < count {
+        let (a_start, a_len) = segment_page_bounds(segments[i].vaddr, segments[i].mem_size);
+        let Some(a_end) = a_start.0.checked_add(a_len as u64) else {
+            return Err(LoadError::BadLoadSegment);
+        };
+        let mut j = i + 1;
+        while j < count {
+            let (b_start, b_len) = segment_page_bounds(segments[j].vaddr, segments[j].mem_size);
+            let Some(b_end) = b_start.0.checked_add(b_len as u64) else {
+                return Err(LoadError::BadLoadSegment);
+            };
+            if a_start.0 < b_end && b_start.0 < a_end {
+                return Err(LoadError::OverlappingLoadSegments);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 const fn contains(start: u64, len: usize, value: u64) -> bool {
@@ -271,6 +299,20 @@ mod tests {
         assert_eq!(parsed.segment_count, 1);
         assert_eq!(parsed.segments[0].file_offset, 0);
         assert_eq!(parsed.segments[0].mem_size, 0x2000);
+    }
+
+    #[test]
+    fn parser_rejects_overlapping_load_segments() {
+        let mut image = [0u8; 184];
+        image[..128].copy_from_slice(&minimal_elf());
+        image[56..58].copy_from_slice(&2u16.to_le_bytes());
+        image[120..124].copy_from_slice(&PT_LOAD.to_le_bytes());
+        image[124..128].copy_from_slice(&6u32.to_le_bytes());
+        image[128..136].copy_from_slice(&0u64.to_le_bytes());
+        image[136..144].copy_from_slice(&0x401000u64.to_le_bytes());
+        image[152..160].copy_from_slice(&8u64.to_le_bytes());
+        image[160..168].copy_from_slice(&0x1000u64.to_le_bytes());
+        assert_eq!(parse_elf64(&image), Err(LoadError::OverlappingLoadSegments));
     }
 
     #[test]

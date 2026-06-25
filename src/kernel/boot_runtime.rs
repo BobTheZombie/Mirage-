@@ -73,13 +73,7 @@ pub struct BootRuntimeRamFs {
 impl BootRuntimeRamFs {
     pub fn mount(image: &'static [u8]) -> Result<(BootRuntime, Self), BlockError> {
         let manifest = parse_manifest(image)?;
-        let entry = manifest.entry_path();
-        if find_file_in_manifest(&manifest, entry).is_none()
-            || find_file_in_manifest(&manifest, BOOTRT_MOUNTED_ENTRY).is_none()
-            || find_file_in_manifest(&manifest, BOOTRT_MOUNTED_DISPATCHER).is_none()
-        {
-            return Err(BlockError::NotFound);
-        }
+        validate_required_runtime_layout(&manifest)?;
         Ok((
             BootRuntime {
                 image_start: PhysAddr(image.as_ptr() as u64),
@@ -232,6 +226,22 @@ pub fn parse_manifest(image: &[u8]) -> Result<BootRuntimeManifest, BlockError> {
     Ok(manifest)
 }
 
+pub fn validate_required_runtime_layout(manifest: &BootRuntimeManifest) -> Result<(), BlockError> {
+    let entry = manifest.entry_path();
+    let Some(entry_file) = find_file_in_manifest(manifest, entry) else {
+        return Err(BlockError::NotFound);
+    };
+    if !entry_file.entry {
+        return Err(BlockError::InvalidSignature);
+    }
+    if find_file_in_manifest(manifest, BOOTRT_MOUNTED_ENTRY).is_none()
+        || find_file_in_manifest(manifest, BOOTRT_MOUNTED_DISPATCHER).is_none()
+    {
+        return Err(BlockError::NotFound);
+    }
+    Ok(())
+}
+
 fn find_file_in_manifest(manifest: &BootRuntimeManifest, path: &str) -> Option<BootRuntimeFile> {
     let normalized = normalize_bootrt_path(path);
     for file in manifest.files.iter().flatten() {
@@ -281,10 +291,10 @@ mod tests {
     extern crate std;
     use std::boxed::Box;
 
-    fn image() -> [u8; 512] {
-        let mut img = [0u8; 512];
+    fn image() -> [u8; 1024] {
+        let mut img = [0u8; 1024];
         img[0..8].copy_from_slice(BOOTRT_MAGIC);
-        img[8..12].copy_from_slice(&2u32.to_le_bytes());
+        img[8..12].copy_from_slice(&3u32.to_le_bytes());
         img[12..16].copy_from_slice(&128u32.to_le_bytes());
         img[16] = 19;
         img[17] = 3;
@@ -292,12 +302,13 @@ mod tests {
         img[20..39].copy_from_slice(b"Mirage Boot Runtime");
         img[52..55].copy_from_slice(b"0.1");
         img[64..64 + BOOTRT_ENTRY.len()].copy_from_slice(BOOTRT_ENTRY.as_bytes());
-        add_file(&mut img, 0, "/sbin/spider-rs", 384, b"ELF-SPIDER", true);
+        add_file(&mut img, 0, "/sbin/spider-rs", 640, b"ELF-SPIDER", true);
+        add_file(&mut img, 1, "/sbin/spider-rsd", 680, b"ELF-DISPATCH", false);
         add_file(
             &mut img,
-            1,
+            2,
             "/etc/spider/default.target",
-            410,
+            720,
             b"basic.target",
             false,
         );
@@ -305,7 +316,7 @@ mod tests {
     }
 
     fn add_file(
-        img: &mut [u8; 512],
+        img: &mut [u8; 1024],
         idx: usize,
         path: &str,
         offset: usize,
@@ -326,9 +337,20 @@ mod tests {
     fn boot_runtime_manifest_parsing_and_spider_lookup() {
         let img = image();
         let manifest = parse_manifest(&img).unwrap();
-        assert_eq!(manifest.file_count, 2);
+        assert_eq!(manifest.file_count, 3);
         assert_eq!(manifest.entry_path(), BOOTRT_ENTRY);
         assert!(find_file_in_manifest(&manifest, BOOTRT_MOUNTED_ENTRY).is_some());
+        assert_eq!(validate_required_runtime_layout(&manifest), Ok(()));
+    }
+
+    #[test]
+    fn boot_runtime_requires_dispatcher() {
+        let mut img = image();
+        img[128 + BOOTRT_ENTRY_SIZE + 16] = b'x';
+        assert_eq!(
+            BootRuntimeRamFs::mount(Box::leak(Box::new(img))),
+            Err(BlockError::NotFound)
+        );
     }
 
     #[test]

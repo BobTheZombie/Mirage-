@@ -685,3 +685,14 @@ Required rootfs userland:
 8. Verbose hardware diagnostics go to serial by default; framebuffer milestone UI stays concise and live.
 9. Real hardware quirks must be documented with source/provenance.
 10. Do not open PRs for driver bring-up unless QEMU/VirtualBox boot still works and failures are explicit.
+
+---
+
+## External OS Reference Contract
+
+1. External OS repositories may be studied for architecture and behavior.
+2. Do not copy code without license review and explicit documentation.
+3. Mirage architecture must be preserved: lower kernel, MTSS, Supervisor, spider-rs, spider-rsd.
+4. External references should produce focused Mirage-native patches, not broad rewrites.
+5. Any external-reference audit must document inspected files, learned concepts, licensing, and Mirage changes.
+6. Do not chase POSIX/desktop compatibility before MTSS and PID1 handoff work in QEMU.
