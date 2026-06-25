@@ -170,6 +170,21 @@ The supervisor is where Mirage becomes more than a kernel.
 
 ---
 
+## Mirage MTSS Readiness and PID1 Handoff Contract
+
+1. MTSS ONLINE means full preemptive scheduling is available.
+2. MTSS DEGRADED means cooperative scheduling may be available while timer/preemption are pending.
+3. Do not mark MTSS ONLINE if timer/preemption are not working.
+4. PID1 handoff may proceed in DEGRADED cooperative mode if MTSS core and scheduler are ready.
+5. PID1 handoff must not wait forever for full MTSS ONLINE unless an explicit policy requires preemption before userspace.
+6. Every MTSS state transition must retry or re-evaluate PID1 handoff eligibility.
+7. Stale PID1 pending state must not block later handoff.
+8. PID1 may be marked RUNNABLE only after MTSS accepts a real task/thread into a runnable queue.
+9. Status messages must distinguish scheduler-ready, degraded, full online, and failed states.
+10. No fake ONLINE/RUNNABLE/RUNNING statuses.
+
+---
+
 ## Driver Model
 
 Mirage supports three driver execution models.
