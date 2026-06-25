@@ -1,20 +1,12 @@
 //! Mirage userspace syscall shim used by the no_std Spider-rs build.
 //!
-//! Keep these numbers synchronized with `src/kernel/syscall.rs`.  The older
-//! experimental Spider ABI used small numbers 1-4; the kernel table now exposes
-//! GetPid=0, Spawn=1, OpenAt=16, Close=17, Read=18, Write=19,
-//! Getdents64=25, Exit=102, Wait4=103, and Yield=244.
+//! Syscall numbers are imported from the shared `mirage-abi` crate so the
+//! no_std Spider runtime and kernel consume the same append-only ABI table.
 
-pub const SYS_GETPID: usize = 0;
-pub const SYS_WRITE: usize = 19;
-pub const SYS_EXIT: usize = 102;
-pub const SYS_SPAWN: usize = 1;
-pub const SYS_WAIT: usize = 103;
-pub const SYS_OPENAT: usize = 16;
-pub const SYS_CLOSE: usize = 17;
-pub const SYS_READ: usize = 18;
-pub const SYS_GETDENTS64: usize = 25;
-pub const SYS_YIELD: usize = 244;
+pub use mirage_abi::syscall::{
+    SYS_CLOSE, SYS_EXIT, SYS_GETDENTS64, SYS_GETPID, SYS_OPENAT, SYS_READ, SYS_SPAWN, SYS_WAIT,
+    SYS_WRITE, SYS_YIELD,
+};
 
 #[inline(always)]
 pub unsafe fn syscall0(number: usize) -> isize {
@@ -207,5 +199,25 @@ pub fn read_dir(fd: usize, buffer: &mut [u8]) -> Result<usize, isize> {
         Ok(ret as usize)
     } else {
         Err(ret)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mirage_abi::syscall as abi;
+
+    #[test]
+    fn userspace_syscall_constants_match_shared_kernel_abi() {
+        assert_eq!(SYS_GETPID as u64, abi::MIRAGE_SYSCALL_GETPID);
+        assert_eq!(SYS_SPAWN as u64, abi::MIRAGE_SYSCALL_SPAWN);
+        assert_eq!(SYS_OPENAT as u64, abi::MIRAGE_SYSCALL_OPENAT);
+        assert_eq!(SYS_CLOSE as u64, abi::MIRAGE_SYSCALL_CLOSE);
+        assert_eq!(SYS_READ as u64, abi::MIRAGE_SYSCALL_READ);
+        assert_eq!(SYS_WRITE as u64, abi::MIRAGE_SYSCALL_WRITE);
+        assert_eq!(SYS_GETDENTS64 as u64, abi::MIRAGE_SYSCALL_GETDENTS64);
+        assert_eq!(SYS_EXIT as u64, abi::MIRAGE_SYSCALL_EXIT);
+        assert_eq!(SYS_WAIT as u64, abi::MIRAGE_SYSCALL_WAIT4);
+        assert_eq!(SYS_YIELD as u64, abi::MIRAGE_SYSCALL_YIELD);
     }
 }
