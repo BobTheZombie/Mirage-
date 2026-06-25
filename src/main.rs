@@ -57,6 +57,17 @@ impl MtssReadiness {
         self.pid1_handoff_blocker().is_none()
     }
 
+    const fn pid1_launch_mode(&self) -> Option<mirage::supervisor::pid1::Pid1LaunchMode> {
+        if !self.pid1_handoff_allowed() {
+            return None;
+        }
+        if self.preemption_ready {
+            Some(mirage::supervisor::pid1::Pid1LaunchMode::Preemptive)
+        } else {
+            Some(mirage::supervisor::pid1::Pid1LaunchMode::Cooperative)
+        }
+    }
+
     const fn pid1_handoff_blocker(&self) -> Option<&'static str> {
         if self.failed {
             return Some("MTSS failed");
@@ -203,7 +214,9 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
             root_fs_online: deps.root_fs_online,
             runtime_vfs_mounted: boot_runtime.is_some(),
             spider_binary_present: len > 0,
-            mtss_online: deps.pid1_handoff_allowed(),
+            mtss_pid1_handoff_allowed: deps.pid1_handoff_allowed(),
+            mtss_launch_mode: deps.mtss.pid1_launch_mode(),
+            mtss_blocker: deps.mtss.pid1_handoff_blocker(),
             userspace_loader_ready: deps.userspace_loader_started,
         },
     );
