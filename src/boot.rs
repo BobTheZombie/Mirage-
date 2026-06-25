@@ -283,3 +283,135 @@ pub struct LimineBootSnapshot {
     pub executable_address: Option<&'static ExecutableAddressResponse>,
     pub modules: Option<&'static ModuleResponse>,
 }
+
+/// Host-testable PID1 handoff retry policy shared by the boot orchestrator.
+pub mod pid1_retry {
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct RetryReadiness {
+        pub rootfs_online: bool,
+        pub supervisor_online: bool,
+        pub boot_runtime_available: bool,
+        pub spider_rs_available: bool,
+        pub mtss_core_ready: bool,
+        pub mtss_scheduler_ready: bool,
+        pub mtss_idle_ready: bool,
+        pub mtss_task_api_ready: bool,
+        pub mtss_mark_runnable_ready: bool,
+        pub mtss_preemption_ready: bool,
+        pub require_preemption_for_userspace: bool,
+        pub mtss_failed: bool,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Pid1HandoffDecision {
+        Pending(&'static str),
+        AllowedCooperative,
+        AllowedPreemptive,
+        Fatal(&'static str),
+    }
+
+    impl Pid1HandoffDecision {
+        pub fn status_message(self) -> &'static str {
+            match self {
+                Self::Pending("MTSS scheduler not ready") => {
+                    "PID1 HANDOFF [PENDING: MTSS scheduler not ready]"
+                }
+                Self::Pending("policy requires preemption before userspace") => {
+                    "PID1 HANDOFF [PENDING: policy requires preemption before userspace]"
+                }
+                Self::AllowedCooperative => "PID1 HANDOFF [ALLOWED: cooperative MTSS]",
+                Self::AllowedPreemptive => "PID1 HANDOFF [ALLOWED: preemptive MTSS]",
+                Self::Pending(_) => "PID1 HANDOFF [PENDING]",
+                Self::Fatal(_) => "PID1 HANDOFF [FAILED]",
+            }
+        }
+
+        pub const fn is_allowed(self) -> bool {
+            matches!(self, Self::AllowedCooperative | Self::AllowedPreemptive)
+        }
+    }
+
+    pub const fn decide_pid1_handoff(readiness: RetryReadiness) -> Pid1HandoffDecision {
+        if readiness.mtss_failed {
+            return Pid1HandoffDecision::Fatal("MTSS failed");
+        }
+        if !readiness.rootfs_online {
+            return Pid1HandoffDecision::Pending("root FS not online");
+        }
+        if !readiness.supervisor_online {
+            return Pid1HandoffDecision::Pending("supervisor not online");
+        }
+        if !readiness.boot_runtime_available {
+            return Pid1HandoffDecision::Pending("spider runtime unavailable");
+        }
+        if !readiness.spider_rs_available {
+            return Pid1HandoffDecision::Pending("Spider-rs binary missing");
+        }
+        if !readiness.mtss_core_ready {
+            return Pid1HandoffDecision::Pending("MTSS core not ready");
+        }
+        if !readiness.mtss_scheduler_ready {
+            return Pid1HandoffDecision::Pending("MTSS scheduler not ready");
+        }
+        if !readiness.mtss_idle_ready {
+            return Pid1HandoffDecision::Pending("idle task unavailable");
+        }
+        if !readiness.mtss_task_api_ready {
+            return Pid1HandoffDecision::Pending("task creation API unavailable");
+        }
+        if !readiness.mtss_mark_runnable_ready {
+            return Pid1HandoffDecision::Pending("mark_runnable unavailable");
+        }
+        if readiness.require_preemption_for_userspace && !readiness.mtss_preemption_ready {
+            return Pid1HandoffDecision::Pending("policy requires preemption before userspace");
+        }
+        if readiness.mtss_preemption_ready {
+            Pid1HandoffDecision::AllowedPreemptive
+        } else {
+            Pid1HandoffDecision::AllowedCooperative
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn retry_clears_stale_mtss_pending_after_degraded_scheduler_ready() {
+            let mut readiness = RetryReadiness {
+                rootfs_online: true,
+                supervisor_online: true,
+                boot_runtime_available: true,
+                spider_rs_available: true,
+                mtss_core_ready: true,
+                mtss_idle_ready: true,
+                mtss_task_api_ready: true,
+                mtss_mark_runnable_ready: true,
+                ..RetryReadiness::default()
+            };
+
+            let initial = decide_pid1_handoff(readiness);
+            assert_eq!(
+                initial,
+                Pid1HandoffDecision::Pending("MTSS scheduler not ready")
+            );
+            assert_eq!(
+                initial.status_message(),
+                "PID1 HANDOFF [PENDING: MTSS scheduler not ready]"
+            );
+
+            readiness.mtss_scheduler_ready = true;
+            let retried = decide_pid1_handoff(readiness);
+            assert_eq!(retried, Pid1HandoffDecision::AllowedCooperative);
+            assert!(
+                retried.is_allowed(),
+                "retry should allow PID1 launch attempt"
+            );
+            assert_eq!(
+                retried.status_message(),
+                "PID1 HANDOFF [ALLOWED: cooperative MTSS]"
+            );
+            assert_ne!(retried, initial, "stale MTSS pending state must be cleared");
+        }
+    }
+}
