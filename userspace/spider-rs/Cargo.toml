@@ -22,7 +22,7 @@ bench = false
 [[bin]]
 name = "spider-rsd"
 path = "src/bin_spider_rsd.rs"
-test = false
+test = true
 bench = false
 
 [[bin]]

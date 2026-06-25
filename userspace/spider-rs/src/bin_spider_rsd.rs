@@ -4,19 +4,42 @@
 #[cfg(target_os = "none")]
 extern crate alloc;
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", test))]
+#[cfg_attr(test, allow(dead_code))]
 mod mirage_dispatcher {
+    #[cfg(target_os = "none")]
     use alloc::{
         collections::BTreeMap,
         string::{String, ToString},
         vec::Vec,
     };
+    #[cfg(target_os = "none")]
     use spider_rs::syscall;
+    #[cfg(test)]
+    mod syscall {
+        pub fn write(_fd: usize, _bytes: &[u8]) -> isize {
+            0
+        }
+        pub fn spawn(_path: &str, _argv: &[&str], _env: &[(&str, &str)]) -> Result<isize, isize> {
+            Err(-38)
+        }
+        pub fn wait(_pid: isize) -> Result<isize, isize> {
+            Err(-38)
+        }
+    }
+    #[cfg(target_os = "none")]
+    use spider_rs::graph::resolve_startup_order;
+    use spider_rs::parse_unit;
     use spider_rs::units::{LoadedUnit, RestartPolicy, UnitKind, UnitState};
-    use spider_rs::{graph::resolve_startup_order, parse_unit};
+    #[cfg(test)]
+    use std::{
+        collections::BTreeMap,
+        string::{String, ToString},
+        vec::Vec,
+    };
 
     const UNIT_DIRS: [&str; 2] = ["/etc/spider/units", "/usr/lib/spider/units"];
-    const MANIFEST: [(&str, &str); 3] = [
+    const REQUIRED_UNITS: [(&str, &str); 3] = [
         ("/etc/spider/units/default.target", "default.target"),
         ("/etc/spider/units/basic.target", "basic.target"),
         (
@@ -24,20 +47,17 @@ mod mirage_dispatcher {
             "m1-terminal.service",
         ),
     ];
-    const BUILTINS: [(&str, &str); 3] = [
-        ("basic.target", include_str!("../units/basic.target")),
-        ("default.target", include_str!("../units/default.target")),
-        (
-            "m1-terminal.service",
-            include_str!("../units/m1-terminal.service"),
-        ),
-    ];
 
+    #[cfg(target_os = "none")]
     pub fn run() -> ! {
         let mut dispatcher = Dispatcher {
             units: BTreeMap::new(),
         };
-        dispatcher.load_units();
+        if !dispatcher.load_units(&SyscallIo) {
+            loop {
+                syscall::yield_now();
+            }
+        }
         let Ok(plan) = resolve_startup_order(&dispatcher.units, "default.target") else {
             let _ = syscall::write(1, b"SYSTEM DISPATCHER [FAILED]");
             loop {
@@ -58,33 +78,36 @@ mod mirage_dispatcher {
     }
 
     impl Dispatcher {
-        fn load_units(&mut self) {
-            let mut listed_any = false;
+        fn load_units<I: DispatcherIo>(&mut self, io: &I) -> bool {
+            for (path, name) in REQUIRED_UNITS {
+                let Some(bytes) = read_file(io, path) else {
+                    report_required_unit_failure(io, path, "missing or unreadable");
+                    return false;
+                };
+                let Ok(source) = core::str::from_utf8(&bytes) else {
+                    report_required_unit_failure(io, path, "not valid UTF-8");
+                    return false;
+                };
+                if !self.insert_unit(name, source) {
+                    report_required_unit_failure(io, path, "parse failed");
+                    return false;
+                }
+            }
+
             for dir in UNIT_DIRS {
-                listed_any |= self.load_dir(dir);
+                self.load_dir(io, dir);
             }
-            if !listed_any {
-                for (path, name) in MANIFEST {
-                    if let Some(source) = read_file(path) {
-                        self.insert_unit(name, &source);
-                    }
-                }
-            }
-            for (name, source) in BUILTINS {
-                if !self.units.contains_key(name) {
-                    self.insert_unit(name, source);
-                }
-            }
+            true
         }
 
-        fn load_dir(&mut self, dir: &str) -> bool {
-            let Ok(fd) = syscall::open(dir) else {
+        fn load_dir<I: DispatcherIo>(&mut self, io: &I, dir: &str) -> bool {
+            let Ok(fd) = io.open(dir) else {
                 return false;
             };
             let mut saw_entries = false;
             let mut buffer = [0u8; 1024];
             loop {
-                let Ok(read) = syscall::read_dir(fd as usize, &mut buffer) else {
+                let Ok(read) = io.read_dir(fd as usize, &mut buffer) else {
                     break;
                 };
                 if read == 0 {
@@ -109,21 +132,27 @@ mod mirage_dispatcher {
                             path.push_str(dir);
                             path.push('/');
                             path.push_str(name);
-                            if let Some(source) = read_file(&path) {
-                                self.insert_unit(name, &source);
+                            if let Some(bytes) = read_file(io, &path) {
+                                if let Ok(source) = core::str::from_utf8(&bytes) {
+                                    self.insert_unit(name, source);
+                                }
                             }
                         }
                     }
                     offset += reclen;
                 }
             }
-            let _ = syscall::close(fd as usize);
+            let _ = io.close(fd as usize);
             saw_entries
         }
 
-        fn insert_unit(&mut self, name: &str, source: &str) {
-            if let Ok(unit) = parse_unit(name, source) {
-                self.units.insert(name.to_string(), unit);
+        fn insert_unit(&mut self, name: &str, source: &str) -> bool {
+            match parse_unit(name, source) {
+                Ok(unit) => {
+                    self.units.insert(name.to_string(), unit);
+                    true
+                }
+                Err(_) => false,
             }
         }
 
@@ -227,19 +256,57 @@ mod mirage_dispatcher {
         }
     }
 
-    fn read_file(path: &str) -> Option<String> {
-        let fd = syscall::open(path).ok()?;
-        let mut out = String::new();
+    trait DispatcherIo {
+        fn open(&self, path: &str) -> Result<isize, isize>;
+        fn read(&self, fd: usize, buffer: &mut [u8]) -> Result<usize, isize>;
+        fn read_dir(&self, fd: usize, buffer: &mut [u8]) -> Result<usize, isize>;
+        fn close(&self, fd: usize) -> Result<(), isize>;
+        fn write(&self, fd: usize, bytes: &[u8]) -> isize;
+    }
+
+    #[cfg(target_os = "none")]
+    struct SyscallIo;
+
+    #[cfg(target_os = "none")]
+    impl DispatcherIo for SyscallIo {
+        fn open(&self, path: &str) -> Result<isize, isize> {
+            syscall::open(path)
+        }
+        fn read(&self, fd: usize, buffer: &mut [u8]) -> Result<usize, isize> {
+            syscall::read(fd, buffer)
+        }
+        fn read_dir(&self, fd: usize, buffer: &mut [u8]) -> Result<usize, isize> {
+            syscall::read_dir(fd, buffer)
+        }
+        fn close(&self, fd: usize) -> Result<(), isize> {
+            syscall::close(fd)
+        }
+        fn write(&self, fd: usize, bytes: &[u8]) -> isize {
+            syscall::write(fd, bytes)
+        }
+    }
+
+    fn read_file<I: DispatcherIo>(io: &I, path: &str) -> Option<Vec<u8>> {
+        let fd = io.open(path).ok()?;
+        let mut out = Vec::new();
         let mut buffer = [0u8; 512];
         loop {
-            let read = syscall::read(fd as usize, &mut buffer).ok()?;
+            let read = io.read(fd as usize, &mut buffer).ok()?;
             if read == 0 {
                 break;
             }
-            out.push_str(core::str::from_utf8(&buffer[..read]).ok()?);
+            out.extend_from_slice(&buffer[..read]);
         }
-        let _ = syscall::close(fd as usize);
+        let _ = io.close(fd as usize);
         Some(out)
+    }
+
+    fn report_required_unit_failure<I: DispatcherIo>(io: &I, path: &str, reason: &str) {
+        let _ = io.write(1, b"SYSTEM DISPATCHER [FAILED]: required unit ");
+        let _ = io.write(1, path.as_bytes());
+        let _ = io.write(1, b" ");
+        let _ = io.write(1, reason.as_bytes());
+        let _ = io.write(1, b"\n");
     }
 
     fn split_exec(exec: &str) -> Vec<String> {
@@ -250,6 +317,128 @@ mod mirage_dispatcher {
             name.rsplit_once('.').map(|(_, s)| s),
             Some("service" | "target" | "socket" | "timer" | "mount" | "device" | "path")
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::{Cell, RefCell};
+        use std::collections::BTreeMap as StdBTreeMap;
+
+        const DEFAULT_TARGET: &[u8] = b"[Unit]\nDescription=Default userspace target\nRequires=basic.target m1-terminal.service\nAfter=basic.target\n";
+        const BASIC_TARGET: &[u8] = b"[Unit]\nDescription=Basic userspace target\n";
+        const M1_TERMINAL_SERVICE: &[u8] = b"[Unit]\nDescription=M1 Terminal\nAfter=basic.target\n\n[Service]\nExecStart=/usr/bin/m1-terminal\nRestart=no\n";
+
+        #[derive(Default)]
+        struct MockIo {
+            files: StdBTreeMap<&'static str, &'static [u8]>,
+            next_fd: Cell<isize>,
+            open_files: RefCell<StdBTreeMap<usize, (&'static [u8], usize)>>,
+            writes: RefCell<Vec<u8>>,
+            opened_paths: RefCell<Vec<String>>,
+        }
+
+        impl MockIo {
+            fn with_required_units() -> Self {
+                let mut io = Self {
+                    next_fd: Cell::new(3),
+                    ..Self::default()
+                };
+                io.files
+                    .insert("/etc/spider/units/default.target", DEFAULT_TARGET);
+                io.files
+                    .insert("/etc/spider/units/basic.target", BASIC_TARGET);
+                io.files
+                    .insert("/etc/spider/units/m1-terminal.service", M1_TERMINAL_SERVICE);
+                io
+            }
+        }
+
+        impl DispatcherIo for MockIo {
+            fn open(&self, path: &str) -> Result<isize, isize> {
+                self.opened_paths.borrow_mut().push(path.to_string());
+                let Some(bytes) = self.files.get(path).copied() else {
+                    return Err(-2);
+                };
+                let fd = self.next_fd.get();
+                self.next_fd.set(fd + 1);
+                self.open_files.borrow_mut().insert(fd as usize, (bytes, 0));
+                Ok(fd)
+            }
+
+            fn read(&self, fd: usize, buffer: &mut [u8]) -> Result<usize, isize> {
+                let mut open_files = self.open_files.borrow_mut();
+                let Some((bytes, offset)) = open_files.get_mut(&fd) else {
+                    return Err(-9);
+                };
+                let available = bytes.len().saturating_sub(*offset);
+                let len = available.min(buffer.len()).min(7);
+                buffer[..len].copy_from_slice(&bytes[*offset..*offset + len]);
+                *offset += len;
+                Ok(len)
+            }
+
+            fn read_dir(&self, _fd: usize, _buffer: &mut [u8]) -> Result<usize, isize> {
+                Ok(0)
+            }
+
+            fn close(&self, fd: usize) -> Result<(), isize> {
+                self.open_files.borrow_mut().remove(&fd);
+                Ok(())
+            }
+
+            fn write(&self, _fd: usize, bytes: &[u8]) -> isize {
+                self.writes.borrow_mut().extend_from_slice(bytes);
+                bytes.len() as isize
+            }
+        }
+
+        #[test]
+        fn loads_required_units_from_syscall_vfs_bytes() {
+            let io = MockIo::with_required_units();
+            let mut dispatcher = Dispatcher {
+                units: BTreeMap::new(),
+            };
+
+            assert!(dispatcher.load_units(&io));
+
+            assert!(dispatcher.units.contains_key("default.target"));
+            assert!(dispatcher.units.contains_key("basic.target"));
+            assert_eq!(
+                dispatcher
+                    .units
+                    .get("m1-terminal.service")
+                    .and_then(|unit| unit.service.as_ref())
+                    .map(|service| service.exec_start.as_str()),
+                Some("/usr/bin/m1-terminal")
+            );
+            let opened = io.opened_paths.borrow();
+            assert!(opened
+                .iter()
+                .any(|path| path == "/etc/spider/units/default.target"));
+            assert!(opened
+                .iter()
+                .any(|path| path == "/etc/spider/units/basic.target"));
+            assert!(opened
+                .iter()
+                .any(|path| path == "/etc/spider/units/m1-terminal.service"));
+        }
+
+        #[test]
+        fn missing_required_unit_emits_explicit_sys_write_failure() {
+            let mut io = MockIo::with_required_units();
+            io.files.remove("/etc/spider/units/basic.target");
+            let mut dispatcher = Dispatcher {
+                units: BTreeMap::new(),
+            };
+
+            assert!(!dispatcher.load_units(&io));
+
+            let message = String::from_utf8(io.writes.borrow().clone()).unwrap();
+            assert!(message.contains("SYSTEM DISPATCHER [FAILED]"));
+            assert!(message.contains("/etc/spider/units/basic.target"));
+            assert!(message.contains("missing or unreadable"));
+        }
     }
 }
 
