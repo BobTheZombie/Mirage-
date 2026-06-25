@@ -17,12 +17,20 @@ pub const SPIDER_RS_RUNTIME_PATH: &str = "/spider-rt/sbin/spider-rs";
 pub const M1_TERMINAL_PATH: &str = "/usr/bin/m1-terminal";
 pub const M1_TERMINAL_OUTPUT: &str = "Mirage M1.1 System\nhello world\n";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Pid1LaunchMode {
+    Cooperative,
+    Preemptive,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SpiderPid1Preconditions {
     pub root_fs_online: bool,
     pub runtime_vfs_mounted: bool,
     pub spider_binary_present: bool,
-    pub mtss_online: bool,
+    pub mtss_pid1_handoff_allowed: bool,
+    pub mtss_launch_mode: Option<Pid1LaunchMode>,
+    pub mtss_blocker: Option<&'static str>,
     pub userspace_loader_ready: bool,
 }
 
@@ -46,6 +54,7 @@ pub struct SpiderPid1LaunchReport {
     pub runtime_path: &'static str,
     pub authorized_by_supervisor: bool,
     pub admitted_through_mtss: bool,
+    pub mtss_launch_mode: Option<Pid1LaunchMode>,
     pub handoff_state: SpiderPid1HandoffState,
     pub dispatcher_state: SpiderDispatcherState,
     pub terminal_manifest: TerminalManifestEntry,
@@ -149,7 +158,9 @@ impl Supervisor {
                 root_fs_online: true,
                 runtime_vfs_mounted: true,
                 spider_binary_present: !image.is_empty(),
-                mtss_online: true,
+                mtss_pid1_handoff_allowed: true,
+                mtss_launch_mode: Some(Pid1LaunchMode::Preemptive),
+                mtss_blocker: None,
                 userspace_loader_ready: true,
             },
         );
@@ -182,6 +193,7 @@ impl Supervisor {
             runtime_path: SPIDER_RS_RUNTIME_PATH,
             authorized_by_supervisor: false,
             admitted_through_mtss: false,
+            mtss_launch_mode: None,
             handoff_state: SpiderPid1HandoffState::NotStarted,
             dispatcher_state: SpiderDispatcherState::Pending("Spider-rs PID1 launch incomplete"),
             terminal_manifest: TerminalManifestEntry {
@@ -208,10 +220,13 @@ impl Supervisor {
             report.launch_blocker = Some("Spider-rs binary missing");
             return report;
         }
-        if !preconditions.mtss_online {
-            report.launch_blocker = Some("MTSS not online");
+        if !preconditions.mtss_pid1_handoff_allowed {
+            report.launch_blocker = preconditions
+                .mtss_blocker
+                .or(Some("MTSS PID1 handoff unavailable"));
             return report;
         }
+        report.mtss_launch_mode = preconditions.mtss_launch_mode;
         if !preconditions.userspace_loader_ready {
             report.launch_blocker = Some("userspace loader not ready");
             return report;
@@ -334,6 +349,7 @@ mod tests {
         assert_eq!(report.runtime_path, SPIDER_RS_RUNTIME_PATH);
         assert!(report.authorized_by_supervisor);
         assert!(report.admitted_through_mtss);
+        assert_eq!(report.mtss_launch_mode, Some(Pid1LaunchMode::Preemptive));
         assert!(report.process_created);
         assert!(report.main_thread_created);
         assert!(report.entry_preflight_ok);
@@ -357,5 +373,59 @@ mod tests {
         assert_eq!(thread.task, CoreTaskId::FIRST_USERSPACE);
         assert_eq!(thread.state, ThreadState::Ready);
         assert_eq!(thread.context.rip, 0x401000);
+    }
+    #[test]
+    fn spider_pid1_handoff_accepts_cooperative_mtss_admission() {
+        let mut kernel: Kernel<16, 16> = Kernel::new();
+        kernel.bootstrap();
+        kernel.kernel_mtss_init().expect("MTSS init should succeed");
+        let supervisor = Supervisor::new();
+        let image = minimal_spider_elf();
+
+        let report = supervisor.launch_spider_rs_pid1_checked(
+            &mut kernel,
+            &image,
+            SpiderPid1Preconditions {
+                root_fs_online: true,
+                runtime_vfs_mounted: true,
+                spider_binary_present: true,
+                mtss_pid1_handoff_allowed: true,
+                mtss_launch_mode: Some(Pid1LaunchMode::Cooperative),
+                mtss_blocker: None,
+                userspace_loader_ready: true,
+            },
+        );
+
+        assert_eq!(report.blocker(), None);
+        assert_eq!(report.mtss_launch_mode, Some(Pid1LaunchMode::Cooperative));
+        assert!(report.admitted_through_mtss);
+        assert!(report.accepted_into_run_queue);
+        assert_eq!(report.handoff_state, SpiderPid1HandoffState::Runnable);
+    }
+
+    #[test]
+    fn spider_pid1_handoff_preserves_exact_mtss_blocker() {
+        let mut kernel: Kernel<16, 16> = Kernel::new();
+        let supervisor = Supervisor::new();
+        let image = minimal_spider_elf();
+
+        let report = supervisor.launch_spider_rs_pid1_checked(
+            &mut kernel,
+            &image,
+            SpiderPid1Preconditions {
+                root_fs_online: true,
+                runtime_vfs_mounted: true,
+                spider_binary_present: true,
+                mtss_pid1_handoff_allowed: false,
+                mtss_launch_mode: None,
+                mtss_blocker: Some("MTSS scheduler not ready"),
+                userspace_loader_ready: true,
+            },
+        );
+
+        assert_eq!(report.blocker(), Some("MTSS scheduler not ready"));
+        assert_eq!(report.mtss_launch_mode, None);
+        assert!(!report.authorized_by_supervisor);
+        assert!(!report.process_created);
     }
 }
