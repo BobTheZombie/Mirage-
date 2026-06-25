@@ -28,11 +28,68 @@ use mirage::supervisor::Supervisor;
 
 #[cfg(not(feature = "emergency-boot"))]
 #[derive(Clone, Copy, Debug, Default)]
+struct MtssReadiness {
+    core_ready: bool,
+    scheduler_ready: bool,
+    timer_ready: bool,
+    preemption_ready: bool,
+    idle_ready: bool,
+    task_creation_api_ready: bool,
+    mark_runnable_api_ready: bool,
+    require_preemption_for_userspace: bool,
+    failed: bool,
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+impl MtssReadiness {
+    const fn fully_online(&self) -> bool {
+        self.core_ready
+            && self.scheduler_ready
+            && self.timer_ready
+            && self.preemption_ready
+            && self.idle_ready
+            && self.task_creation_api_ready
+            && self.mark_runnable_api_ready
+            && !self.failed
+    }
+
+    const fn pid1_handoff_allowed(&self) -> bool {
+        self.pid1_handoff_blocker().is_none()
+    }
+
+    const fn pid1_handoff_blocker(&self) -> Option<&'static str> {
+        if self.failed {
+            return Some("MTSS failed");
+        }
+        if !self.core_ready {
+            return Some("MTSS core not ready");
+        }
+        if !self.scheduler_ready {
+            return Some("MTSS scheduler not ready");
+        }
+        if !self.idle_ready {
+            return Some("idle task unavailable");
+        }
+        if !self.task_creation_api_ready {
+            return Some("task creation API unavailable");
+        }
+        if !self.mark_runnable_api_ready {
+            return Some("mark_runnable unavailable");
+        }
+        if self.require_preemption_for_userspace && !self.preemption_ready {
+            return Some("policy requires preemption before userspace");
+        }
+        None
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+#[derive(Clone, Copy, Debug, Default)]
 struct BootRuntimeDeps {
     root_fs_resolved: bool,
     root_fs_online: bool,
     supervisor_online: bool,
-    mtss_online: bool,
+    mtss: MtssReadiness,
     spider_rt_available: bool,
     spider_found: bool,
     spider_elf_ok: bool,
@@ -43,6 +100,20 @@ struct BootRuntimeDeps {
     dispatcher_started: bool,
     dispatcher_pending: bool,
     idleloop_started: bool,
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+impl BootRuntimeDeps {
+    const fn pid1_handoff_allowed(&self) -> bool {
+        self.mtss.pid1_handoff_allowed()
+    }
+
+    const fn pid1_handoff_blocker(&self) -> &'static str {
+        match self.mtss.pid1_handoff_blocker() {
+            Some(blocker) => blocker,
+            None => "PID1 handoff allowed",
+        }
+    }
 }
 
 #[cfg(not(feature = "emergency-boot"))]
@@ -83,10 +154,11 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         mirage::kprintln!("SPIDER-RS PID1 [PENDING: supervisor not online]");
         return Ok(Pid1LaunchState::Deferred("supervisor not online"));
     }
-    if !deps.mtss_online {
+    if !deps.pid1_handoff_allowed() {
+        let blocker = deps.pid1_handoff_blocker();
         deps.userspace_launch_deferred = true;
-        mirage::kprintln!("SPIDER-RS PID1 [PENDING: MTSS not online]");
-        return Ok(Pid1LaunchState::Deferred("MTSS not online"));
+        mirage::kprintln!("SPIDER-RS PID1 [PENDING: {}]", blocker);
+        return Ok(Pid1LaunchState::Deferred(blocker));
     }
     if !deps.spider_rt_available {
         deps.userspace_launch_deferred = true;
@@ -131,7 +203,7 @@ fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
             root_fs_online: deps.root_fs_online,
             runtime_vfs_mounted: boot_runtime.is_some(),
             spider_binary_present: len > 0,
-            mtss_online: deps.mtss_online,
+            mtss_online: deps.pid1_handoff_allowed(),
             userspace_loader_ready: deps.userspace_loader_started,
         },
     );
@@ -193,8 +265,8 @@ fn continue_after_mtss_online<const NPROC: usize, const MSG_DEPTH: usize>(
     boot_runtime: Option<&mirage::kernel::boot_runtime::BootRuntimeRamFs>,
     spider_image: &mut [u8],
 ) -> BootContinueResult {
-    if !deps.mtss_online {
-        return BootContinueResult::Fatal("MTSS not online after MTSS transition");
+    if deps.mtss.failed {
+        return BootContinueResult::Fatal("MTSS failed");
     }
 
     deps.root_fs_resolved = true;
@@ -563,10 +635,16 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                         "PENDING"
                     }
                 );
+                boot_deps.mtss.core_ready = report.core_ready;
+                boot_deps.mtss.scheduler_ready = report.scheduler_ready;
+                boot_deps.mtss.timer_ready = report.timer_ready;
+                boot_deps.mtss.preemption_ready = report.preemption_ready;
+                boot_deps.mtss.idle_ready = report.idle_ready;
+                boot_deps.mtss.task_creation_api_ready = report.api_ready;
+                boot_deps.mtss.mark_runnable_api_ready = report.api_ready;
 
-                if report.required_components_ready() {
+                if boot_deps.mtss.fully_online() {
                     boot_phase_online(BootPhase::Mtss);
-                    boot_deps.mtss_online = true;
                     mirage::kprintln!("MTSS [ ONLINE ]");
                 } else if !report.timer_ready || !report.preemption_ready {
                     boot_phase_pending(BootPhase::Mtss, "timer/preemption backend pending");
@@ -579,6 +657,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             Err(error) => {
                 #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
                 mirage::kprintln!("[bootdiag] MTSS init failed");
+                boot_deps.mtss.failed = true;
                 boot_phase_failed(BootPhase::Mtss, "MTSS initialization failed");
                 mirage::kprintln!("MTSS [FAILED: {:?}]", error);
             }
