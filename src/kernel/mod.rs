@@ -709,6 +709,16 @@ pub enum KernelError {
 pub type KernelResult<T> = core::result::Result<T, KernelError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MtssReadiness {
+    Offline,
+    CoreReady,
+    SchedulerReady,
+    Degraded { reason: &'static str },
+    Online,
+    Failed { reason: &'static str },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MtssInitReport {
     pub core_ready: bool,
     pub scheduler_ready: bool,
@@ -719,13 +729,98 @@ pub struct MtssInitReport {
 }
 
 impl MtssInitReport {
-    pub const fn required_components_ready(&self) -> bool {
+    pub const fn readiness(&self) -> MtssReadiness {
+        if !self.core_ready {
+            return MtssReadiness::Offline;
+        }
+        if !self.scheduler_ready {
+            return MtssReadiness::CoreReady;
+        }
+        if !self.idle_ready {
+            return MtssReadiness::Failed {
+                reason: "idle task unavailable",
+            };
+        }
+        if !self.api_ready {
+            return MtssReadiness::Failed {
+                reason: "MTSS API unavailable",
+            };
+        }
+        if !self.timer_ready {
+            return MtssReadiness::Degraded {
+                reason: "timer backend pending",
+            };
+        }
+        if !self.preemption_ready {
+            return MtssReadiness::Degraded {
+                reason: "preemption backend pending",
+            };
+        }
+        MtssReadiness::Online
+    }
+
+    pub const fn core_ready(&self) -> bool {
+        self.core_ready
+    }
+
+    pub const fn scheduler_ready(&self) -> bool {
+        self.core_ready && self.scheduler_ready
+    }
+
+    pub const fn can_create_tasks(&self) -> bool {
+        self.core_ready && self.api_ready
+    }
+
+    pub const fn can_mark_runnable(&self) -> bool {
+        self.core_ready && self.scheduler_ready && self.idle_ready && self.api_ready
+    }
+
+    pub const fn can_cooperative_schedule(&self) -> bool {
+        self.core_ready && self.scheduler_ready && self.idle_ready && self.api_ready
+    }
+
+    pub const fn preemption_ready(&self) -> bool {
         self.core_ready
             && self.scheduler_ready
             && self.timer_ready
             && self.preemption_ready
             && self.idle_ready
             && self.api_ready
+    }
+
+    pub const fn is_fully_online(&self) -> bool {
+        self.preemption_ready()
+    }
+
+    pub const fn pid1_handoff_allowed(&self, require_preemption_for_userspace: bool) -> bool {
+        self.pid1_handoff_blocker(require_preemption_for_userspace)
+            .is_none()
+    }
+
+    pub const fn pid1_handoff_blocker(
+        &self,
+        require_preemption_for_userspace: bool,
+    ) -> Option<&'static str> {
+        if !self.core_ready {
+            return Some("MTSS core not ready");
+        }
+        if !self.scheduler_ready {
+            return Some("MTSS scheduler not ready");
+        }
+        if !self.idle_ready {
+            return Some("idle task unavailable");
+        }
+        if !self.api_ready {
+            return Some("MTSS task API unavailable");
+        }
+        if require_preemption_for_userspace && !self.preemption_ready() {
+            return Some("policy requires timer/preemption before userspace");
+        }
+        None
+    }
+
+    pub const fn required_components_ready(&self) -> bool {
+        self.is_fully_online()
     }
 }
 
@@ -5676,6 +5771,156 @@ mod tests {
 
     fn use_in_memory_qfs(kernel: &mut Kernel<16, 4>) {
         kernel.root_fs = RootFileSystem::Qfs(QfsFileSystem::new(false));
+    }
+
+    const fn mtss_report(
+        core_ready: bool,
+        scheduler_ready: bool,
+        timer_ready: bool,
+        preemption_ready: bool,
+        idle_ready: bool,
+        api_ready: bool,
+    ) -> MtssInitReport {
+        MtssInitReport {
+            core_ready,
+            scheduler_ready,
+            timer_ready,
+            preemption_ready,
+            idle_ready,
+            api_ready,
+        }
+    }
+
+    #[test]
+    fn mtss_readiness_offline_blocks_all_task_paths() {
+        let report = mtss_report(false, false, false, false, false, false);
+
+        assert_eq!(report.readiness(), MtssReadiness::Offline);
+        assert!(!report.core_ready());
+        assert!(!report.scheduler_ready());
+        assert!(!report.can_create_tasks());
+        assert!(!report.can_mark_runnable());
+        assert!(!report.can_cooperative_schedule());
+        assert!(!report.preemption_ready());
+        assert!(!report.is_fully_online());
+        assert!(!report.pid1_handoff_allowed(false));
+        assert_eq!(
+            report.pid1_handoff_blocker(false),
+            Some("MTSS core not ready")
+        );
+    }
+
+    #[test]
+    fn mtss_readiness_core_ready_still_blocks_scheduler_paths() {
+        let report = mtss_report(true, false, false, false, false, true);
+
+        assert_eq!(report.readiness(), MtssReadiness::CoreReady);
+        assert!(report.core_ready());
+        assert!(!report.scheduler_ready());
+        assert!(report.can_create_tasks());
+        assert!(!report.can_mark_runnable());
+        assert!(!report.can_cooperative_schedule());
+        assert!(!report.is_fully_online());
+        assert_eq!(
+            report.pid1_handoff_blocker(false),
+            Some("MTSS scheduler not ready")
+        );
+    }
+
+    #[test]
+    fn mtss_readiness_scheduler_without_idle_or_api_is_failed() {
+        let no_idle = mtss_report(true, true, false, false, false, true);
+        let no_api = mtss_report(true, true, false, false, true, false);
+
+        assert_eq!(
+            no_idle.readiness(),
+            MtssReadiness::Failed {
+                reason: "idle task unavailable"
+            }
+        );
+        assert!(!no_idle.can_mark_runnable());
+        assert!(!no_idle.can_cooperative_schedule());
+        assert_eq!(
+            no_idle.pid1_handoff_blocker(false),
+            Some("idle task unavailable")
+        );
+
+        assert_eq!(
+            no_api.readiness(),
+            MtssReadiness::Failed {
+                reason: "MTSS API unavailable"
+            }
+        );
+        assert!(!no_api.can_create_tasks());
+        assert!(!no_api.can_mark_runnable());
+        assert_eq!(
+            no_api.pid1_handoff_blocker(false),
+            Some("MTSS task API unavailable")
+        );
+    }
+
+    #[test]
+    fn mtss_cooperative_schedule_does_not_require_timer_or_preemption() {
+        let report = mtss_report(true, true, false, false, true, true);
+
+        assert_eq!(
+            report.readiness(),
+            MtssReadiness::Degraded {
+                reason: "timer backend pending"
+            }
+        );
+        assert!(report.can_create_tasks());
+        assert!(report.can_mark_runnable());
+        assert!(report.can_cooperative_schedule());
+        assert!(!report.preemption_ready());
+        assert!(!report.is_fully_online());
+        assert!(report.pid1_handoff_allowed(false));
+        assert_eq!(report.pid1_handoff_blocker(false), None);
+        assert!(!report.pid1_handoff_allowed(true));
+        assert_eq!(
+            report.pid1_handoff_blocker(true),
+            Some("policy requires timer/preemption before userspace")
+        );
+    }
+
+    #[test]
+    fn mtss_full_online_requires_timer_and_preemption() {
+        let missing_preemption = mtss_report(true, true, true, false, true, true);
+        let online = mtss_report(true, true, true, true, true, true);
+
+        assert_eq!(
+            missing_preemption.readiness(),
+            MtssReadiness::Degraded {
+                reason: "preemption backend pending"
+            }
+        );
+        assert!(missing_preemption.can_cooperative_schedule());
+        assert!(!missing_preemption.preemption_ready());
+        assert!(!missing_preemption.is_fully_online());
+        assert!(!missing_preemption.required_components_ready());
+
+        assert_eq!(online.readiness(), MtssReadiness::Online);
+        assert!(online.preemption_ready());
+        assert!(online.is_fully_online());
+        assert!(online.required_components_ready());
+        assert!(online.pid1_handoff_allowed(true));
+    }
+
+    #[test]
+    fn kernel_mtss_init_allows_pid1_handoff_when_preemption_not_required() {
+        let mut kernel = boot_kernel();
+        let report = kernel.kernel_mtss_init().unwrap();
+
+        assert!(report.core_ready());
+        assert!(report.scheduler_ready());
+        assert!(report.can_create_tasks());
+        assert!(report.can_mark_runnable());
+        assert!(report.can_cooperative_schedule());
+        assert!(!report.preemption_ready());
+        assert!(!report.is_fully_online());
+        assert!(report.pid1_handoff_allowed(false));
+        assert_eq!(report.pid1_handoff_blocker(false), None);
+        assert!(!report.pid1_handoff_allowed(true));
     }
 
     fn create_root_file(
