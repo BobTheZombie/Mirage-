@@ -1588,7 +1588,13 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                 self.process_table[index] = Some(pcb);
             }
             self.ipc_queues[index].clear();
-            let _ = self.mtss_scheduler.terminate_task(Self::mtss_task_id(pid));
+            if self
+                .mtss_scheduler
+                .terminate_task(Self::mtss_task_id(pid))
+                .is_ok()
+            {
+                let _ = self.mtss_scheduler.reap_task(Self::mtss_task_id(pid));
+            }
             self.remove_threads_for_process(pid);
             memory::release_process(pid);
             self.security.revoke_task(pid);
@@ -3782,7 +3788,13 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             pcb.thread_count = 0;
         }
 
-        let _ = self.mtss_scheduler.terminate_task(Self::mtss_task_id(pid));
+        if self
+            .mtss_scheduler
+            .terminate_task(Self::mtss_task_id(pid))
+            .is_ok()
+        {
+            let _ = self.mtss_scheduler.reap_task(Self::mtss_task_id(pid));
+        }
         let mut kept_thread = current_thread;
         if kept_thread.is_none() {
             let mut idx = 0usize;
@@ -5636,6 +5648,224 @@ mod tests {
             idx += 1;
         }
         saw_thread
+    }
+
+    fn elf_image(entry: u64, ph_flags: u32) -> [u8; 128] {
+        let mut bytes = [0u8; 128];
+        bytes[0..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&62u16.to_le_bytes());
+        bytes[24..32].copy_from_slice(&entry.to_le_bytes());
+        bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
+        bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+        bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
+        let ph = 64usize;
+        bytes[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes());
+        bytes[ph + 4..ph + 8].copy_from_slice(&ph_flags.to_le_bytes());
+        bytes[ph + 8..ph + 16].copy_from_slice(&120u64.to_le_bytes());
+        bytes[ph + 16..ph + 24].copy_from_slice(&0x400078u64.to_le_bytes());
+        bytes[ph + 32..ph + 40].copy_from_slice(&1u64.to_le_bytes());
+        bytes[ph + 40..ph + 48].copy_from_slice(&1u64.to_le_bytes());
+        bytes[ph + 48..ph + 56].copy_from_slice(&8u64.to_le_bytes());
+        bytes[120] = 0xc3;
+        bytes
+    }
+
+    fn use_in_memory_qfs(kernel: &mut Kernel<16, 4>) {
+        kernel.root_fs = RootFileSystem::Qfs(QfsFileSystem::new(false));
+    }
+
+    fn create_root_file(
+        kernel: &mut Kernel<16, 4>,
+        name: &str,
+        mode: crate::kernel::fs::Permissions,
+        data: &[u8],
+    ) {
+        match &kernel.root_fs {
+            RootFileSystem::Qfs(fs) => {
+                fs.create_test_file(fs.root_inode(), name, mode, data, FsCredentials::kernel())
+                    .unwrap();
+            }
+            RootFileSystem::Ext4(_) => panic!("tests expect qfs root filesystem"),
+        }
+    }
+
+    fn clear_process_address_space(kernel: &mut Kernel<16, 4>, pid: ProcessId) {
+        let index = kernel.locate_process(pid).unwrap();
+        let old = kernel.process_table[index].unwrap().address_space_root;
+        if old != 0 {
+            memory::destroy_user_address_space(old);
+            kernel.process_table[index]
+                .as_mut()
+                .unwrap()
+                .address_space_root = 0;
+        }
+    }
+
+    fn load_exec_for_path(
+        kernel: &mut Kernel<16, 4>,
+        pid: ProcessId,
+        raw: &str,
+    ) -> KernelResult<crate::kernel::process::ExecImageMetadata> {
+        let resolved = KernelPathBuf::from_str(raw)?;
+        let path = resolved.as_path()?;
+        let stat = kernel.root_fs.stat(path).map_err(KernelError::Filesystem)?;
+        kernel.load_exec_image(
+            pid,
+            &resolved,
+            stat,
+            ExecVectorMetadata::empty(),
+            ExecVectorMetadata::empty(),
+        )
+    }
+
+    #[test]
+    fn load_exec_image_rejects_invalid_elf() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        use_in_memory_qfs(&mut kernel);
+        clear_process_address_space(&mut kernel, pid);
+        create_root_file(
+            &mut kernel,
+            "bad-elf",
+            crate::kernel::fs::Permissions::executable(),
+            b"not-elf",
+        );
+
+        assert!(matches!(
+            load_exec_for_path(&mut kernel, pid, "/bad-elf"),
+            Err(KernelError::InvalidArgument)
+        ));
+    }
+
+    #[test]
+    fn load_exec_image_rejects_non_executable_path_and_unmapped_entry() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        use_in_memory_qfs(&mut kernel);
+        clear_process_address_space(&mut kernel, pid);
+        let valid = elf_image(0x400078, 0x5);
+        create_root_file(
+            &mut kernel,
+            "not-exec",
+            crate::kernel::fs::Permissions::read_write(),
+            &valid,
+        );
+        let unmapped = elf_image(0x400078, 0x4);
+        create_root_file(
+            &mut kernel,
+            "unmapped-entry",
+            crate::kernel::fs::Permissions::executable(),
+            &unmapped,
+        );
+
+        assert!(matches!(
+            load_exec_for_path(&mut kernel, pid, "/not-exec"),
+            Err(KernelError::Filesystem(VfsError::PermissionDenied))
+        ));
+        assert!(matches!(
+            load_exec_for_path(&mut kernel, pid, "/unmapped-entry"),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn exec_task_success_preserves_pid_and_closes_cloexec_descriptors() {
+        let mut kernel = boot_kernel();
+        let pid = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        use_in_memory_qfs(&mut kernel);
+        clear_process_address_space(&mut kernel, pid);
+        let thread = first_thread(&kernel, pid);
+        let image_bytes = elf_image(0x400078, 0x5);
+        create_root_file(
+            &mut kernel,
+            "exec-ok",
+            crate::kernel::fs::Permissions::executable(),
+            &image_bytes,
+        );
+        create_root_file(
+            &mut kernel,
+            "keep",
+            crate::kernel::fs::Permissions::read_write(),
+            b"keep",
+        );
+        create_root_file(
+            &mut kernel,
+            "drop",
+            crate::kernel::fs::Permissions::read_write(),
+            b"drop",
+        );
+
+        let keep_file = kernel
+            .root_fs
+            .open(
+                Path::new("/keep").unwrap(),
+                crate::kernel::fs::OpenFlags::RDONLY,
+                kernel.fs_credentials_for(pid).unwrap(),
+            )
+            .unwrap();
+        let drop_file = kernel
+            .root_fs
+            .open(
+                Path::new("/drop").unwrap(),
+                crate::kernel::fs::OpenFlags::RDONLY,
+                kernel.fs_credentials_for(pid).unwrap(),
+            )
+            .unwrap();
+        let keep_desc = kernel.open_files.insert(keep_file).unwrap();
+        let drop_desc = kernel.open_files.insert(drop_file).unwrap();
+        let keep_fd = kernel
+            .process_files_mut(pid)
+            .unwrap()
+            .open(keep_desc, DescriptorFlags::EMPTY)
+            .unwrap();
+        let drop_fd = kernel
+            .process_files_mut(pid)
+            .unwrap()
+            .open(drop_desc, DescriptorFlags::CLOSE_ON_EXEC)
+            .unwrap();
+
+        let resolved = KernelPathBuf::from_str("/exec-ok").unwrap();
+        let stat = kernel.root_fs.stat(resolved.as_path().unwrap()).unwrap();
+        let image = crate::kernel::process::ExecImageMetadata::new(
+            stat.inode.raw(),
+            stat.size,
+            stat.mode,
+            0x400078,
+            0x70000000,
+            0,
+            None,
+            None,
+        );
+        let request = ExecRequest::new(
+            pid,
+            ProcessPath::from_path(resolved.as_path().unwrap()),
+            ExecVectorMetadata::empty(),
+            ExecVectorMetadata::empty(),
+            Credentials::system(),
+            image,
+        );
+
+        kernel.exec_task(request, Some(thread)).unwrap();
+
+        assert_eq!(
+            kernel.process_table[kernel.locate_process(pid).unwrap()]
+                .unwrap()
+                .pid,
+            pid
+        );
+        assert!(kernel.process_files_mut(pid).unwrap().get(keep_fd).is_ok());
+        assert!(kernel.process_files_mut(pid).unwrap().get(drop_fd).is_err());
+        assert_eq!(
+            kernel.thread_table[kernel.locate_thread(thread).unwrap()]
+                .unwrap()
+                .context
+                .rip,
+            0x400078
+        );
     }
 
     #[test]

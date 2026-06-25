@@ -75,9 +75,27 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         let header = self.read_elf_header(&file, stat.size)?;
         let address_space_root =
             memory::create_user_address_space(caller).ok_or(KernelError::AllocationFailed)?;
-        self.load_elf_segments(caller, address_space_root, &file, stat.size, header)?;
         let entry_point = relocated_address(header.entry, header.file_type)?;
-        let stack_pointer = self.build_initial_stack(caller, address_space_root, argv, envp)?;
+        if let Err(error) = self.load_elf_segments(
+            caller,
+            address_space_root,
+            &file,
+            stat.size,
+            header,
+            entry_point,
+        ) {
+            let _ = self.root_fs.close(file);
+            memory::destroy_user_address_space(address_space_root);
+            return Err(error);
+        }
+        let stack_pointer = match self.build_initial_stack(caller, address_space_root, argv, envp) {
+            Ok(stack_pointer) => stack_pointer,
+            Err(error) => {
+                let _ = self.root_fs.close(file);
+                memory::destroy_user_address_space(address_space_root);
+                return Err(error);
+            }
+        };
         self.root_fs.close(file).map_err(KernelError::Filesystem)?;
 
         let (service_daemon, signature) = signed_exec_manifest_for_path(resolved.as_str());
@@ -145,9 +163,11 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
         file: &crate::kernel::fs::File,
         file_size: u64,
         header: ElfHeader,
+        entry_point: u64,
     ) -> KernelResult<()> {
         let mut index = 0u16;
         let mut saw_load = false;
+        let mut entry_mapped_executable = false;
         while index < header.phnum {
             let ph = self.read_program_header(file, header.phoff, index)?;
             if ph.kind == PT_LOAD {
@@ -161,7 +181,17 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
                         .checked_add(ph.memsz as usize)
                         .ok_or(KernelError::InvalidArgument)?,
                 )?;
+                let segment_start = relocated;
+                let segment_end = relocated
+                    .checked_add(ph.memsz)
+                    .ok_or(KernelError::InvalidArgument)?;
                 let protection = protection_from_elf_flags(ph.flags);
+                if (ph.flags & PF_X) != 0
+                    && entry_point >= segment_start
+                    && entry_point < segment_end
+                {
+                    entry_mapped_executable = true;
+                }
                 let region = memory::mmap_user_fixed(
                     owner,
                     address_space_root,
@@ -185,7 +215,7 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             }
             index += 1;
         }
-        if saw_load {
+        if saw_load && entry_mapped_executable {
             Ok(())
         } else {
             Err(KernelError::InvalidArgument)

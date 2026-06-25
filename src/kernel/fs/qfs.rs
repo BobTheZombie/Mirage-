@@ -605,6 +605,72 @@ impl QfsFileSystem {
         Ok(written)
     }
 
+    #[cfg(test)]
+    pub(crate) fn create_test_file(
+        &self,
+        parent: InodeId,
+        name_str: &str,
+        mode: Permissions,
+        data: &[u8],
+        credentials: Credentials,
+    ) -> Result<InodeId, FsError> {
+        if self.read_only {
+            return Err(FsError::ReadOnly);
+        }
+        let name_bytes = name_str.as_bytes();
+        if name_bytes.is_empty() || name_bytes.len() > QFS_NAME_BYTES {
+            return Err(FsError::InvalidPath(
+                crate::kernel::fs::PathError::InvalidByte,
+            ));
+        }
+        let transaction_id = if self.block_device.is_some() {
+            self.begin_transaction()?
+        } else {
+            0
+        };
+        let inode = {
+            let mut state = self.state.lock();
+            let parent_record = state.inode_by_id(parent).ok_or(FsError::NotFound)?;
+            if decode_inode_kind(parent_record.kind) != InodeKind::Directory {
+                return Err(FsError::NotDirectory);
+            }
+            if state.child_by_name(parent, name_str).is_some() {
+                return Err(FsError::AlreadyExists);
+            }
+            let slot = state.free_inode_slot().ok_or(FsError::NoSpace)?;
+            let inode = state.next_inode_id().raw();
+            let mut name = [0u8; QFS_NAME_BYTES];
+            name[..name_bytes.len()].copy_from_slice(name_bytes);
+            let mut inline_data = [0u8; QFS_INLINE_DATA_BYTES];
+            let inline_len = min(data.len(), QFS_INLINE_DATA_BYTES);
+            inline_data[..inline_len].copy_from_slice(&data[..inline_len]);
+            let mut record = QfsInodeRecord {
+                inode,
+                object_id: inode,
+                parent_inode: parent.raw(),
+                kind: encode_inode_kind(InodeKind::RegularFile),
+                name_len: name_bytes.len() as u8,
+                metadata_flags: QFS_OBJECT_SERVICE_AWARE,
+                mode: mode.bits(),
+                uid: credentials.uid,
+                gid: credentials.gid,
+                links: 1,
+                size: data.len() as u64,
+                name,
+                inline_data_len: inline_len as u16,
+                inline_data,
+                ..QfsInodeRecord::empty()
+            };
+            record.refresh_path_identity();
+            state.inodes[slot] = Some(record);
+            InodeId::new(inode)
+        };
+        if self.block_device.is_some() {
+            self.commit_inode_transaction(transaction_id)?;
+        }
+        Ok(inode)
+    }
+
     pub fn refresh_from_block_device(&self) -> Result<(), FsError> {
         let Some(device) = self.block_device else {
             return Ok(());
