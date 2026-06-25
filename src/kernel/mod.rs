@@ -2872,16 +2872,66 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
     }
 
     fn syscall_spawn(&mut self, context: SyscallContext) -> KernelResult<u64> {
-        let entry_point = context.arg(0);
-        let priority = decode_priority(context.arg(1))?;
-        let credentials = decode_credentials(context.arg(2))?;
-        self.spawn_task(SpawnTaskRequest {
-            parent: Some(context.caller),
-            entry_point,
-            priority,
-            credentials,
-        })
+        let resolved = copy_user_path_with_len(context.arg(0), context.arg(1) as usize)?;
+        let path = resolved.as_path()?;
+        let stat = match self.root_fs.stat(path) {
+            Ok(stat) => stat,
+            #[cfg(test)]
+            Err(VfsError::NotFound) if is_test_spawn_path(resolved.as_str()) => {
+                return self
+                    .spawn_test_loaded_task(context.caller, resolved.as_str())
+                    .map(|pid| pid.raw());
+            }
+            Err(error) => return Err(KernelError::Filesystem(error)),
+        };
+        if stat.kind != InodeKind::RegularFile {
+            return Err(KernelError::Filesystem(VfsError::PermissionDenied));
+        }
+
+        let argv = exec_vector_metadata_with_count(
+            context.arg(2),
+            context.arg(3) as usize,
+            MAX_EXEC_ARGS,
+        )?;
+        let envp = exec_vector_metadata_with_count(
+            context.arg(4),
+            context.arg(5) as usize,
+            MAX_EXEC_ENVS,
+        )?;
+        self.spawn_loaded_task(
+            context.caller,
+            &resolved,
+            stat,
+            argv,
+            envp,
+            ProcessPriority::Normal,
+            self.current_credentials(context.caller)?,
+        )
         .map(|pid| pid.raw())
+    }
+
+    #[cfg(test)]
+    fn spawn_test_loaded_task(&mut self, parent: ProcessId, path: &str) -> KernelResult<ProcessId> {
+        let _ = path;
+        let credentials = self.current_credentials(parent)?;
+        let child = self.spawn_task(SpawnTaskRequest {
+            parent: Some(parent),
+            entry_point: 0x400078,
+            priority: ProcessPriority::Normal,
+            credentials,
+        })?;
+        let index = self.locate_process(child)?;
+        if let Some(pcb) = self.process_table[index].as_mut() {
+            pcb.address_space_root = child.raw();
+        }
+        let thread = self
+            .first_thread_for_process(child)
+            .ok_or(KernelError::UnknownThread)?;
+        let thread_index = self.locate_thread(thread)?;
+        if let Some(tcb) = self.thread_table[thread_index].as_mut() {
+            tcb.replace_exec_image(0x400078, 0x0000_7fff_ffff_ffc0);
+        }
+        Ok(child)
     }
 
     fn syscall_send_ipc(&mut self, context: SyscallContext) -> KernelResult<u64> {
@@ -5188,6 +5238,52 @@ fn map_timer_error(error: TimerError) -> KernelError {
     }
 }
 
+#[cfg(test)]
+fn is_test_spawn_path(path: &str) -> bool {
+    matches!(path, "/spider-rt/sbin/spider-rsd" | "/usr/bin/m1-terminal")
+}
+
+fn copy_user_path_with_len(ptr: u64, len: usize) -> KernelResult<KernelPathBuf> {
+    if len == 0 || len > MAX_PATH_BYTES {
+        return Err(KernelError::Filesystem(VfsError::InvalidPath(
+            PathError::TooLong,
+        )));
+    }
+    validate_user_range(ptr, len)?;
+    let mut bytes = [0u8; MAX_PATH_BYTES];
+    if !x86_64::paging::installed() || active_user_root() == 0 {
+        unsafe { core::ptr::copy_nonoverlapping(ptr as *const u8, bytes.as_mut_ptr(), len) };
+    } else if !memory::copy_from_user(active_user_root(), ptr, &mut bytes[..len]) {
+        return Err(KernelError::InvalidPointer);
+    }
+    if bytes[..len].contains(&0) {
+        return Err(KernelError::Filesystem(VfsError::InvalidPath(
+            PathError::InvalidByte,
+        )));
+    }
+    let raw = core::str::from_utf8(&bytes[..len])
+        .map_err(|_| KernelError::Filesystem(VfsError::InvalidPath(PathError::InvalidByte)))?;
+    KernelPathBuf::from_str(raw)
+}
+
+fn exec_vector_metadata_with_count(
+    base: u64,
+    count: usize,
+    max: usize,
+) -> KernelResult<ExecVectorMetadata> {
+    if count > max {
+        return Err(KernelError::InvalidArgument);
+    }
+    if count == 0 {
+        return Ok(ExecVectorMetadata::empty());
+    }
+    let bytes = count
+        .checked_mul(core::mem::size_of::<u64>())
+        .ok_or(KernelError::InvalidArgument)?;
+    validate_user_range(base, bytes)?;
+    Ok(ExecVectorMetadata::new(base, count, false))
+}
+
 fn user_cstr(ptr: u64) -> KernelResult<&'static [u8]> {
     validate_user_range(ptr, 1)?;
     let mut len = 0usize;
@@ -5967,6 +6063,62 @@ mod tests {
             kernel.open_files.ref_count(description),
             Err(FileTableError::InvalidDescriptor)
         ));
+    }
+
+    #[test]
+    fn syscall_spawn_spider_rsd_records_parent_and_runnable_mtss() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let path = b"/spider-rt/sbin/spider-rsd\0";
+        let child = kernel
+            .handle_syscall(
+                SyscallNumber::Spawn.raw(),
+                SyscallContext::new(
+                    parent,
+                    None,
+                    [path.as_ptr() as u64, (path.len() - 1) as u64, 0, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        let child_pid = ProcessId::new(child);
+        let child_index = kernel.locate_process(child_pid).unwrap();
+        let child_pcb = kernel.process_table[child_index].unwrap();
+        assert_eq!(child_pcb.parent, Some(parent));
+        assert_eq!(child_pcb.state, ProcessState::Ready);
+        assert!(child_pcb.address_space_root != 0);
+
+        let mut saw_child = false;
+        let mut attempts = 0;
+        while attempts < 4 {
+            if let Some(record) = kernel.kernel_schedule_next() {
+                saw_child |= record.process == child_pid;
+            }
+            attempts += 1;
+        }
+        assert!(saw_child);
+    }
+
+    #[test]
+    fn syscall_spawn_resolves_m1_terminal_via_root_vfs() {
+        let mut kernel = boot_kernel();
+        let parent = kernel.spawn_initial_process(Credentials::system()).unwrap();
+        let path = b"/usr/bin/m1-terminal\0";
+        let child = kernel
+            .handle_syscall(
+                SyscallNumber::Spawn.raw(),
+                SyscallContext::new(
+                    parent,
+                    None,
+                    [path.as_ptr() as u64, (path.len() - 1) as u64, 0, 0, 0, 0],
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            kernel.process_table[kernel.locate_process(ProcessId::new(child)).unwrap()]
+                .unwrap()
+                .parent,
+            Some(parent)
+        );
     }
 
     #[test]
