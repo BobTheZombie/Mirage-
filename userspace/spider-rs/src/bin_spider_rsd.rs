@@ -267,7 +267,7 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     }
 }
 
-#[cfg(not(target_os = "none"))]
+#[cfg(all(feature = "host-tests", not(target_os = "none")))]
 fn main() {
     use spider_rs::{SpiderManager, StubSpawner};
     let mut manager = SpiderManager::with_builtin_units().expect("builtin units parse");
@@ -277,4 +277,9 @@ fn main() {
     for outcome in manager.start_plan(&plan, &StubSpawner::default()) {
         println!("{} [{:?}] {}", outcome.name, outcome.state, outcome.message);
     }
+}
+
+#[cfg(all(not(feature = "host-tests"), not(target_os = "none")))]
+fn main() {
+    eprintln!("host diagnostic mode is disabled; rebuild with --features host-tests to run host-only Spider diagnostics");
 }

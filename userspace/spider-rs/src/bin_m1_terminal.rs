@@ -11,10 +11,19 @@ pub extern "C" fn _start() -> ! {
 
 #[cfg(target_os = "none")]
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo<'_>) -> ! { loop { core::hint::spin_loop(); } }
+fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
-#[cfg(not(target_os = "none"))]
+#[cfg(all(feature = "host-tests", not(target_os = "none")))]
 fn main() {
     println!("Mirage M1.1 System");
     println!("hello world");
+}
+
+#[cfg(all(not(feature = "host-tests"), not(target_os = "none")))]
+fn main() {
+    eprintln!("host diagnostic mode is disabled; rebuild with --features host-tests to run host-only Spider diagnostics");
 }

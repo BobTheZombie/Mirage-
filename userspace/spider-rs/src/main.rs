@@ -15,7 +15,7 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     }
 }
 
-#[cfg(not(target_os = "none"))]
+#[cfg(all(feature = "host-tests", not(target_os = "none")))]
 fn main() {
     println!("Spider-rs PID 1 online");
     println!("Spider-rs: loading built-in default target table");
@@ -26,4 +26,9 @@ fn main() {
     println!("Spider-rs: basic.target active");
     println!("Spider-rs: default.target active");
     println!("mode: host diagnostic only; no Mirage PID 1 process ABI is claimed");
+}
+
+#[cfg(all(not(feature = "host-tests"), not(target_os = "none")))]
+fn main() {
+    eprintln!("host diagnostic mode is disabled; rebuild with --features host-tests to run host-only Spider diagnostics");
 }

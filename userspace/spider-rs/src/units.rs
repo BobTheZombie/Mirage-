@@ -1,6 +1,6 @@
 #[cfg(target_os = "none")]
 use alloc::{string::String, vec::Vec};
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
+#[cfg(all(feature = "host-tests", not(target_os = "none")))]
 use std::fmt;
 
 /// Unit kinds understood by Spider-rs v0 and reserved for later milestones.
@@ -31,7 +31,7 @@ impl UnitKind {
     }
 }
 
-#[cfg(all(feature = "host-tools", not(target_os = "none")))]
+#[cfg(all(feature = "host-tests", not(target_os = "none")))]
 impl fmt::Display for UnitKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {

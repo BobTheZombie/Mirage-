@@ -17,7 +17,10 @@ pub const UNIT_SEARCH_PATHS: [&str; 3] = [
 const BUILTIN_UNITS: [(&str, &str); 3] = [
     ("basic.target", include_str!("../units/basic.target")),
     ("default.target", include_str!("../units/default.target")),
-    ("m1-terminal.service", include_str!("../units/m1-terminal.service")),
+    (
+        "m1-terminal.service",
+        include_str!("../units/m1-terminal.service"),
+    ),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,8 +303,11 @@ mod tests {
         assert!(outcomes.iter().any(
             |outcome| outcome.name == "optional.service" && outcome.state == UnitState::Failed
         ));
-        assert!(outcomes
-            .iter()
-            .any(|outcome| outcome.name == "default.target" && outcome.state == UnitState::Running));
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| outcome.name == "default.target"
+                    && outcome.state == UnitState::Running)
+        );
     }
 }

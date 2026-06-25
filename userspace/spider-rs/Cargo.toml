@@ -7,8 +7,8 @@ description = "no_std userspace PID 1 and service manager for GNU/Mirage"
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["host-tools"]
-host-tools = []
+default = []
+host-tests = []
 
 [dependencies]
 mirage-abi = { path = "../../crates/mirage-abi" }
@@ -30,3 +30,6 @@ name = "m1-terminal"
 path = "src/bin_m1_terminal.rs"
 test = false
 bench = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mirage"))'] }
