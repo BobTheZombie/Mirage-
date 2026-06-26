@@ -45,3 +45,7 @@ When `require_preemption_for_userspace = true`, PID1 handoff must wait until MTS
 * `PID1 HANDOFF [ALLOWED: cooperative MTSS]` means MTSS core/scheduler/idle/API readiness is valid, Supervisor/rootfs/loader preconditions are satisfied, `require_preemption_for_userspace = false`, and PID1 may be created/admitted runnable even though `MTSS ONLINE` is not true.
 * `PID1 HANDOFF [ALLOWED: preemptive MTSS]` means full preemptive MTSS readiness is valid and PID1 may be launched under the normal online scheduler contract.
 * `PID1 HANDOFF [PENDING: policy requires preemption before userspace]` means cooperative readiness may exist, but `require_preemption_for_userspace = true` and preemption readiness has not been proven yet.
+
+## Full boot audit update
+
+`ONLINE` means core, scheduler, timer, preemption, idle task, task creation, and mark-runnable are all ready. `DEGRADED` means cooperative scheduling is usable while timer/preemption are pending. The default userspace policy allows PID1 handoff in degraded cooperative mode when scheduler-ready.

@@ -4,8 +4,7 @@
 //! queues and execution mechanics; the supervisor must not directly mutate them.
 
 use mirage_mtss::scheduler_modules::{
-    select_scheduler_module, MtssCpuProfile, MtssSchedulerModuleDescriptor,
-    MtssSchedulerModuleId,
+    select_scheduler_module, MtssCpuProfile, MtssSchedulerModuleDescriptor, MtssSchedulerModuleId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,9 +33,13 @@ impl SupervisorRenoirMtssPolicy {
     pub const fn approve(self, cpu: MtssCpuProfile) -> SupervisorSchedulerDecision {
         let selected = select_scheduler_module(cpu);
         match selected.id {
-            MtssSchedulerModuleId::GenericRoundRobin => SupervisorSchedulerDecision::Fallback(selected),
+            MtssSchedulerModuleId::GenericRoundRobin => {
+                SupervisorSchedulerDecision::Fallback(selected)
+            }
             MtssSchedulerModuleId::AmdZen2Renoir if !self.allow_arch_specific_modules => {
-                SupervisorSchedulerDecision::Denied("arch-specific scheduler modules disabled by supervisor policy")
+                SupervisorSchedulerDecision::Denied(
+                    "arch-specific scheduler modules disabled by supervisor policy",
+                )
             }
             MtssSchedulerModuleId::AmdZen2Renoir => SupervisorSchedulerDecision::Approved(selected),
         }

@@ -1,9 +1,73 @@
 //! Local APIC xAPIC-mode support for bare-metal interrupt delivery.
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-pub const DEFAULT_LOCAL_APIC_PHYS: u64 = 0xfee0_0000; pub const SPURIOUS_VECTOR: u8 = 0xff;
-const LAPIC_ID: usize=0x020; const LAPIC_TPR: usize=0x080; const LAPIC_EOI: usize=0x0b0; const LAPIC_SVR: usize=0x0f0; const LAPIC_LVT_TIMER: usize=0x320; const LAPIC_TIMER_INITIAL_COUNT: usize=0x380; const LAPIC_TIMER_DIVIDE: usize=0x3e0; const SVR_ENABLE: u32=1<<8; const LVT_MASKED: u32=1<<16;
-static LAPIC_BASE_VIRT: AtomicU64=AtomicU64::new(0); static LAPIC_ENABLED: AtomicBool=AtomicBool::new(false);
-#[derive(Clone, Copy, Debug, Eq, PartialEq)] pub enum LocalApicStatus { Enabled { physical_base: u64, apic_id: u32 }, Unavailable }
-pub fn initialize(local_apic_physical: u64, hhdm_offset: u64) -> LocalApicStatus { let physical=if local_apic_physical==0{DEFAULT_LOCAL_APIC_PHYS}else{local_apic_physical}; LAPIC_BASE_VIRT.store(physical.saturating_add(hhdm_offset),Ordering::SeqCst); unsafe{write(LAPIC_TPR,0); write(LAPIC_LVT_TIMER,LVT_MASKED); write(LAPIC_TIMER_INITIAL_COUNT,0); write(LAPIC_TIMER_DIVIDE,0b1011); let svr=read(LAPIC_SVR); write(LAPIC_SVR,(svr & !0xff)|SVR_ENABLE|SPURIOUS_VECTOR as u32);} LAPIC_ENABLED.store(true,Ordering::SeqCst); LocalApicStatus::Enabled{physical_base:physical,apic_id:apic_id()} }
-pub fn is_enabled()->bool{LAPIC_ENABLED.load(Ordering::SeqCst)} pub fn apic_id()->u32{if LAPIC_BASE_VIRT.load(Ordering::SeqCst)==0{0}else{unsafe{read(LAPIC_ID)>>24}}} pub fn end_of_interrupt(){if is_enabled(){unsafe{write(LAPIC_EOI,0)}}}
-unsafe fn read(offset:usize)->u32{let base=LAPIC_BASE_VIRT.load(Ordering::SeqCst); if base==0{return 0;} core::ptr::read_volatile((base as usize+offset) as *const u32)} unsafe fn write(offset:usize,value:u32){let base=LAPIC_BASE_VIRT.load(Ordering::SeqCst); if base==0{return;} core::ptr::write_volatile((base as usize+offset) as *mut u32,value);}
+pub const DEFAULT_LOCAL_APIC_PHYS: u64 = 0xfee0_0000;
+pub const SPURIOUS_VECTOR: u8 = 0xff;
+const LAPIC_ID: usize = 0x020;
+const LAPIC_TPR: usize = 0x080;
+const LAPIC_EOI: usize = 0x0b0;
+const LAPIC_SVR: usize = 0x0f0;
+const LAPIC_LVT_TIMER: usize = 0x320;
+const LAPIC_TIMER_INITIAL_COUNT: usize = 0x380;
+const LAPIC_TIMER_DIVIDE: usize = 0x3e0;
+const SVR_ENABLE: u32 = 1 << 8;
+const LVT_MASKED: u32 = 1 << 16;
+static LAPIC_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
+static LAPIC_ENABLED: AtomicBool = AtomicBool::new(false);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalApicStatus {
+    Enabled { physical_base: u64, apic_id: u32 },
+    Unavailable,
+}
+pub fn initialize(local_apic_physical: u64, hhdm_offset: u64) -> LocalApicStatus {
+    let physical = if local_apic_physical == 0 {
+        DEFAULT_LOCAL_APIC_PHYS
+    } else {
+        local_apic_physical
+    };
+    LAPIC_BASE_VIRT.store(physical.saturating_add(hhdm_offset), Ordering::SeqCst);
+    unsafe {
+        write(LAPIC_TPR, 0);
+        write(LAPIC_LVT_TIMER, LVT_MASKED);
+        write(LAPIC_TIMER_INITIAL_COUNT, 0);
+        write(LAPIC_TIMER_DIVIDE, 0b1011);
+        let svr = read(LAPIC_SVR);
+        write(
+            LAPIC_SVR,
+            (svr & !0xff) | SVR_ENABLE | SPURIOUS_VECTOR as u32,
+        );
+    }
+    LAPIC_ENABLED.store(true, Ordering::SeqCst);
+    LocalApicStatus::Enabled {
+        physical_base: physical,
+        apic_id: apic_id(),
+    }
+}
+pub fn is_enabled() -> bool {
+    LAPIC_ENABLED.load(Ordering::SeqCst)
+}
+pub fn apic_id() -> u32 {
+    if LAPIC_BASE_VIRT.load(Ordering::SeqCst) == 0 {
+        0
+    } else {
+        unsafe { read(LAPIC_ID) >> 24 }
+    }
+}
+pub fn end_of_interrupt() {
+    if is_enabled() {
+        unsafe { write(LAPIC_EOI, 0) }
+    }
+}
+unsafe fn read(offset: usize) -> u32 {
+    let base = LAPIC_BASE_VIRT.load(Ordering::SeqCst);
+    if base == 0 {
+        return 0;
+    }
+    core::ptr::read_volatile((base as usize + offset) as *const u32)
+}
+unsafe fn write(offset: usize, value: u32) {
+    let base = LAPIC_BASE_VIRT.load(Ordering::SeqCst);
+    if base == 0 {
+        return;
+    }
+    core::ptr::write_volatile((base as usize + offset) as *mut u32, value);
+}

@@ -98,6 +98,9 @@ mod tests {
             RyzenTopology::new(1, 6, 1),
         );
         assert!(profile.is_ryzen_4500u_class());
-        assert_eq!(profile.scheduler_module_name(), "mtss-sched-amd-zen2-renoir");
+        assert_eq!(
+            profile.scheduler_module_name(),
+            "mtss-sched-amd-zen2-renoir"
+        );
     }
 }

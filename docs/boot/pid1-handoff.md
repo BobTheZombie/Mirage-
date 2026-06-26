@@ -58,3 +58,7 @@ Failures must be exact and typed: RuntimeVfs unavailable, missing Spider-rs, uns
 ## Zinnia audit follow-up
 
 The Zinnia reference audit highlighted that PID1 launch should be treated as a strict sequence of validated artifacts rather than a best-effort jump. Mirage now documents and checks an additional ELF preflight invariant: `PT_LOAD` page mappings for Spider-rs must not overlap. The initial userspace stack metadata also names the real mounted PID1 path, `/spider-rt/sbin/spider-rs`, so diagnostics and future argv construction match the boot contract.
+
+## Full boot audit update
+
+PID1 handoff also requires the post-`KernelConstructed` continuation edge to reach boot-info application, supervisor creation, boot-runtime validation, rootfs mount, MTSS readiness evaluation, userspace loader start, spider-rs ELF preflight, supervisor launch authorization, and MTSS runnable admission. PID1 may be marked runnable only after MTSS accepts the real task/thread into a runnable queue. PID1 may be marked running only after actual user execution begins.

@@ -248,7 +248,10 @@ pub fn try_publish_keyboard_event(event: KeyboardEvent) -> bool {
 }
 
 pub fn input_queue_overflows() -> u64 {
-    INPUT_QUEUE.lock().dropped.saturating_add(INPUT_QUEUE_BUSY_DROPS.load(Ordering::Relaxed))
+    INPUT_QUEUE
+        .lock()
+        .dropped
+        .saturating_add(INPUT_QUEUE_BUSY_DROPS.load(Ordering::Relaxed))
 }
 
 pub fn input_queue_depth() -> usize {

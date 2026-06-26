@@ -1,6 +1,41 @@
 //! Architecture interrupt-controller selection and IRQ accounting.
-use core::sync::atomic::{AtomicU64,AtomicU8,Ordering}; use crate::arch::x86_64::{apic,ioapic,pic};
-#[derive(Clone,Copy,Debug,Eq,PartialEq)] #[repr(u8)] pub enum InterruptController{Pic8259=0,Apic=1}
-static CONTROLLER:AtomicU8=AtomicU8::new(InterruptController::Pic8259 as u8); static EXTERNAL_IRQ_COUNT:AtomicU64=AtomicU64::new(0);
-pub const FIRST_EXTERNAL_VECTOR:u8=ioapic::IRQ_BASE_VECTOR; pub const LAST_EXTERNAL_VECTOR:u8=ioapic::IRQ_BASE_VECTOR+15;
-pub fn select_pic(){CONTROLLER.store(InterruptController::Pic8259 as u8,Ordering::SeqCst)} pub fn select_apic(){CONTROLLER.store(InterruptController::Apic as u8,Ordering::SeqCst)} pub fn controller()->InterruptController{if CONTROLLER.load(Ordering::SeqCst)==1{InterruptController::Apic}else{InterruptController::Pic8259}} pub const fn is_external_irq_vector(vector:u8)->bool{vector>=FIRST_EXTERNAL_VECTOR&&vector<=LAST_EXTERNAL_VECTOR} pub fn record_external_interrupt(_vector:u8){EXTERNAL_IRQ_COUNT.fetch_add(1,Ordering::SeqCst);} pub fn external_irq_count()->u64{EXTERNAL_IRQ_COUNT.load(Ordering::SeqCst)} pub fn end_of_interrupt(vector:u8){match controller(){InterruptController::Apic=>apic::end_of_interrupt(),InterruptController::Pic8259=>pic::end_of_interrupt(vector)}}
+use crate::arch::x86_64::{apic, ioapic, pic};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum InterruptController {
+    Pic8259 = 0,
+    Apic = 1,
+}
+static CONTROLLER: AtomicU8 = AtomicU8::new(InterruptController::Pic8259 as u8);
+static EXTERNAL_IRQ_COUNT: AtomicU64 = AtomicU64::new(0);
+pub const FIRST_EXTERNAL_VECTOR: u8 = ioapic::IRQ_BASE_VECTOR;
+pub const LAST_EXTERNAL_VECTOR: u8 = ioapic::IRQ_BASE_VECTOR + 15;
+pub fn select_pic() {
+    CONTROLLER.store(InterruptController::Pic8259 as u8, Ordering::SeqCst)
+}
+pub fn select_apic() {
+    CONTROLLER.store(InterruptController::Apic as u8, Ordering::SeqCst)
+}
+pub fn controller() -> InterruptController {
+    if CONTROLLER.load(Ordering::SeqCst) == 1 {
+        InterruptController::Apic
+    } else {
+        InterruptController::Pic8259
+    }
+}
+pub const fn is_external_irq_vector(vector: u8) -> bool {
+    vector >= FIRST_EXTERNAL_VECTOR && vector <= LAST_EXTERNAL_VECTOR
+}
+pub fn record_external_interrupt(_vector: u8) {
+    EXTERNAL_IRQ_COUNT.fetch_add(1, Ordering::SeqCst);
+}
+pub fn external_irq_count() -> u64 {
+    EXTERNAL_IRQ_COUNT.load(Ordering::SeqCst)
+}
+pub fn end_of_interrupt(vector: u8) {
+    match controller() {
+        InterruptController::Apic => apic::end_of_interrupt(),
+        InterruptController::Pic8259 => pic::end_of_interrupt(vector),
+    }
+}

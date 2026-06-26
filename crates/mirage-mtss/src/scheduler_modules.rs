@@ -123,10 +123,8 @@ pub const AMD_ZEN2_RENOIR_DESCRIPTOR: MtssSchedulerModuleDescriptor =
         supports_helper_packs: true,
     };
 
-pub const SCHEDULER_MODULES: &[MtssSchedulerModuleDescriptor] = &[
-    GENERIC_ROUND_ROBIN_DESCRIPTOR,
-    AMD_ZEN2_RENOIR_DESCRIPTOR,
-];
+pub const SCHEDULER_MODULES: &[MtssSchedulerModuleDescriptor] =
+    &[GENERIC_ROUND_ROBIN_DESCRIPTOR, AMD_ZEN2_RENOIR_DESCRIPTOR];
 
 pub const fn select_scheduler_module(cpu: MtssCpuProfile) -> MtssSchedulerModuleDescriptor {
     if cpu.amd && cpu.renoir && cpu.family == 0x17 && cpu.model >= 0x60 && cpu.model <= 0x7f {
