@@ -1049,11 +1049,10 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
         // The boot screen and framebuffer phases establish the live UI itself,
         // so repaint them promptly once the framebuffer is available.
         (BootPhase::BootScreen, _) => true,
-        // KernelConstructed is a continuation edge, but the live UI must not
-        // remain visibly stale at FRAMEBUFFER once serial has entered it.
-        // Repaint only on Started; Ok is rendered explicitly by the surgical
-        // kernel_constructed phase path and must not own a boot loop.
-        (BootPhase::KernelConstructed, PhaseState::Started) => true,
+        // KernelConstructed is an internal continuation edge. Keep it
+        // serial-visible, but never synchronously repaint the framebuffer from
+        // this transition; later durable phases repaint once progress has
+        // advanced beyond kernel construction.
         (BootPhase::Framebuffer, PhaseState::Ok | PhaseState::Online | PhaseState::Enabled) => true,
         (
             BootPhase::BootInfoApplied
@@ -1302,8 +1301,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_constructed_start_repaints_but_ok_does_not_force_framebuffer_repaint() {
-        assert!(is_framebuffer_repaint_milestone(
+    fn kernel_constructed_transitions_do_not_force_framebuffer_repaint() {
+        assert!(!is_framebuffer_repaint_milestone(
             BootPhase::KernelConstructed,
             PhaseState::Started
         ));
