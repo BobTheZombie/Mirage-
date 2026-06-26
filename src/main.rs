@@ -14,8 +14,8 @@ use mirage::boot::pid1_retry::{decide_pid1_handoff, Pid1HandoffDecision, RetryRe
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
     boot_phase_failed, boot_phase_found, boot_phase_ok, boot_phase_online, boot_phase_pending,
-    boot_phase_render_screen, boot_phase_running, boot_phase_skipped, boot_phase_start,
-    boot_phase_stub, boot_phase_validate_no_unresolved, BootPhase,
+    boot_phase_running, boot_phase_skipped, boot_phase_start, boot_phase_stub,
+    boot_phase_validate_no_unresolved, BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
@@ -152,9 +152,7 @@ fn boot_kernel_constructed_phase() -> &'static mut Kernel<MAX_PROCESSES, MESSAGE
     };
     boot_phase_ok(BootPhase::KernelConstructed);
     mirage::kprintln!("[bootflow 2.1] kernel_constructed: set milestone phase ok");
-    mirage::kprintln!("[bootflow 2.2] kernel_constructed: render UI enter");
-    boot_phase_render_screen();
-    mirage::kprintln!("[bootflow 2.2] kernel_constructed: render UI ok");
+    mirage::kprintln!("[bootflow 2.2] kernel_constructed: render UI skipped (continuation edge)");
     mirage::kprintln!("[bootflow 2.3] kernel_constructed: debug poll enter");
     if x86_64::poll_debug_shell_hotkey() {
         debug_shell::enter_early_debug_shell(kernel);
