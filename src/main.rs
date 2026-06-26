@@ -4,6 +4,9 @@
 extern crate mirage;
 
 #[cfg(not(feature = "emergency-boot"))]
+use core::mem::MaybeUninit;
+
+#[cfg(not(feature = "emergency-boot"))]
 use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
@@ -11,8 +14,8 @@ use mirage::boot::pid1_retry::{decide_pid1_handoff, Pid1HandoffDecision, RetryRe
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
     boot_phase_failed, boot_phase_found, boot_phase_ok, boot_phase_online, boot_phase_pending,
-    boot_phase_running, boot_phase_skipped, boot_phase_start, boot_phase_stub,
-    boot_phase_validate_no_unresolved, BootPhase,
+    boot_phase_render_screen, boot_phase_running, boot_phase_skipped, boot_phase_start,
+    boot_phase_stub, boot_phase_validate_no_unresolved, BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
@@ -132,6 +135,34 @@ impl BootRuntimeDeps {
 #[cfg(not(feature = "emergency-boot"))]
 fn bootflow(seq: u8, phase: &'static str, status: &'static str) {
     mirage::kprintln!("[bootflow {}] phase={} {}", seq, phase, status);
+}
+
+#[cfg(not(feature = "emergency-boot"))]
+static mut BOOT_KERNEL_STORAGE: MaybeUninit<Kernel<MAX_PROCESSES, MESSAGE_DEPTH>> =
+    MaybeUninit::uninit();
+
+#[cfg(not(feature = "emergency-boot"))]
+fn boot_kernel_constructed_phase() -> &'static mut Kernel<MAX_PROCESSES, MESSAGE_DEPTH> {
+    bootflow(2, "kernel_constructed", "enter");
+    mirage::kprintln!("[bootflow 2.1] kernel_constructed: set milestone phase enter");
+    boot_phase_start(BootPhase::KernelConstructed);
+    let kernel = unsafe {
+        let storage = core::ptr::addr_of_mut!(BOOT_KERNEL_STORAGE);
+        (*storage).write(Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new())
+    };
+    boot_phase_ok(BootPhase::KernelConstructed);
+    mirage::kprintln!("[bootflow 2.1] kernel_constructed: set milestone phase ok");
+    mirage::kprintln!("[bootflow 2.2] kernel_constructed: render UI enter");
+    boot_phase_render_screen();
+    mirage::kprintln!("[bootflow 2.2] kernel_constructed: render UI ok");
+    mirage::kprintln!("[bootflow 2.3] kernel_constructed: debug poll enter");
+    if x86_64::poll_debug_shell_hotkey() {
+        debug_shell::enter_early_debug_shell(kernel);
+    }
+    mirage::kprintln!("[bootflow 2.3] kernel_constructed: debug poll ok");
+    mirage::kprintln!("[bootflow 2.4] kernel_constructed: return/advance ok");
+    bootflow(2, "kernel_constructed", "ok");
+    kernel
 }
 
 #[cfg(not(feature = "emergency-boot"))]
@@ -427,11 +458,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         x86_64::init_architecture(&boot_info);
         boot_phase_ok(BootPhase::Architecture);
         bootflow(1, "architecture_init", "ok");
-        bootflow(2, "kernel_constructed", "enter");
-        boot_phase_start(BootPhase::KernelConstructed);
-        let mut kernel = Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new();
-        boot_phase_ok(BootPhase::KernelConstructed);
-        bootflow(2, "kernel_constructed", "ok");
+        let kernel = boot_kernel_constructed_phase();
         mirage::kprintln!("kernel constructed");
         bootflow(3, "boot_info_applied", "enter");
         #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
@@ -549,7 +576,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             mirage::kprintln!("[bootdiag] supervisor bootstrap starting");
             bootflow(8, "supervisor_init", "enter");
             boot_phase_start(BootPhase::Supervisor);
-            let service_report = supervisor.bootstrap_services(&mut kernel);
+            let service_report = supervisor.bootstrap_services(kernel);
             if service_report.all_running() {
                 boot_phase_ok(BootPhase::Supervisor);
                 bootflow(8, "supervisor_init", "ok");
@@ -624,7 +651,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             bootflow(8, "supervisor_init", "enter");
             boot_phase_start(BootPhase::Supervisor);
             mirage::kprintln!("minimal supervisor bootstrap starting");
-            let minimal_report = supervisor.bootstrap_minimal(&mut kernel);
+            let minimal_report = supervisor.bootstrap_minimal(kernel);
             mirage::kprintln!("minimal supervisor bootstrap complete");
             match minimal_report.failure {
                 Some(error) => {
@@ -671,7 +698,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             mirage::kprintln!("boot manifest validated");
 
             mirage::kprintln!("launching service: echo-service");
-            match supervisor.launch_mock_manifest_service(&mut kernel, echo_service) {
+            match supervisor.launch_mock_manifest_service(kernel, echo_service) {
                 Ok(echo_report) => {
                     mirage::kprintln!("service running: echo-service");
                     match kernel.spawn_initial_process(Credentials::system()) {
@@ -681,7 +708,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                                 b"mirage echo smoke",
                             );
                             match supervisor.dispatch_echo_request(
-                                &mut kernel,
+                                kernel,
                                 &echo_report,
                                 caller,
                                 payload,
@@ -790,7 +817,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         let continuation = maybe_retry_pid1_handoff_after_mtss_change(
             &mut boot_deps,
             &supervisor,
-            &mut kernel,
+            kernel,
             boot_runtime.as_ref(),
             &mut spider_image[..],
         );
@@ -827,7 +854,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         let mut observed_timer_ticks = x86_64::timer_ticks();
         loop {
             if x86_64::poll_debug_shell_hotkey() {
-                debug_shell::enter_early_debug_shell(&mut kernel);
+                debug_shell::enter_early_debug_shell(kernel);
             }
             if x86_64::timer_tick_pending(&mut observed_timer_ticks) {
                 kernel.tick();

@@ -1049,6 +1049,11 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
         // The boot screen and framebuffer phases establish the live UI itself,
         // so repaint them promptly once the framebuffer is available.
         (BootPhase::BootScreen, _) => true,
+        // KernelConstructed is a continuation edge, but the live UI must not
+        // remain visibly stale at FRAMEBUFFER once serial has entered it.
+        // Repaint only on Started; Ok is rendered explicitly by the surgical
+        // kernel_constructed phase path and must not own a boot loop.
+        (BootPhase::KernelConstructed, PhaseState::Started) => true,
         (BootPhase::Framebuffer, PhaseState::Ok | PhaseState::Online | PhaseState::Enabled) => true,
         (
             BootPhase::BootInfoApplied
@@ -1297,11 +1302,26 @@ mod tests {
     }
 
     #[test]
-    fn kernel_constructed_ok_does_not_force_framebuffer_repaint() {
+    fn kernel_constructed_start_repaints_but_ok_does_not_force_framebuffer_repaint() {
+        assert!(is_framebuffer_repaint_milestone(
+            BootPhase::KernelConstructed,
+            PhaseState::Started
+        ));
         assert!(!is_framebuffer_repaint_milestone(
             BootPhase::KernelConstructed,
             PhaseState::Ok
         ));
+    }
+
+    #[test]
+    fn current_phase_updates_from_framebuffer_to_kernel_constructed() {
+        let mut manager = BootPhaseManager::new();
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[BootPhase::Framebuffer as usize]);
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[BootPhase::KernelConstructed as usize]);
+        manager.transition(BootPhase::Framebuffer, PhaseState::Ok, "ok");
+        assert_eq!(manager.current_phase, BootPhase::Framebuffer);
+        manager.transition(BootPhase::KernelConstructed, PhaseState::Started, "start");
+        assert_eq!(manager.current_phase, BootPhase::KernelConstructed);
     }
 
     #[test]
