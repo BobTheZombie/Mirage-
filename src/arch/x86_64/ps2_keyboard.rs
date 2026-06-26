@@ -7,13 +7,14 @@ use crate::kernel::device::{
     copy_input_event_to_bytes, DeviceDriver, DeviceError, DeviceKind, MirageInputEvent,
 };
 use crate::kernel::input::{
-    mark_source_online, publish_keyboard_event, try_publish_keyboard_event, InputRawSource, KeyCode,
-    KeyModifiers, KeyState, KeyboardEvent,
+    mark_source_online, publish_keyboard_event, try_publish_keyboard_event, InputRawSource,
+    KeyCode, KeyModifiers, KeyState, KeyboardEvent,
 };
 use crate::kernel::sync::SpinLock;
 use crate::subkernel::{DeviceSecurity, SecurityClass};
 
 const MAX_POLL_BYTES: usize = 32;
+const START_DRAIN_BYTES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ps2ScanSet {
@@ -103,10 +104,9 @@ impl Ps2KeyboardDriver {
     }
 
     pub fn initialize(&self, irq_mode: bool) -> Result<(), I8042Error> {
-        crate::kprintln!("I8042 [Detected]");
+        crate::kprintln!("I8042             [ DETECTED ]");
         let init = self.controller.initialize(irq_mode, true)?;
-        crate::kprintln!("I8042 [Started]");
-        crate::kprintln!("I8042 [Ok]");
+        crate::kprintln!("I8042             [ STARTED ]");
 
         let mut scan_set = if init.translated {
             Ps2ScanSet::Set1Translated
@@ -121,27 +121,33 @@ impl Ps2KeyboardDriver {
         // identify bytes are delivered.  If scan bytes arrive later, the
         // polling/IRQ paths will decode them in degraded mode.
         if let Err(error) = self.controller.send_device_command(0xf5) {
-            crate::kprintln!("PS/2 Keyboard [Failed: disable scanning {:?}]", error);
+            crate::kprintln!(
+                "PS/2 KEYBOARD     [ DEGRADED: disable scanning {:?} ]",
+                error
+            );
         }
         if let Err(error) = self.controller.send_device_command(0xff) {
-            crate::kprintln!("PS/2 Keyboard [Failed: reset {:?}]", error);
+            crate::kprintln!("PS/2 KEYBOARD     [ DEGRADED: reset {:?} ]", error);
         } else if let Err(error) = self.controller.wait_for_bat() {
-            crate::kprintln!("PS/2 Keyboard [Failed: BAT {:?}]", error);
+            crate::kprintln!("PS/2 KEYBOARD     [ DEGRADED: BAT {:?} ]", error);
         }
         if let Err(error) = self.controller.send_device_command(0xf2) {
-            crate::kprintln!("PS/2 Keyboard [Failed: identify {:?}]", error);
+            crate::kprintln!("PS/2 KEYBOARD     [ DEGRADED: identify {:?} ]", error);
         }
         if !init.translated {
             match self.controller.send_device_command_with_arg(0xf0, 0x02) {
                 Ok(()) => scan_set = Ps2ScanSet::Set2,
                 Err(error) => {
-                    crate::kprintln!("PS/2 Keyboard [Failed: set scancode {:?}]", error);
+                    crate::kprintln!("PS/2 KEYBOARD     [ DEGRADED: set scancode {:?} ]", error);
                     scan_set = Ps2ScanSet::Set2;
                 }
             }
         }
         if let Err(error) = self.controller.send_device_command(0xf4) {
-            crate::kprintln!("PS/2 Keyboard [Failed: enable scanning {:?}]", error);
+            crate::kprintln!(
+                "PS/2 KEYBOARD     [ DEGRADED: enable scanning {:?} ]",
+                error
+            );
         }
 
         let mut state = self.state.lock();
@@ -151,43 +157,66 @@ impl Ps2KeyboardDriver {
         state.scan_set = scan_set;
         state.decoder = Ps2Decoder::new(scan_set);
         crate::kprintln!(
-            "PS/2 Keyboard [Started: {} mode]",
+            "PS/2 KEYBOARD     [ STARTED: {} mode ]",
             if irq_mode { "irq" } else { "polling" }
         );
+        // Drain at most a few pending controller bytes left by reset/identify.
+        // This is not a wait for user input; it is a bounded cleanup pass so
+        // stale ACK/BAT/ID bytes cannot poison the first normal poll.
+        let _ = self.drain_keyboard_events(START_DRAIN_BYTES);
+        crate::kprintln!("PS/2 KEYBOARD     [ OK ]");
         Ok(())
     }
 
-    pub fn poll_hardware(&self) {
-        let mut state = self.state.lock();
-        let mut polls = 0usize;
-        while polls < MAX_POLL_BYTES {
-            let status = self.controller.status();
-            if status & 0x01 == 0 {
-                break;
-            }
-            let Ok(Some(scancode)) = self.controller.read_data_nonblocking() else {
-                break;
-            };
-            state.bytes_received = state.bytes_received.saturating_add(1);
-            if !I8042Controller::status_aux_data(status) {
-                let events = state.decoder.feed(scancode);
-                for event in events.into_iter().flatten() {
-                    let abi = event.to_mirage_input_event();
-                    publish_keyboard_event(event);
-                    state.push(abi);
-                    state.events_received = state.events_received.saturating_add(1);
-                    state.last_event = Some(event);
-                    if !state.first_event_logged {
-                        state.first_event_logged = true;
-                        state.online = true;
-                        mark_source_online(InputRawSource::Ps2);
-                        crate::kprintln!("[kbd 06] first key event received");
-                        crate::kprintln!("PS/2 Keyboard [Online]");
-                    }
-                }
-            }
-            polls += 1;
+    pub fn poll_keyboard_once(&self) -> Result<Option<KeyboardEvent>, I8042Error> {
+        let status = self.controller.status();
+        if status & 0x01 == 0 {
+            return Ok(None);
         }
+        let Some(scancode) = self.controller.read_data_nonblocking()? else {
+            return Ok(None);
+        };
+        if I8042Controller::status_aux_data(status) {
+            return Ok(None);
+        }
+
+        let mut state = self.state.lock();
+        state.bytes_received = state.bytes_received.saturating_add(1);
+        let events = state.decoder.feed(scancode);
+        let mut first_event = None;
+        for event in events.into_iter().flatten() {
+            if first_event.is_none() {
+                first_event = Some(event);
+            }
+            let abi = event.to_mirage_input_event();
+            publish_keyboard_event(event);
+            state.push(abi);
+            state.events_received = state.events_received.saturating_add(1);
+            state.last_event = Some(event);
+            if !state.first_event_logged {
+                state.first_event_logged = true;
+                state.online = true;
+                mark_source_online(InputRawSource::Ps2);
+                crate::kprintln!("[kbd 06] first key event received");
+            }
+        }
+        Ok(first_event)
+    }
+
+    pub fn drain_keyboard_events(&self, max_events: usize) -> Result<usize, I8042Error> {
+        let limit = min(max_events, MAX_POLL_BYTES);
+        let mut drained = 0usize;
+        while drained < limit {
+            if self.poll_keyboard_once()?.is_none() {
+                break;
+            }
+            drained += 1;
+        }
+        Ok(drained)
+    }
+
+    pub fn poll_hardware(&self) {
+        let _ = self.drain_keyboard_events(MAX_POLL_BYTES);
     }
     pub fn handle_irq1(&self) {
         let mut drained = 0usize;
