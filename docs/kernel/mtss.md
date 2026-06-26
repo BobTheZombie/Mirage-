@@ -95,3 +95,7 @@ See also:
 ## External scheduler references
 
 The Zinnia audit reinforced Mirage's existing MTSS boundary: useful scheduler ideas are explicit state transitions, idle task fallback, runnable queues, preemption requests, and reaping/accounting separation. Mirage reimplements these ideas only inside MTSS-owned code. The lower kernel still owns timer interrupt delivery and CPU context mechanics, and the Supervisor still owns launch/recovery policy.
+
+## Full boot audit update
+
+MTSS is PID0 / kernel execution root. It owns portable PID0/task/thread/scheduler lifecycle mechanics: runnable queues, scheduler-visible state, idle task, yield, exit, wait wakeups, and accounting. The lower kernel owns CPU privilege transition mechanisms and raw timer/interrupt delivery. The supervisor owns launch policy and capability grants.

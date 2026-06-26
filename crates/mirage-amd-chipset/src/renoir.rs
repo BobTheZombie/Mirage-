@@ -52,15 +52,42 @@ impl RenoirDeviceCandidate {
 
     pub const fn as_amd_device_candidate(self) -> Option<AmdDeviceCandidate> {
         match self.role {
-            RenoirPciRole::Iommu => Some(AmdDeviceCandidate::new(self.function, AmdControllerRole::Iommu)),
-            RenoirPciRole::AmdGpu => Some(AmdDeviceCandidate::new(self.function, AmdControllerRole::AmdGpuDisplay)),
-            RenoirPciRole::Xhci => Some(AmdDeviceCandidate::new(self.function, AmdControllerRole::XhciUsb)),
-            RenoirPciRole::Ahci => Some(AmdDeviceCandidate::new(self.function, AmdControllerRole::AhciStorage)),
-            RenoirPciRole::Nvme => Some(AmdDeviceCandidate::new(self.function, AmdControllerRole::NvmeStorage)),
-            RenoirPciRole::Psp => Some(AmdDeviceCandidate::new(self.function, AmdControllerRole::PspSecurityProcessor)),
-            RenoirPciRole::SmbusI2c => Some(AmdDeviceCandidate::new(self.function, AmdControllerRole::SmbusI2c)),
-            RenoirPciRole::HdAudio => Some(AmdDeviceCandidate::new(self.function, AmdControllerRole::AudioController)),
-            RenoirPciRole::AcpAudio => Some(AmdDeviceCandidate::new(self.function, AmdControllerRole::AcpAudioDmic)),
+            RenoirPciRole::Iommu => Some(AmdDeviceCandidate::new(
+                self.function,
+                AmdControllerRole::Iommu,
+            )),
+            RenoirPciRole::AmdGpu => Some(AmdDeviceCandidate::new(
+                self.function,
+                AmdControllerRole::AmdGpuDisplay,
+            )),
+            RenoirPciRole::Xhci => Some(AmdDeviceCandidate::new(
+                self.function,
+                AmdControllerRole::XhciUsb,
+            )),
+            RenoirPciRole::Ahci => Some(AmdDeviceCandidate::new(
+                self.function,
+                AmdControllerRole::AhciStorage,
+            )),
+            RenoirPciRole::Nvme => Some(AmdDeviceCandidate::new(
+                self.function,
+                AmdControllerRole::NvmeStorage,
+            )),
+            RenoirPciRole::Psp => Some(AmdDeviceCandidate::new(
+                self.function,
+                AmdControllerRole::PspSecurityProcessor,
+            )),
+            RenoirPciRole::SmbusI2c => Some(AmdDeviceCandidate::new(
+                self.function,
+                AmdControllerRole::SmbusI2c,
+            )),
+            RenoirPciRole::HdAudio => Some(AmdDeviceCandidate::new(
+                self.function,
+                AmdControllerRole::AudioController,
+            )),
+            RenoirPciRole::AcpAudio => Some(AmdDeviceCandidate::new(
+                self.function,
+                AmdControllerRole::AcpAudioDmic,
+            )),
             _ => None,
         }
     }
@@ -162,7 +189,9 @@ pub const fn service_hint(role: RenoirPciRole) -> &'static str {
 
 pub const fn handoff_contract(role: RenoirPciRole) -> &'static str {
     match role {
-        RenoirPciRole::HostBridge | RenoirPciRole::RootComplex => "mirage.platform.renoir.root-complex.v1",
+        RenoirPciRole::HostBridge | RenoirPciRole::RootComplex => {
+            "mirage.platform.renoir.root-complex.v1"
+        }
         RenoirPciRole::Iommu => "mirage.platform.renoir.iommu.v1",
         RenoirPciRole::Psp => "mirage.platform.renoir.psp.v1",
         RenoirPciRole::AmdGpu => "mirage.platform.renoir.amdgpu.v1",

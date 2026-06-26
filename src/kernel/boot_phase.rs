@@ -1050,15 +1050,20 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
         // so repaint them promptly once the framebuffer is available.
         (BootPhase::BootScreen, _) => true,
         (BootPhase::Framebuffer, PhaseState::Ok | PhaseState::Online | PhaseState::Enabled) => true,
-
-        // Failures are user-visible terminal states and should not wait for a
-        // later successful milestone before the live UI reflects the fault.
-        (_, PhaseState::Failed) => true,
-
-        // Stable user-visible milestones. Stub is included because Mirage uses
-        // explicit stub statuses to communicate intentional skeleton coverage.
         (
-            _,
+            BootPhase::BootInfoApplied
+            | BootPhase::SupervisorCreated
+            | BootPhase::BootRuntime
+            | BootPhase::RootFs
+            | BootPhase::Supervisor
+            | BootPhase::Mtss
+            | BootPhase::UserspaceLoader
+            | BootPhase::SpiderRs
+            | BootPhase::Pid1
+            | BootPhase::SystemDispatcher
+            | BootPhase::M1Terminal
+            | BootPhase::Userspace
+            | BootPhase::IdleLoop,
             PhaseState::Ok
             | PhaseState::Online
             | PhaseState::Enabled
@@ -1067,8 +1072,13 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | PhaseState::Stub,
         ) => true,
 
+        // Failures are user-visible terminal states and should not wait for a
+        // later successful milestone before the live UI reflects the fault.
+        (_, PhaseState::Failed) => true,
+
         // Noisy probe/intermediate states and routine optional skips remain
-        // serial-diagnostic events only; they should not thrash the framebuffer.
+        // serial-diagnostic events only; they should not thrash the framebuffer
+        // or gate the continuation edge after KernelConstructed.
         (
             _,
             PhaseState::Unregistered
@@ -1076,6 +1086,12 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | PhaseState::Pending
             | PhaseState::Started
             | PhaseState::Detected
+            | PhaseState::Ok
+            | PhaseState::Online
+            | PhaseState::Enabled
+            | PhaseState::Running
+            | PhaseState::Found
+            | PhaseState::Stub
             | PhaseState::Skipped,
         ) => false,
     }
@@ -1258,13 +1274,13 @@ mod tests {
     #[test]
     fn framebuffer_repaint_milestones_count_stable_user_visible_states() {
         let stable_transitions = [
-            (BootPhase::KernelMain, PhaseState::Ok),
             (BootPhase::Framebuffer, PhaseState::Online),
-            (BootPhase::Input, PhaseState::Enabled),
+            (BootPhase::BootInfoApplied, PhaseState::Ok),
+            (BootPhase::RootFs, PhaseState::Ok),
             (BootPhase::Userspace, PhaseState::Running),
             (BootPhase::SpiderRs, PhaseState::Found),
             (BootPhase::Qfs, PhaseState::Failed),
-            (BootPhase::Ext4, PhaseState::Stub),
+            (BootPhase::SystemDispatcher, PhaseState::Stub),
             (BootPhase::BootScreen, PhaseState::Started),
         ];
 
@@ -1276,8 +1292,26 @@ mod tests {
         assert_eq!(
             render_count,
             stable_transitions.len(),
-            "stable milestones, Found artifacts, visible stubs, BootScreen, Framebuffer, and failures should repaint"
+            "post-kernel milestones, Found artifacts, visible stubs, BootScreen, Framebuffer, and failures should repaint"
         );
+    }
+
+    #[test]
+    fn kernel_constructed_ok_does_not_force_framebuffer_repaint() {
+        assert!(!is_framebuffer_repaint_milestone(
+            BootPhase::KernelConstructed,
+            PhaseState::Ok
+        ));
+    }
+
+    #[test]
+    fn progress_does_not_reach_100_with_required_pending_state() {
+        let mut manager = BootPhaseManager::new();
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[48]);
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[51]);
+        manager.mark_registered_pending();
+        manager.transition(BootPhase::KernelConstructed, PhaseState::Ok, "ok");
+        assert!(manager.progress_percent() < 100);
     }
 
     #[test]

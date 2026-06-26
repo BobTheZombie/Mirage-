@@ -741,3 +741,18 @@ Required rootfs userland:
 8. Do not mark input devices OK unless real probe/start succeeded.
 9. External OS input code may be studied, but code must not be copied without license/provenance review.
 10. Mirage input drivers must preserve Mirage architecture and boot policy.
+
+---
+
+## Mirage Full Boot Contract
+
+1. Boot UI must reflect real boot state and must not drive boot state.
+2. Required boot phases must have explicit continuation edges.
+3. Debug shell and keyboard polling must never block normal boot.
+4. Optional devices may degrade/disable but must not block PID1.
+5. MTSS is PID0 / kernel execution root.
+6. spider-rs is PID1 / first userspace init.
+7. PID1 handoff may proceed in cooperative MTSS mode if scheduler-ready and policy allows.
+8. No required milestone may remain vaguely PENDING at 100% boot.
+9. QEMU and VirtualBox must both be tested for full boot changes.
+10. Do not mark OK/ONLINE/RUNNING/RUNNABLE/BOOTED unless the underlying system state actually exists.

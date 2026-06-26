@@ -125,9 +125,7 @@ impl SupervisorPlatformFacts {
                     }
                     _ => RyzenSupportStatus::Unknown,
                 },
-                msr_telemetry: RyzenProbeStatus::Skipped(
-                    "unsafe until #GP-safe MSR probe exists",
-                ),
+                msr_telemetry: RyzenProbeStatus::Skipped("unsafe until #GP-safe MSR probe exists"),
                 acpi_inventory: RyzenProbeStatus::Pending(
                     "requires mapped and validated ACPI tables",
                 ),

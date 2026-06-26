@@ -53,10 +53,16 @@ impl SupervisorXhciDevice {
     pub const fn approve(&self, decision: XhciPolicyDecision) -> bool {
         match decision {
             XhciPolicyDecision::ApproveInitialization => {
-                matches!(self.state, XhciOwnershipState::Discovered | XhciOwnershipState::Mapped)
+                matches!(
+                    self.state,
+                    XhciOwnershipState::Discovered | XhciOwnershipState::Mapped
+                )
             }
             XhciPolicyDecision::ApproveUserspaceVisibility => {
-                matches!(self.state, XhciOwnershipState::Initialized | XhciOwnershipState::Running)
+                matches!(
+                    self.state,
+                    XhciOwnershipState::Initialized | XhciOwnershipState::Running
+                )
             }
             XhciPolicyDecision::ApproveHidRouting => {
                 matches!(self.state, XhciOwnershipState::Running)

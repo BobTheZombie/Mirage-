@@ -1,7 +1,5 @@
 #![no_std]
 #![cfg_attr(
-
-
     not(all(feature = "hw-ryzen", target_arch = "x86_64")),
     forbid(unsafe_code)
 )]
@@ -16,9 +14,7 @@
 //! marketing-name claims and falls back to structured unknown status instead of
 //! panicking on unmodeled AMD64 processors.
 
-use mirage_amd64::{
-    AmdCacheInfo, AmdCpuId, AmdFeatureSet, AmdTopology, AmdVendor, PrivilegeRing,
-};
+use mirage_amd64::{AmdCacheInfo, AmdCpuId, AmdFeatureSet, AmdTopology, AmdVendor, PrivilegeRing};
 
 pub mod renoir;
 
@@ -83,7 +79,11 @@ impl RyzenPlatformFacts {
             topology.threads_per_core.max(1),
         );
         let classification = RenoirCpuProfile::from_parts(
-            RyzenCpuId::new(cpu_identity.family, cpu_identity.model, cpu_identity.stepping),
+            RyzenCpuId::new(
+                cpu_identity.family,
+                cpu_identity.model,
+                cpu_identity.stepping,
+            ),
             ryzen_topology,
         )
         .detection;

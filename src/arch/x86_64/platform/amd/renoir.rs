@@ -32,10 +32,7 @@ impl RenoirCpuidFacts {
     pub const fn is_amd(self) -> bool {
         matches!(
             self.vendor,
-            [
-                b'A', b'u', b't', b'h', b'e', b'n',
-                b't', b'i', b'c', b'A', b'M', b'D',
-            ]
+            [b'A', b'u', b't', b'h', b'e', b'n', b't', b'i', b'c', b'A', b'M', b'D',]
         )
     }
 
@@ -73,7 +70,10 @@ pub fn renoir_kernel_boot_probe(_boot_info: &BootInfo) -> Option<RenoirBootProfi
     boot_phase_start(BootPhase::RyzenCpu);
     if !facts.is_renoir() {
         boot_phase_detected(BootPhase::RyzenCpu);
-        boot_phase_skipped(BootPhase::AmdSoc, "AMD CPU is not Renoir-class Zen 2 mobile");
+        boot_phase_skipped(
+            BootPhase::AmdSoc,
+            "AMD CPU is not Renoir-class Zen 2 mobile",
+        );
         crate::kprintln!(
             "AMD CPU detected: family={:#x} model={:#x} stepping={}",
             facts.family,
@@ -112,9 +112,15 @@ pub fn renoir_kernel_boot_probe(_boot_info: &BootInfo) -> Option<RenoirBootProfi
 
     // Discovery is lower-kernel safe; driver ownership remains later.
     boot_phase_start(BootPhase::AmdIommu);
-    boot_phase_stub(BootPhase::AmdIommu, "Renoir IVRS/IOMMU discovery only; translation not enabled");
+    boot_phase_stub(
+        BootPhase::AmdIommu,
+        "Renoir IVRS/IOMMU discovery only; translation not enabled",
+    );
     boot_phase_start(BootPhase::AmdGpuRenoir);
-    boot_phase_stub(BootPhase::AmdGpuRenoir, "Renoir GPU discovery only; no reset/modeset");
+    boot_phase_stub(
+        BootPhase::AmdGpuRenoir,
+        "Renoir GPU discovery only; no reset/modeset",
+    );
     boot_phase_start(BootPhase::AmdXhci);
     boot_phase_detected(BootPhase::AmdXhci);
 
