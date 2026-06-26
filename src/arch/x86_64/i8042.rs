@@ -320,10 +320,6 @@ impl I8042Controller {
         Err(I8042Error::Timeout)
     }
 
-    fn wait_output_full(&self) -> Result<(), I8042Error> {
-        self.wait_output_full_for(WAIT_LIMIT)
-    }
-
     fn wait_output_full_for(&self, limit: usize) -> Result<(), I8042Error> {
         let mut wait = 0usize;
         while wait < limit {
@@ -338,5 +334,112 @@ impl I8042Controller {
 
     pub const fn status_aux_data(status: u8) -> bool {
         status & STATUS_AUX_DATA != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::cell::Cell;
+
+    fn wait_input_empty_with(
+        mut read_status: impl FnMut() -> u8,
+        limit: usize,
+    ) -> Result<(), I8042Error> {
+        let mut wait = 0usize;
+        while wait < limit {
+            if read_status() & STATUS_INPUT_FULL == 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+            wait += 1;
+        }
+        Err(I8042Error::Timeout)
+    }
+
+    fn wait_output_full_with(
+        mut read_status: impl FnMut() -> u8,
+        limit: usize,
+    ) -> Result<(), I8042Error> {
+        let mut wait = 0usize;
+        while wait < limit {
+            if read_status() & STATUS_OUTPUT_FULL != 0 {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+            wait += 1;
+        }
+        Err(I8042Error::Timeout)
+    }
+
+    fn flush_output_with(
+        mut read_status: impl FnMut() -> u8,
+        mut read_data: impl FnMut() -> u8,
+        max_reads: usize,
+    ) -> usize {
+        let mut count = 0usize;
+        while count < max_reads {
+            if read_status() & STATUS_OUTPUT_FULL == 0 {
+                break;
+            }
+            let _ = read_data();
+            count += 1;
+        }
+        count
+    }
+
+    #[test]
+    fn input_buffer_wait_times_out() {
+        assert_eq!(
+            wait_input_empty_with(|| STATUS_INPUT_FULL, 4),
+            Err(I8042Error::Timeout)
+        );
+    }
+
+    #[test]
+    fn output_buffer_wait_times_out() {
+        assert_eq!(wait_output_full_with(|| 0, 4), Err(I8042Error::Timeout));
+    }
+
+    #[test]
+    fn waits_stop_when_status_changes() {
+        let calls = Cell::new(0usize);
+        let result = wait_input_empty_with(
+            || {
+                let next = calls.get() + 1;
+                calls.set(next);
+                if next < 3 {
+                    STATUS_INPUT_FULL
+                } else {
+                    0
+                }
+            },
+            8,
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn flush_output_stops_at_max_reads() {
+        let reads = Cell::new(0usize);
+        let count = flush_output_with(
+            || STATUS_OUTPUT_FULL,
+            || {
+                reads.set(reads.get() + 1);
+                0xaa
+            },
+            5,
+        );
+        assert_eq!(count, 5);
+        assert_eq!(reads.get(), 5);
+    }
+
+    #[test]
+    fn read_data_nonblocking_classifies_error_bits() {
+        let timeout = I8042Status::from_raw(STATUS_OUTPUT_FULL | STATUS_TIMEOUT_ERROR);
+        let parity = I8042Status::from_raw(STATUS_OUTPUT_FULL | STATUS_PARITY_ERROR);
+        assert!(timeout.timeout_error);
+        assert!(parity.parity_error);
     }
 }

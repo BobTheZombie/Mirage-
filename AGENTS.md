@@ -726,3 +726,18 @@ Required rootfs userland:
 4. External references should produce focused Mirage-native patches, not broad rewrites.
 5. Any external-reference audit must document inspected files, learned concepts, licensing, and Mirage changes.
 6. Do not chase POSIX/desktop compatibility before MTSS and PID1 handoff work in QEMU.
+
+---
+
+## Mirage Input Driver Contract
+
+1. Input drivers must never hang kernel boot.
+2. All hardware polling loops must be bounded by timeout or max iteration count.
+3. Keyboard/input device failure must degrade or disable the device, not stop PID1 handoff.
+4. Polling mode means non-blocking poll-once or bounded drain, never infinite wait for input.
+5. Interrupt handlers must never block or perform heavy parsing.
+6. Unknown scancodes must not panic.
+7. Input queues must be bounded and overflow-safe.
+8. Do not mark input devices OK unless real probe/start succeeded.
+9. External OS input code may be studied, but code must not be copied without license/provenance review.
+10. Mirage input drivers must preserve Mirage architecture and boot policy.
