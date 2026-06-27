@@ -812,36 +812,6 @@ const fn pci_is_multifunction(header_type: u8) -> bool {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
-const fn pci_vendor_name(vendor_id: u16) -> &'static str {
-    match vendor_id {
-        0x1022 => "AMD",
-        0x1002 => "AMD/ATI",
-        0x8086 => "Intel",
-        0x10ec => "Realtek",
-        0x1b36 => "Red Hat/QEMU",
-        0x1234 => "QEMU",
-        0x1af4 => "VirtIO",
-        0x144d => "Samsung",
-        0x15ad => "VMware",
-        _ => "unknown vendor",
-    }
-}
-
-#[cfg(not(feature = "emergency-boot"))]
-const fn pci_class_name(class_code: u8) -> &'static str {
-    match class_code {
-        0x01 => "storage",
-        0x02 => "network",
-        0x03 => "display",
-        0x04 => "multimedia",
-        0x06 => "bridge",
-        0x0c => "serial bus",
-        0x0d => "wireless",
-        _ => "unknown class",
-    }
-}
-
-#[cfg(not(feature = "emergency-boot"))]
 fn pci_probe_read_u32(function: PciProbeFunction, offset: u8) -> u32 {
     let address = pci_config_address(function, offset);
     unsafe {
@@ -887,8 +857,12 @@ fn pci_probe_function(function: PciProbeFunction) -> Option<PciProbeDevice> {
             class.subclass,
             class.prog_if,
             header_type,
-            pci_vendor_name(vendor_id),
-            pci_class_name(class.class_code)
+            mirage_device_db::lookup_pci_vendor(vendor_id)
+                .map(|vendor| vendor.name)
+                .unwrap_or("unknown vendor"),
+            mirage_device_db::lookup_pci_class(class.class_code, class.subclass, class.prog_if)
+                .map(|class| class.name)
+                .unwrap_or("unknown class")
         );
     }
 
