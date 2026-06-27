@@ -13,6 +13,7 @@ members = [
     "crates/mirage-block",
     "crates/mirage-boot",
     "crates/mirage-cap",
+    "crates/mirage-device-db",
     "crates/mirage-fb",
     "crates/mirage-gpu",
     "crates/mirage-hw",
@@ -103,6 +104,7 @@ hw-renoir-baremetal-interrupts = ["hw-renoir-kernel-boot", "hw-x86_64-apic", "hw
 # Rust `alloc` crate from source so kernel `Box`/`Vec` users route through the
 # skeleton heap allocator instead of implying a production memory subsystem.
 mirage-abi = { path = "crates/mirage-abi" }
+mirage-device-db = { path = "crates/mirage-device-db" }
 mirage-block = { path = "crates/mirage-block", optional = true }
 mirage-storage = { path = "crates/mirage-storage", optional = true }
 mirage-fb = { path = "crates/mirage-fb", optional = true }
