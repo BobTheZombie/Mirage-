@@ -1,0 +1,9 @@
+[package]
+name = "mirage-device-db"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mirage Kernel Authors"]
+description = "no_std PCI device identity lookup tables for Mirage diagnostics"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

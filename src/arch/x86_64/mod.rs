@@ -647,32 +647,16 @@ struct PciProbeDevice {
 
 impl PciProbeDevice {
     const fn platform_name(self) -> &'static str {
-        if self.vendor_id == 0x1002 && (self.device_id == 0x1636 || self.device_id == 0x1638) {
-            "AMDGPU Renoir"
-        } else if self.vendor_id == 0x1022
-            && self.class == 0x0c
-            && self.subclass == 0x03
-            && self.prog_if == 0x30
+        if let Some(device) = mirage_device_db::lookup_pci_device(self.vendor_id, self.device_id) {
+            device.name
+        } else if let Some(class) =
+            mirage_device_db::lookup_pci_class(self.class, self.subclass, self.prog_if)
         {
-            "AMD xHCI Controller"
-        } else if self.class == 0x0c && self.subclass == 0x03 && self.prog_if == 0x30 {
-            "xHCI Controller"
-        } else if self.class == 0x01 && self.subclass == 0x08 && self.prog_if == 0x02 {
-            "NVMe Controller"
-        } else if self.vendor_id == 0x8086 && self.class == 0x01 && self.subclass == 0x06 {
-            "Intel AHCI Controller"
-        } else if self.class == 0x01 && self.subclass == 0x06 && self.prog_if == 0x01 {
-            "AHCI Controller"
-        } else if self.vendor_id == 0x8086 && self.class == 0x06 && self.subclass == 0x00 {
-            "Intel Host Bridge"
-        } else if self.vendor_id == 0x1234 && self.class == 0x03 {
-            "QEMU VGA Display Controller"
-        } else if self.vendor_id == 0x8086 && self.class == 0x02 {
-            "Intel Ethernet Controller"
-        } else if self.vendor_id == 0x1022 {
-            "AMD SoC Device"
+            class.name
+        } else if let Some(vendor) = mirage_device_db::lookup_pci_vendor(self.vendor_id) {
+            vendor.name
         } else {
-            "PCI Device"
+            "Unknown PCI Device"
         }
     }
 

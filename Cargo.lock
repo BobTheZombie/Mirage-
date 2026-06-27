@@ -37,6 +37,7 @@ dependencies = [
  "mirage-abi",
  "mirage-block",
  "mirage-boot",
+ "mirage-device-db",
  "mirage-fb",
  "mirage-mtss",
  "mirage-platform",
@@ -111,6 +112,10 @@ dependencies = [
 
 [[package]]
 name = "mirage-cap"
+version = "0.1.0"
+
+[[package]]
+name = "mirage-device-db"
 version = "0.1.0"
 
 [[package]]
