@@ -35,6 +35,30 @@ pub struct PciClassInfo {
     pub driver_hint: Option<&'static str>,
 }
 
+/// Known platform input-controller metadata for diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InputDeviceInfo {
+    pub name: &'static str,
+    pub driver_hints: &'static [&'static str],
+}
+
+const INPUT_DEVICES: &[(&str, InputDeviceInfo)] = &[
+    (
+        "i8042",
+        InputDeviceInfo {
+            name: "PS/2 Controller",
+            driver_hints: &["i8042/inputd"],
+        },
+    ),
+    (
+        "input",
+        InputDeviceInfo {
+            name: "Generic Input Controller",
+            driver_hints: &["inputd"],
+        },
+    ),
+];
+
 const PCI_VENDORS: &[PciVendorInfo] = &[
     PciVendorInfo {
         vendor_id: 0x1002,
@@ -194,10 +218,22 @@ pub const fn lookup_pci_class(
     fallback
 }
 
+pub fn lookup_input_device(name: &str) -> Option<&'static InputDeviceInfo> {
+    let mut index = 0;
+    while index < INPUT_DEVICES.len() {
+        let (entry_name, entry) = &INPUT_DEVICES[index];
+        if *entry_name == name {
+            return Some(entry);
+        }
+        index += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{lookup_cpu_amd, lookup_cpu_intel};
-    use super::{lookup_pci_class, lookup_pci_device, lookup_pci_vendor};
+    use super::{lookup_input_device, lookup_pci_class, lookup_pci_device, lookup_pci_vendor};
 
     #[test]
     fn cpu_lookup_prefers_exact_stepping_before_model_fallback() {
@@ -237,9 +273,16 @@ mod tests {
     }
 
     #[test]
+    fn looks_up_input_driver_hints() {
+        let i8042 = lookup_input_device("i8042").expect("i8042 input descriptor");
+        assert_eq!(i8042.driver_hints, &["i8042/inputd"]);
+    }
+
+    #[test]
     fn unknown_entries_return_none_for_conservative_fallbacks() {
         assert!(lookup_pci_vendor(0xffff).is_none());
         assert!(lookup_pci_device(0xffff, 0xffff).is_none());
         assert!(lookup_pci_class(0xff, 0xff, 0xff).is_none());
+        assert!(lookup_input_device("unknown").is_none());
     }
 }
