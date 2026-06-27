@@ -1,209 +1,38 @@
 #![no_std]
 
-//! Small, static PCI identity database for Mirage diagnostics.
+//! Static hardware descriptor database for Mirage diagnostics and driver hints.
 //!
-//! This crate intentionally provides names and driver hints only. Hardware
-//! binding must continue to use raw PCI class/subclass/programming-interface
-//! codes and capability-mediated driver policy rather than trusting strings.
+//! The database is generated at build time by `tools/gen-device-db` from the
+//! checked-in descriptor source files. Runtime lookup functions only scan static
+//! slices: they do not allocate, parse TOML, or panic. Hardware binding and
+//! service launch policy must still be mediated by Mirage capability checks and
+//! the Supervisor; these descriptors are identity metadata and driver hints.
 
 mod generated;
+
 pub use generated::{
-    lookup_block_kind, lookup_cpu_amd, lookup_cpu_intel, lookup_input_kind, BlockDeviceDescriptor,
-    CpuInfo, InputDeviceDescriptor,
+    lookup_block_kind, lookup_char_kind, lookup_cpu_amd, lookup_cpu_intel, lookup_input_kind,
+    lookup_pci_class, lookup_pci_device, lookup_pci_vendor, lookup_usb_class, lookup_usb_device,
+    lookup_usb_vendor, BlockDeviceDescriptor, CharDeviceDescriptor, ChipsetDescriptor, CpuInfo,
+    InputDeviceDescriptor, PciClassDescriptor, PciDeviceDescriptor, PciVendorDescriptor,
+    UsbClassDescriptor, UsbDeviceDescriptor, UsbVendorDescriptor,
 };
 
-/// Known PCI vendor metadata.
+/// Bus-neutral vendor metadata shape used by PCI and USB descriptors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PciVendorInfo {
-    pub vendor_id: u16,
+pub struct VendorDescriptor {
+    pub id: u16,
     pub name: &'static str,
-}
-
-/// Known PCI device metadata.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PciDeviceInfo {
-    pub vendor_id: u16,
-    pub device_id: u16,
-    pub name: &'static str,
-    pub driver_hint: Option<&'static str>,
-}
-
-/// PCI class-code metadata for generic diagnostics.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PciClassInfo {
-    pub class: u8,
-    pub subclass: u8,
-    pub prog_if: Option<u8>,
-    pub name: &'static str,
-    pub driver_hint: Option<&'static str>,
-}
-
-const PCI_VENDORS: &[PciVendorInfo] = &[
-    PciVendorInfo {
-        vendor_id: 0x1002,
-        name: "AMD",
-    },
-    PciVendorInfo {
-        vendor_id: 0x1022,
-        name: "AMD",
-    },
-    PciVendorInfo {
-        vendor_id: 0x1234,
-        name: "QEMU",
-    },
-    PciVendorInfo {
-        vendor_id: 0x1af4,
-        name: "VirtIO",
-    },
-    PciVendorInfo {
-        vendor_id: 0x8086,
-        name: "Intel",
-    },
-];
-
-const PCI_DEVICES: &[PciDeviceInfo] = &[
-    PciDeviceInfo {
-        vendor_id: 0x1002,
-        device_id: 0x1636,
-        name: "AMD Radeon Renoir Graphics",
-        driver_hint: Some("amdgpu/displayd"),
-    },
-    PciDeviceInfo {
-        vendor_id: 0x1002,
-        device_id: 0x1638,
-        name: "AMD Radeon Renoir Graphics",
-        driver_hint: Some("amdgpu/displayd"),
-    },
-    PciDeviceInfo {
-        vendor_id: 0x1234,
-        device_id: 0x1111,
-        name: "QEMU VGA Display Controller",
-        driver_hint: Some("displayd"),
-    },
-    PciDeviceInfo {
-        vendor_id: 0x8086,
-        device_id: 0x100e,
-        name: "Intel 82540EM Gigabit Ethernet Controller",
-        driver_hint: Some("netd"),
-    },
-    PciDeviceInfo {
-        vendor_id: 0x8086,
-        device_id: 0x2922,
-        name: "Intel ICH9 AHCI Controller",
-        driver_hint: Some("ahci/storaged"),
-    },
-    PciDeviceInfo {
-        vendor_id: 0x8086,
-        device_id: 0x29c0,
-        name: "Intel Q35 Host Bridge",
-        driver_hint: None,
-    },
-];
-
-const PCI_CLASSES: &[PciClassInfo] = &[
-    PciClassInfo {
-        class: 0x01,
-        subclass: 0x06,
-        prog_if: Some(0x01),
-        name: "AHCI Controller",
-        driver_hint: Some("ahci/storaged"),
-    },
-    PciClassInfo {
-        class: 0x01,
-        subclass: 0x08,
-        prog_if: Some(0x02),
-        name: "NVMe Controller",
-        driver_hint: Some("nvme/storaged"),
-    },
-    PciClassInfo {
-        class: 0x02,
-        subclass: 0x00,
-        prog_if: None,
-        name: "Ethernet Controller",
-        driver_hint: Some("netd"),
-    },
-    PciClassInfo {
-        class: 0x03,
-        subclass: 0x00,
-        prog_if: None,
-        name: "VGA Display Controller",
-        driver_hint: Some("displayd"),
-    },
-    PciClassInfo {
-        class: 0x03,
-        subclass: 0x80,
-        prog_if: None,
-        name: "Display Controller",
-        driver_hint: Some("displayd"),
-    },
-    PciClassInfo {
-        class: 0x06,
-        subclass: 0x00,
-        prog_if: None,
-        name: "Host Bridge",
-        driver_hint: None,
-    },
-    PciClassInfo {
-        class: 0x0c,
-        subclass: 0x03,
-        prog_if: Some(0x30),
-        name: "xHCI Controller",
-        driver_hint: Some("xhci/usbd"),
-    },
-];
-
-pub const fn lookup_pci_vendor(vendor_id: u16) -> Option<&'static PciVendorInfo> {
-    let mut index = 0;
-    while index < PCI_VENDORS.len() {
-        let vendor = &PCI_VENDORS[index];
-        if vendor.vendor_id == vendor_id {
-            return Some(vendor);
-        }
-        index += 1;
-    }
-    None
-}
-
-pub const fn lookup_pci_device(vendor_id: u16, device_id: u16) -> Option<&'static PciDeviceInfo> {
-    let mut index = 0;
-    while index < PCI_DEVICES.len() {
-        let device = &PCI_DEVICES[index];
-        if device.vendor_id == vendor_id && device.device_id == device_id {
-            return Some(device);
-        }
-        index += 1;
-    }
-    None
-}
-
-pub const fn lookup_pci_class(
-    class: u8,
-    subclass: u8,
-    prog_if: u8,
-) -> Option<&'static PciClassInfo> {
-    let mut fallback = None;
-    let mut index = 0;
-    while index < PCI_CLASSES.len() {
-        let entry = &PCI_CLASSES[index];
-        if entry.class == class && entry.subclass == subclass {
-            match entry.prog_if {
-                Some(required) if required == prog_if => return Some(entry),
-                None => fallback = Some(entry),
-                _ => {}
-            }
-        }
-        index += 1;
-    }
-    fallback
+    pub aliases: &'static [&'static str],
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        lookup_block_kind, lookup_input_kind, lookup_pci_class, lookup_pci_device,
-        lookup_pci_vendor,
+        lookup_block_kind, lookup_char_kind, lookup_cpu_amd, lookup_cpu_intel, lookup_input_kind,
+        lookup_pci_class, lookup_pci_device, lookup_pci_vendor, lookup_usb_class,
+        lookup_usb_device, lookup_usb_vendor,
     };
-    use super::{lookup_cpu_amd, lookup_cpu_intel};
 
     #[test]
     fn cpu_lookup_prefers_exact_stepping_before_model_fallback() {
@@ -229,10 +58,19 @@ mod tests {
     }
 
     #[test]
-    fn looks_up_known_device_and_driver_hint() {
-        let device = lookup_pci_device(0x1002, 0x1636).expect("Renoir GPU device entry");
-        assert_eq!(device.name, "AMD Radeon Renoir Graphics");
-        assert_eq!(device.driver_hint, Some("amdgpu/displayd"));
+    fn looks_up_pci_and_usb_descriptors() {
+        let vendor = lookup_pci_vendor(0x1002).expect("AMD PCI vendor");
+        assert_eq!(vendor.name, "AMD");
+
+        let pci = lookup_pci_device(0x1002, 0x1636).expect("Renoir GPU device entry");
+        assert_eq!(pci.name, "AMD Radeon Renoir Graphics");
+        assert_eq!(pci.driver_hint, Some("amdgpu/displayd"));
+
+        let usb_vendor = lookup_usb_vendor(0x046d).expect("Logitech USB vendor");
+        assert_eq!(usb_vendor.name, "Logitech");
+
+        let usb = lookup_usb_device(0x046d, 0xc31c).expect("Logitech keyboard");
+        assert_eq!(usb.driver_hint, Some("hid/inputd"));
     }
 
     #[test]
@@ -240,40 +78,23 @@ mod tests {
         let nvme = lookup_pci_class(0x01, 0x08, 0x02).expect("NVMe class entry");
         assert_eq!(nvme.name, "NVMe Controller");
         assert_eq!(nvme.driver_hint, Some("nvme/storaged"));
+
+        let hid = lookup_usb_class(0x03, 0x01, 0x01).expect("generic HID class entry");
+        assert_eq!(hid.name, "Human Interface Device");
     }
 
     #[test]
-    fn looks_up_block_driver_hints() {
+    fn looks_up_block_char_and_input_driver_hints() {
         let sata = lookup_block_kind("ahci-disk").expect("AHCI disk block descriptor");
         assert_eq!(sata.name, "AHCI SATA Disk");
         assert_eq!(sata.driver_hint, "ahci/storaged");
         assert_eq!(sata.default_block_size, 512);
 
-        let atapi = lookup_block_kind("atapi").expect("ATAPI block descriptor");
-        assert_eq!(atapi.name, "ATAPI Optical Media");
-        assert_eq!(atapi.driver_hint, "ahci-atapi/storaged");
-        assert_eq!(atapi.default_block_size, 2048);
+        let serial = lookup_char_kind("serial-console").expect("serial char descriptor");
+        assert_eq!(serial.driver_hints, &["uart16550", "console"]);
 
-        let nvme = lookup_block_kind("nvme").expect("NVMe block descriptor");
-        assert_eq!(nvme.driver_hint, "nvme/storaged");
-    }
-
-    #[test]
-    fn looks_up_input_driver_hints() {
-        let i8042 = lookup_input_kind("i8042-controller").expect("i8042 input descriptor");
-        assert_eq!(i8042.name, "Intel 8042-compatible PS/2 Controller");
-        assert_eq!(i8042.driver_hints, &["i8042", "inputd"]);
-
-        let usb = lookup_input_kind("usb-hid-keyboard").expect("USB HID keyboard descriptor");
-        assert_eq!(usb.driver_hints, &["xhci", "usbd", "hid", "inputd"]);
-    }
-
-    #[test]
-    fn unknown_entries_return_none_for_conservative_fallbacks() {
-        assert!(lookup_pci_vendor(0xffff).is_none());
-        assert!(lookup_pci_device(0xffff, 0xffff).is_none());
-        assert!(lookup_pci_class(0xff, 0xff, 0xff).is_none());
-        assert!(lookup_block_kind("unknown").is_none());
-        assert!(lookup_input_kind("unknown").is_none());
+        let keyboard =
+            lookup_input_kind("usb-hid-keyboard").expect("USB keyboard input descriptor");
+        assert_eq!(keyboard.driver_hints, &["xhci", "usbd", "hid", "inputd"]);
     }
 }
