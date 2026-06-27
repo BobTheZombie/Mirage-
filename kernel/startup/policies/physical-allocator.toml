@@ -1,0 +1,9 @@
+id = "physical-allocator"
+name = "Physical Allocator"
+kind = "KernelMechanism"
+startup = "physical_allocator"
+required = true
+failure = "Fatal"
+after = ["memory-map"]
+requires = ["memory.map"]
+provides = ["memory.physical_allocator"]

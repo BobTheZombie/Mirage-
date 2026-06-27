@@ -1,0 +1,9 @@
+id = "pic"
+name = "PIC"
+kind = "KernelMechanism"
+startup = "pic"
+required = true
+failure = "Fatal"
+after = ["idt"]
+requires = ["idt.ready"]
+provides = ["pic.ready"]

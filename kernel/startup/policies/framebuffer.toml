@@ -1,0 +1,10 @@
+id = "framebuffer"
+name = "Framebuffer"
+kind = "KernelMechanism"
+startup = "framebuffer"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional hardware/service may degrade without blocking boot"
+after = ["bootinfo", "paging"]
+requires = ["boot.info", "paging.ready"]
+provides = ["framebuffer.ready"]

@@ -1,0 +1,9 @@
+id = "block-layer"
+name = "Block Layer"
+kind = "DriverService"
+startup = "block_layer"
+required = true
+failure = "Fatal"
+after = ["heap"]
+requires = ["heap.ready"]
+provides = ["block.layer"]

@@ -1,0 +1,9 @@
+id = "heap"
+name = "Kernel Heap"
+kind = "KernelMechanism"
+startup = "heap"
+required = true
+failure = "Fatal"
+after = ["paging"]
+requires = ["paging.ready"]
+provides = ["heap.ready"]

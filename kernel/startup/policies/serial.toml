@@ -1,0 +1,9 @@
+id = "serial"
+name = "Serial Console"
+kind = "KernelMechanism"
+startup = "serial"
+required = true
+failure = "Fatal"
+after = ["architecture"]
+requires = ["arch.ready"]
+provides = ["serial.console"]

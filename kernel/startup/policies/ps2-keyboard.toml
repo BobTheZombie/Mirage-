@@ -1,0 +1,10 @@
+id = "ps2-keyboard"
+name = "PS/2 Keyboard"
+kind = "DriverService"
+startup = "ps2_keyboard"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional hardware/service may degrade without blocking boot"
+after = ["i8042"]
+requires = ["i8042.controller"]
+provides = ["input.keyboard.ps2"]

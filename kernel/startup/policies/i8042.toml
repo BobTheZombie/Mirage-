@@ -1,0 +1,10 @@
+id = "i8042"
+name = "i8042 Controller"
+kind = "DriverService"
+startup = "i8042"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional hardware/service may degrade without blocking boot"
+after = ["interrupts"]
+requires = ["interrupts.ready"]
+provides = ["i8042.controller"]

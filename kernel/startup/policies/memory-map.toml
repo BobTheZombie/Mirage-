@@ -1,0 +1,9 @@
+id = "memory-map"
+name = "Memory Map"
+kind = "KernelMechanism"
+startup = "memory_map"
+required = true
+failure = "Fatal"
+after = ["bootinfo"]
+requires = ["boot.info"]
+provides = ["memory.map"]

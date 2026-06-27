@@ -1,0 +1,9 @@
+id = "bootinfo"
+name = "BootInfo"
+kind = "KernelMechanism"
+startup = "bootinfo"
+required = true
+failure = "Fatal"
+after = ["seed-rs"]
+requires = ["boot.seed"]
+provides = ["boot.info"]

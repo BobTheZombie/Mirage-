@@ -1,0 +1,9 @@
+id = "kernel-mapper"
+name = "Kernel Mapper"
+kind = "KernelMechanism"
+startup = "kernel_mapper"
+required = true
+failure = "Fatal"
+after = ["physical-allocator"]
+requires = ["memory.physical_allocator"]
+provides = ["memory.kernel_mapper"]

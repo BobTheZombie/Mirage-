@@ -1,0 +1,9 @@
+id = "interrupts"
+name = "Interrupts"
+kind = "KernelMechanism"
+startup = "interrupts"
+required = true
+failure = "Fatal"
+after = ["pic", "idt"]
+requires = ["pic.ready", "idt.ready"]
+provides = ["interrupts.ready"]

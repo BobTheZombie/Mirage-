@@ -1,0 +1,9 @@
+id = "mtss-pid0"
+name = "MTSS PID0"
+kind = "MtssMechanism"
+startup = "mtss_pid0"
+required = true
+failure = "Fatal"
+after = ["supervisor", "heap"]
+requires = ["supervisor.ready", "heap.ready"]
+provides = ["mtss.pid0"]

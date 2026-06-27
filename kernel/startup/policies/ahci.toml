@@ -1,0 +1,10 @@
+id = "ahci"
+name = "AHCI"
+kind = "DriverService"
+startup = "ahci"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional hardware/service may degrade without blocking boot"
+after = ["pci", "block-layer"]
+requires = ["pci.bus", "block.layer"]
+provides = ["storage.ahci"]

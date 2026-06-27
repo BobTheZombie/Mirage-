@@ -1,0 +1,9 @@
+id = "kernel-main"
+name = "Kernel Main"
+kind = "KernelMechanism"
+startup = "kernel_main"
+required = true
+failure = "Fatal"
+after = ["bootinfo"]
+requires = ["boot.info"]
+provides = ["kernel.main"]

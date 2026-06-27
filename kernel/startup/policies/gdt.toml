@@ -1,0 +1,9 @@
+id = "gdt"
+name = "GDT"
+kind = "KernelMechanism"
+startup = "gdt"
+required = true
+failure = "Fatal"
+after = ["architecture"]
+requires = ["arch.ready"]
+provides = ["gdt.ready"]

@@ -1,0 +1,9 @@
+id = "paging"
+name = "Paging"
+kind = "KernelMechanism"
+startup = "paging"
+required = true
+failure = "Fatal"
+after = ["kernel-mapper", "gdt"]
+requires = ["memory.kernel_mapper", "gdt.ready"]
+provides = ["paging.ready"]
