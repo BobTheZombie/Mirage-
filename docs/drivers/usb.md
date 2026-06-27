@@ -23,3 +23,7 @@ Mass-storage detection and BOT/SCSI abstractions exist in `mirage-usb`; the earl
 ## Provenance
 
 Linux USB files listed in `docs/audits/linux-xhci-amd-renoir-reference-audit.md` were inspected only for behavior, sequencing, and quirk provenance. Mirage implementation is independent Rust and does not copy GPL Linux code.
+
+## Zinnia reference audit
+
+The xHCI/USB portions of Zinnia were inspected only for staged controller initialization, ring/event architecture, and nonfatal probing patterns. See `docs/audits/zinnia-xhci-nvme-driver-audit.md`. No Zinnia code was copied into Mirage.

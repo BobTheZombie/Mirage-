@@ -389,6 +389,110 @@ const fn bar_size_from_mask(mask: u64, width_mask: u64) -> Option<u64> {
     }
 }
 
+/// Shared result model for optional Mirage hardware driver probes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DriverProbeResult {
+    /// The driver validated the device and bound real hardware state.
+    Bound,
+    /// The device is absent or the class/vendor/device tuple is not handled.
+    NotSupported,
+    /// The driver reached a truthful partial state without becoming fatal to boot.
+    Degraded(&'static str),
+    /// The driver matched but failed before it could safely bind the device.
+    Failed(DriverError),
+}
+
+/// Common driver errors used before a more specific driver error is available.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum DriverError {
+    MissingDevice,
+    MissingMmioBar,
+    InvalidMmioRange,
+    DmaUnavailable,
+    InterruptUnavailable,
+    Timeout(&'static str),
+    Unsupported(&'static str),
+    HardwareFault(&'static str),
+}
+
+/// Bounded polling timeout description.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Timeout {
+    pub operation: &'static str,
+    pub ticks: u32,
+}
+
+/// Poll a condition for at most `ticks` iterations.
+///
+/// This helper is deliberately tick-based so it works in early boot and in
+/// no_std driver crates before a stable timer service is available. Callers
+/// must choose a documented bound derived from the device operation.
+pub fn poll_until(
+    operation: &'static str,
+    ticks: u32,
+    mut condition: impl FnMut() -> bool,
+) -> Result<(), Timeout> {
+    for _ in 0..ticks {
+        if condition() {
+            return Ok(());
+        }
+        core::hint::spin_loop();
+    }
+    Err(Timeout { operation, ticks })
+}
+
+/// Poll a volatile register reader for at most `ticks` iterations.
+pub fn poll_reg_until<T: Copy>(
+    operation: &'static str,
+    ticks: u32,
+    mut read: impl FnMut() -> T,
+    mut condition: impl FnMut(T) -> bool,
+) -> Result<(), Timeout> {
+    poll_until(operation, ticks, || condition(read()))
+}
+
+/// Minimal DMA allocation descriptor shared by early driver scaffolds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct DmaBufferDescriptor {
+    physical: u64,
+    length: usize,
+    alignment: usize,
+}
+
+impl DmaBufferDescriptor {
+    pub const fn new(physical: u64, length: usize, alignment: usize) -> Result<Self, DriverError> {
+        if length == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0 {
+            return Err(DriverError::DmaUnavailable);
+        }
+        if (physical as usize) & (alignment - 1) != 0 {
+            return Err(DriverError::DmaUnavailable);
+        }
+        Ok(Self {
+            physical,
+            length,
+            alignment,
+        })
+    }
+    pub const fn physical(self) -> u64 {
+        self.physical
+    }
+    pub const fn length(self) -> usize {
+        self.length
+    }
+    pub const fn alignment(self) -> usize {
+        self.alignment
+    }
+}
+
+/// Decode and validate a PCI MMIO BAR for driver binding.
+pub fn require_mmio_bar(device: &PciDevice, index: usize) -> Result<PciBar, DriverError> {
+    let bar = device.bar(index).ok_or(DriverError::MissingMmioBar)?;
+    if !bar.is_memory() || bar.base() == 0 {
+        return Err(DriverError::InvalidMmioRange);
+    }
+    Ok(bar)
+}
+
 /// Parsed PCI configuration header for a type-0 endpoint function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PciHeader {
@@ -982,6 +1086,46 @@ mod tests {
         assert_eq!(io.base(), 0x0000_d000);
         assert_eq!(io.length(), Some(0x100));
         assert!(!io.is_memory());
+    }
+
+    #[test]
+    fn bounded_poll_reports_success_and_timeout() {
+        let mut seen = 0;
+        assert_eq!(
+            poll_until("unit ready", 4, || {
+                seen += 1;
+                seen == 3
+            }),
+            Ok(())
+        );
+        assert_eq!(seen, 3);
+        assert_eq!(
+            poll_until("unit timeout", 2, || false),
+            Err(Timeout {
+                operation: "unit timeout",
+                ticks: 2
+            })
+        );
+    }
+
+    #[test]
+    fn validates_dma_alignment_and_mmio_bar() {
+        assert_eq!(
+            DmaBufferDescriptor::new(0x2000, 4096, 4096)
+                .unwrap()
+                .physical(),
+            0x2000
+        );
+        assert_eq!(
+            DmaBufferDescriptor::new(0x2100, 4096, 4096),
+            Err(DriverError::DmaUnavailable)
+        );
+
+        let mut config = endpoint(0x144d, 0xa808, 0x01, 0x08, 0x02);
+        config.write_u32(0x10, 0xfebc_0000).unwrap();
+        let dev = PciDevice::new(addr(1, 0), config).unwrap();
+        assert_eq!(require_mmio_bar(&dev, 0).unwrap().base(), 0xfebc_0000);
+        assert_eq!(require_mmio_bar(&dev, 1), Err(DriverError::MissingMmioBar));
     }
 
     #[test]

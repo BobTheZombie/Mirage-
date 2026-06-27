@@ -48,3 +48,7 @@ The early path uses fixed aligned memory for DCBAA, command ring, event ring, an
 ## Test results
 
 `cargo check` passed after the xHCI changes. Full ISO/QEMU validation is recorded in the PR/final report when available.
+
+## Zinnia reference audit
+
+`docs/audits/zinnia-xhci-nvme-driver-audit.md` records the Zinnia xHCI files inspected at commit `ecbedd86ab8fe70a5db02eabcf35966b77f0eb56`. Zinnia is GPL-2.0, so Mirage uses it only as a behavioral reference. No Zinnia code was copied.
