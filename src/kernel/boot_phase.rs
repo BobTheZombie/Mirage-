@@ -6,6 +6,7 @@
 //! table is fixed-size, `no_std` friendly, and queryable by the framebuffer boot
 //! screen and future debug shell without requiring heap allocation.
 
+use crate::kernel::kso::{generated as kso_nodes, KsoNodeId, KsoState};
 use crate::kernel::sync::SpinLock;
 
 /// Maximum number of boot subsystem records tracked without allocation.
@@ -159,10 +160,13 @@ pub enum PhaseState {
     Detected,
     Found,
     Ok,
+    Ready,
     Online,
     Enabled,
     Stub,
+    Degraded,
     Skipped,
+    Disabled,
     Failed,
     Running,
 }
@@ -177,10 +181,13 @@ impl PhaseState {
             Self::Detected => "Detected",
             Self::Found => "Found",
             Self::Ok => "Ok",
+            Self::Ready => "Ready",
             Self::Online => "Online",
             Self::Enabled => "Enabled",
             Self::Stub => "Stub",
+            Self::Degraded => "Degraded",
             Self::Skipped => "Skipped",
+            Self::Disabled => "Disabled",
             Self::Failed => "Failed",
             Self::Running => "Running",
         }
@@ -189,8 +196,22 @@ impl PhaseState {
     const fn weighted_progress(self, required: bool, weight: u8) -> u16 {
         let weight = weight as u16;
         match self {
-            Self::Ok | Self::Online | Self::Enabled | Self::Running => weight,
-            Self::Skipped | Self::Detected | Self::Found | Self::Stub => {
+            Self::Ok | Self::Ready | Self::Online | Self::Enabled | Self::Running => weight,
+            Self::Skipped | Self::Disabled => {
+                if required {
+                    0
+                } else {
+                    weight
+                }
+            }
+            Self::Degraded => {
+                if required {
+                    0
+                } else {
+                    weight
+                }
+            }
+            Self::Detected | Self::Found | Self::Stub => {
                 if required {
                     weight / 2
                 } else {
@@ -300,6 +321,10 @@ impl BootPhaseManager {
     }
 
     pub fn progress_percent(&self) -> u8 {
+        self.progress_percent_with_policy(false)
+    }
+
+    pub fn progress_percent_with_policy(&self, allow_required_degraded: bool) -> u8 {
         let mut index = 0usize;
         let mut completed = 0u16;
         let mut total = 0u16;
@@ -307,9 +332,16 @@ impl BootPhaseManager {
             let record = self.records[index];
             if record.state != PhaseState::Unregistered {
                 total += record.descriptor.weight as u16;
-                completed += record
-                    .state
-                    .weighted_progress(record.descriptor.required, record.descriptor.weight);
+                completed += if allow_required_degraded
+                    && record.descriptor.required
+                    && record.state == PhaseState::Degraded
+                {
+                    record.descriptor.weight as u16
+                } else {
+                    record
+                        .state
+                        .weighted_progress(record.descriptor.required, record.descriptor.weight)
+                };
             }
             index += 1;
         }
@@ -808,6 +840,68 @@ const fn fallback_descriptor(phase: BootPhase) -> SubsystemDescriptor {
 
 static BOOT_PHASE_MANAGER: SpinLock<BootPhaseManager> = SpinLock::new(BootPhaseManager::new());
 
+/// Map generated KSO nodes to canonical boot phase records.
+pub const fn boot_phase_for_kso_node(node: KsoNodeId) -> Option<BootPhase> {
+    match node {
+        kso_nodes::AHCI => Some(BootPhase::Ahci),
+        kso_nodes::ARCHITECTURE => Some(BootPhase::Architecture),
+        kso_nodes::BLOCK_LAYER => Some(BootPhase::BlockLayer),
+        kso_nodes::BOOT_RUNTIME => Some(BootPhase::BootRuntime),
+        kso_nodes::BOOTINFO => Some(BootPhase::BootInfo),
+        kso_nodes::FRAMEBUFFER => Some(BootPhase::Framebuffer),
+        kso_nodes::GDT => Some(BootPhase::Gdt),
+        kso_nodes::HEAP => Some(BootPhase::Heap),
+        kso_nodes::I8042 => Some(BootPhase::I8042),
+        kso_nodes::IDLELOOP => Some(BootPhase::IdleLoop),
+        kso_nodes::IDT => Some(BootPhase::Idt),
+        kso_nodes::INTERRUPTS => Some(BootPhase::Interrupts),
+        kso_nodes::KERNEL_MAIN => Some(BootPhase::KernelMain),
+        kso_nodes::KERNEL_MAPPER => Some(BootPhase::KernelMapper),
+        kso_nodes::MEMORY_MAP => Some(BootPhase::MemoryMap),
+        kso_nodes::MTSS_PID0 => Some(BootPhase::Mtss),
+        kso_nodes::NVME => Some(BootPhase::Nvme),
+        kso_nodes::PAGING => Some(BootPhase::Paging),
+        kso_nodes::PHYSICAL_ALLOCATOR => Some(BootPhase::PhysicalAllocator),
+        kso_nodes::PIC => Some(BootPhase::Pic),
+        kso_nodes::PID1_HANDOFF => Some(BootPhase::Pid1),
+        kso_nodes::PS2_KEYBOARD => Some(BootPhase::Ps2Keyboard),
+        kso_nodes::ROOTFS => Some(BootPhase::RootFs),
+        kso_nodes::SEED_RS => Some(BootPhase::SeedRs),
+        kso_nodes::SERIAL => Some(BootPhase::Serial),
+        kso_nodes::SUPERVISOR => Some(BootPhase::Supervisor),
+        kso_nodes::USB_CORE => Some(BootPhase::UsbCore),
+        kso_nodes::USERSPACE_LOADER => Some(BootPhase::UserspaceLoader),
+        kso_nodes::XHCI => Some(BootPhase::Xhci),
+        _ => None,
+    }
+}
+
+pub const fn phase_state_for_kso_state(state: KsoState) -> PhaseState {
+    match state {
+        KsoState::NotStarted | KsoState::New | KsoState::WaitingDeps => PhaseState::Pending,
+        KsoState::Starting => PhaseState::Started,
+        KsoState::Ready => PhaseState::Ready,
+        KsoState::Online => PhaseState::Online,
+        KsoState::Degraded => PhaseState::Degraded,
+        KsoState::Skipped => PhaseState::Skipped,
+        KsoState::Disabled => PhaseState::Disabled,
+        KsoState::Failed => PhaseState::Failed,
+        KsoState::Running => PhaseState::Running,
+    }
+}
+
+pub fn boot_phase_apply_kso_transition(
+    node: KsoNodeId,
+    state: KsoState,
+    message: &'static str,
+) -> bool {
+    let Some(phase) = boot_phase_for_kso_node(node) else {
+        return false;
+    };
+    transition(phase, phase_state_for_kso_state(state), message);
+    true
+}
+
 /// Register only subsystems compiled into this kernel build and leave them pending.
 pub fn boot_register_compiled_subsystems() {
     register_phase(BootPhase::SeedRs);
@@ -1053,7 +1147,10 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
         // serial-visible, but never synchronously repaint the framebuffer from
         // this transition; later durable phases repaint once progress has
         // advanced beyond kernel construction.
-        (BootPhase::Framebuffer, PhaseState::Ok | PhaseState::Online | PhaseState::Enabled) => true,
+        (
+            BootPhase::Framebuffer,
+            PhaseState::Ok | PhaseState::Ready | PhaseState::Online | PhaseState::Enabled,
+        ) => true,
         (
             BootPhase::BootInfoApplied
             | BootPhase::SupervisorCreated
@@ -1069,11 +1166,13 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | BootPhase::Userspace
             | BootPhase::IdleLoop,
             PhaseState::Ok
+            | PhaseState::Ready
             | PhaseState::Online
             | PhaseState::Enabled
             | PhaseState::Running
             | PhaseState::Found
-            | PhaseState::Stub,
+            | PhaseState::Stub
+            | PhaseState::Degraded,
         ) => true,
 
         // Failures are user-visible terminal states and should not wait for a
@@ -1091,12 +1190,15 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | PhaseState::Started
             | PhaseState::Detected
             | PhaseState::Ok
+            | PhaseState::Ready
             | PhaseState::Online
             | PhaseState::Enabled
             | PhaseState::Running
             | PhaseState::Found
             | PhaseState::Stub
-            | PhaseState::Skipped,
+            | PhaseState::Degraded
+            | PhaseState::Skipped
+            | PhaseState::Disabled,
         ) => false,
     }
 }
@@ -1114,7 +1216,7 @@ fn framebuffer_milestone_render_enabled() -> bool {
 fn framebuffer_ready() -> bool {
     matches!(
         boot_phase_state(BootPhase::Framebuffer),
-        PhaseState::Ok | PhaseState::Online | PhaseState::Enabled
+        PhaseState::Ok | PhaseState::Ready | PhaseState::Online | PhaseState::Enabled
     )
 }
 
@@ -1223,12 +1325,98 @@ mod tests {
         assert_eq!(PhaseState::Started.as_str(), "Started");
         assert_eq!(PhaseState::Detected.as_str(), "Detected");
         assert_eq!(PhaseState::Ok.as_str(), "Ok");
+        assert_eq!(PhaseState::Ready.as_str(), "Ready");
         assert_eq!(PhaseState::Online.as_str(), "Online");
         assert_eq!(PhaseState::Enabled.as_str(), "Enabled");
         assert_eq!(PhaseState::Stub.as_str(), "Stub");
+        assert_eq!(PhaseState::Degraded.as_str(), "Degraded");
         assert_eq!(PhaseState::Skipped.as_str(), "Skipped");
+        assert_eq!(PhaseState::Disabled.as_str(), "Disabled");
         assert_eq!(PhaseState::Failed.as_str(), "Failed");
         assert_eq!(PhaseState::Running.as_str(), "Running");
+    }
+
+    #[test]
+    fn kso_state_mapping_covers_all_lifecycle_states() {
+        use crate::kernel::kso::KsoState;
+
+        let cases = [
+            (KsoState::NotStarted, PhaseState::Pending),
+            (KsoState::New, PhaseState::Pending),
+            (KsoState::WaitingDeps, PhaseState::Pending),
+            (KsoState::Starting, PhaseState::Started),
+            (KsoState::Ready, PhaseState::Ready),
+            (KsoState::Online, PhaseState::Online),
+            (KsoState::Degraded, PhaseState::Degraded),
+            (KsoState::Skipped, PhaseState::Skipped),
+            (KsoState::Disabled, PhaseState::Disabled),
+            (KsoState::Failed, PhaseState::Failed),
+            (KsoState::Running, PhaseState::Running),
+        ];
+
+        for (kso, phase) in cases {
+            assert_eq!(super::phase_state_for_kso_state(kso), phase);
+        }
+    }
+
+    #[test]
+    fn kso_node_mapping_targets_boot_phase_records() {
+        use crate::kernel::kso::generated;
+
+        assert_eq!(
+            super::boot_phase_for_kso_node(generated::SEED_RS),
+            Some(BootPhase::SeedRs)
+        );
+        assert_eq!(
+            super::boot_phase_for_kso_node(generated::MTSS_PID0),
+            Some(BootPhase::Mtss)
+        );
+        assert_eq!(
+            super::boot_phase_for_kso_node(generated::PID1_HANDOFF),
+            Some(BootPhase::Pid1)
+        );
+        assert_eq!(
+            super::boot_phase_for_kso_node(generated::FRAMEBUFFER),
+            Some(BootPhase::Framebuffer)
+        );
+        assert_eq!(
+            super::boot_phase_for_kso_node(crate::kernel::kso::KsoNodeId(999)),
+            None
+        );
+    }
+
+    #[test]
+    fn waiting_deps_required_node_prevents_full_progress() {
+        let mut manager = BootPhaseManager::new();
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[0]);
+        manager.transition(BootPhase::SeedRs, PhaseState::Pending, "waiting");
+
+        assert_eq!(manager.progress_percent(), 0);
+    }
+
+    #[test]
+    fn optional_terminal_kso_states_count_complete() {
+        for state in [
+            PhaseState::Degraded,
+            PhaseState::Skipped,
+            PhaseState::Disabled,
+        ] {
+            let mut manager = BootPhaseManager::new();
+            manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[12]);
+            manager.transition(BootPhase::Framebuffer, state, "optional terminal");
+
+            assert_eq!(manager.progress_percent(), 100);
+        }
+    }
+
+    #[test]
+    fn required_degraded_requires_explicit_progress_policy() {
+        let mut manager = BootPhaseManager::new();
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[0]);
+        manager.transition(BootPhase::SeedRs, PhaseState::Degraded, "degraded");
+
+        assert_eq!(manager.progress_percent(), 0);
+        assert_eq!(manager.progress_percent_with_policy(true), 100);
     }
 
     #[test]
