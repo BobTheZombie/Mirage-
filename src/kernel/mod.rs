@@ -17,6 +17,7 @@ pub mod fs;
 pub mod futex;
 pub mod input;
 pub mod ipc;
+pub mod kso;
 pub mod memory;
 pub mod mmio;
 pub mod partition;
