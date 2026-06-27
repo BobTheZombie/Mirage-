@@ -1,0 +1,18 @@
+# Mirage no_std input diagnostic descriptors.
+# These descriptors are metadata for platform logging only; hardware binding,
+# service launch, and capability grants remain owned by supervisor policy.
+
+[[input]]
+kind = "i8042-controller"
+name = "Intel 8042-compatible PS/2 Controller"
+driver_hints = ["i8042", "inputd"]
+
+[[input]]
+kind = "ps2-keyboard"
+name = "PS/2 Keyboard"
+driver_hints = ["ps2-keyboard", "inputd"]
+
+[[input]]
+kind = "usb-hid-keyboard"
+name = "USB HID Keyboard"
+driver_hints = ["xhci", "usbd", "hid", "inputd"]
