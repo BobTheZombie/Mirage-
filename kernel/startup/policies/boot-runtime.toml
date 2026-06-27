@@ -6,4 +6,4 @@ required = true
 failure = "Fatal"
 after = ["block-layer", "heap"]
 requires = ["block.layer", "heap.ready"]
-provides = ["boot.runtime.validated"]
+provides = ["boot.runtime.validated", "boot.spider_rs_image"]

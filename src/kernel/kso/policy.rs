@@ -36,6 +36,8 @@ pub struct KsoPolicy {
     pub required: bool,
     pub allow_missing_wants: bool,
     pub failure: KsoFailurePolicy,
+    pub allow_cooperative_mtss: bool,
+    pub require_preemption: bool,
 }
 
 impl KsoPolicy {
@@ -43,11 +45,15 @@ impl KsoPolicy {
         required: true,
         allow_missing_wants: false,
         failure: KsoFailurePolicy::Fatal,
+        allow_cooperative_mtss: false,
+        require_preemption: false,
     };
 
     pub const OPTIONAL_DRIVER: Self = Self {
         required: false,
         allow_missing_wants: true,
         failure: KsoFailurePolicy::AllowDegraded,
+        allow_cooperative_mtss: false,
+        require_preemption: false,
     };
 }

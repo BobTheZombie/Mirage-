@@ -62,9 +62,16 @@ const CAPABILITIES: &[&str] = &[
     "usb.xhci",
     "usb.core",
     "boot.runtime.validated",
+    "boot.spider_rs_image",
     "rootfs.mounted",
     "supervisor.ready",
+    "supervisor.launch_grants",
     "mtss.pid0",
+    "mtss.core",
+    "mtss.scheduler",
+    "mtss.cooperative",
+    "mtss.timer",
+    "mtss.preemption",
     "userspace.loader",
     "pid1.handoff",
     "idleloop.ready",
@@ -83,6 +90,10 @@ pub struct PolicyToml {
     #[serde(default)]
     pub optional_policy: Option<String>,
     #[serde(default)]
+    pub allow_cooperative_mtss: bool,
+    #[serde(default)]
+    pub require_preemption: bool,
+    #[serde(default)]
     pub after: Vec<String>,
     #[serde(default)]
     pub before: Vec<String>,
@@ -91,9 +102,13 @@ pub struct PolicyToml {
     #[serde(default)]
     pub wants: Vec<String>,
     #[serde(default)]
+    pub wants_capabilities: Vec<String>,
+    #[serde(default)]
     pub requires: Vec<String>,
     #[serde(default)]
     pub provides: Vec<String>,
+    #[serde(default)]
+    pub optional_provides: Vec<String>,
 }
 
 pub fn load_dir(dir: impl AsRef<Path>) -> Result<Vec<PolicyToml>, String> {
@@ -144,7 +159,13 @@ pub fn validate(nodes: &[PolicyToml]) -> Result<(), String> {
                 }
             }
         }
-        for c in n.requires.iter().chain(n.provides.iter()) {
+        for c in n
+            .requires
+            .iter()
+            .chain(n.wants_capabilities.iter())
+            .chain(n.provides.iter())
+            .chain(n.optional_provides.iter())
+        {
             if !caps.contains(c.as_str()) {
                 return Err(format!(
                     "node `{}` references unknown capability `{c}`",
@@ -270,7 +291,17 @@ pub fn generate(nodes: &[PolicyToml]) -> Result<String, String> {
         emit_id_slice(&mut s, &format!("{cname}_AFTER"), &after, &idnum);
         emit_id_slice(&mut s, &format!("{cname}_WANTS"), &n.wants, &idnum);
         emit_cap_slice(&mut s, &format!("{cname}_REQUIRES"), &n.requires);
+        emit_cap_slice(
+            &mut s,
+            &format!("{cname}_WANTS_CAPABILITIES"),
+            &n.wants_capabilities,
+        );
         emit_cap_slice(&mut s, &format!("{cname}_PROVIDES"), &n.provides);
+        emit_cap_slice(
+            &mut s,
+            &format!("{cname}_OPTIONAL_PROVIDES"),
+            &n.optional_provides,
+        );
     }
     s.push_str("pub static KSO_NODES: &[KsoNode] = &[\n");
     for n in &nodes {
@@ -280,7 +311,7 @@ pub fn generate(nodes: &[PolicyToml]) -> Result<String, String> {
             .as_ref()
             .map(|x| startnum[x.as_str()])
             .unwrap_or(0);
-        s.push_str(&format!("    KsoNode {{ id: {cname}, name: {:?}, kind: KsoNodeKind::{}, startup: KsoStartupFnId({startup}), after: &{cname}_AFTER, wants: &{cname}_WANTS, requires: &{cname}_REQUIRES, provides: &{cname}_PROVIDES, policy: KsoPolicy {{ required: {}, allow_missing_wants: {}, failure: KsoFailurePolicy::{} }} }},\n", n.name, n.kind, n.required, !n.required, n.failure.as_deref().unwrap_or("Fatal")));
+        s.push_str(&format!("    KsoNode {{ id: {cname}, name: {:?}, kind: KsoNodeKind::{}, startup: KsoStartupFnId({startup}), after: &{cname}_AFTER, wants: &{cname}_WANTS, requires: &{cname}_REQUIRES, wants_capabilities: &{cname}_WANTS_CAPABILITIES, provides: &{cname}_PROVIDES, optional_provides: &{cname}_OPTIONAL_PROVIDES, policy: KsoPolicy {{ required: {}, allow_missing_wants: {}, failure: KsoFailurePolicy::{}, allow_cooperative_mtss: {}, require_preemption: {} }} }},\n", n.name, n.kind, n.required, !n.required, n.failure.as_deref().unwrap_or("Fatal"), n.allow_cooperative_mtss, n.require_preemption));
     }
     s.push_str("];\npub const KSO_RUNTIME_INIT: KsoNodeRuntime = KsoNodeRuntime::new();\n");
     Ok(s)

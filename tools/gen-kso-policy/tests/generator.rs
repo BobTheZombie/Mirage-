@@ -9,12 +9,16 @@ fn node(id: &str) -> PolicyToml {
         required: true,
         failure: Some("Fatal".into()),
         optional_policy: None,
+        allow_cooperative_mtss: false,
+        require_preemption: false,
         after: vec![],
         before: vec![],
         conflicts: vec![],
         wants: vec![],
+        wants_capabilities: vec![],
         requires: vec![],
         provides: vec!["boot.seed".into()],
+        optional_provides: vec![],
     }
 }
 

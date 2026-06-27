@@ -298,6 +298,7 @@ pub mod pid1_retry {
         pub mtss_task_api_ready: bool,
         pub mtss_mark_runnable_ready: bool,
         pub mtss_preemption_ready: bool,
+        pub allow_cooperative_mtss: bool,
         pub require_preemption_for_userspace: bool,
         pub mtss_failed: bool,
     }
@@ -367,8 +368,10 @@ pub mod pid1_retry {
         }
         if readiness.mtss_preemption_ready {
             Pid1HandoffDecision::AllowedPreemptive
-        } else {
+        } else if readiness.allow_cooperative_mtss {
             Pid1HandoffDecision::AllowedCooperative
+        } else {
+            Pid1HandoffDecision::Pending("policy disallows cooperative MTSS before userspace")
         }
     }
 
@@ -387,6 +390,7 @@ pub mod pid1_retry {
                 mtss_idle_ready: true,
                 mtss_task_api_ready: true,
                 mtss_mark_runnable_ready: true,
+                allow_cooperative_mtss: true,
                 ..RetryReadiness::default()
             };
 

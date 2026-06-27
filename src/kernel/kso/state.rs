@@ -69,6 +69,7 @@ use crate::kernel::boot_phase::{
     BootPhase,
 };
 use crate::kernel::boot_runtime::BootRuntimeRamFs;
+use crate::kernel::kso::generated::{KSO_NODES, PID1_HANDOFF};
 use crate::kernel::Kernel;
 use crate::supervisor::pid1::{Pid1LaunchMode, SpiderPid1LaunchError};
 use crate::supervisor::Supervisor;
@@ -82,6 +83,7 @@ pub struct MtssReadiness {
     pub idle_ready: bool,
     pub task_creation_api_ready: bool,
     pub mark_runnable_api_ready: bool,
+    pub allow_cooperative_mtss: bool,
     pub require_preemption_for_userspace: bool,
     pub failed: bool,
 }
@@ -134,6 +136,9 @@ impl MtssReadiness {
         }
         if self.require_preemption_for_userspace && !self.preemption_ready {
             return Some("policy requires preemption before userspace");
+        }
+        if !self.preemption_ready && !self.allow_cooperative_mtss {
+            return Some("policy disallows cooperative MTSS before userspace");
         }
         None
     }
@@ -249,9 +254,22 @@ pub fn pid1_retry_readiness(deps: &BootRuntimeDeps) -> RetryReadiness {
         mtss_task_api_ready: deps.mtss.task_creation_api_ready,
         mtss_mark_runnable_ready: deps.mtss.mark_runnable_api_ready,
         mtss_preemption_ready: deps.mtss.preemption_ready,
-        require_preemption_for_userspace: deps.mtss.require_preemption_for_userspace,
+        allow_cooperative_mtss: pid1_handoff_kso_policy().allow_cooperative_mtss,
+        require_preemption_for_userspace: pid1_handoff_kso_policy().require_preemption
+            || deps.mtss.require_preemption_for_userspace,
         mtss_failed: deps.mtss.failed,
     }
+}
+
+pub fn pid1_handoff_kso_policy() -> crate::kernel::kso::KsoPolicy {
+    let mut idx = 0;
+    while idx < KSO_NODES.len() {
+        if KSO_NODES[idx].id.0 == PID1_HANDOFF.0 {
+            return KSO_NODES[idx].policy;
+        }
+        idx += 1;
+    }
+    crate::kernel::kso::KsoPolicy::REQUIRED
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -277,6 +295,9 @@ pub fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     ctx: &mut KsoContext<'_, '_, NPROC, MSG_DEPTH>,
 ) -> Result<Pid1LaunchState, SpiderPid1LaunchError> {
     let deps = &mut ctx.boot_runtime.deps;
+    let pid1_policy = pid1_handoff_kso_policy();
+    deps.mtss.allow_cooperative_mtss = pid1_policy.allow_cooperative_mtss;
+    deps.mtss.require_preemption_for_userspace = pid1_policy.require_preemption;
     if deps.pid1_runnable {
         return Ok(Pid1LaunchState::Runnable);
     }
@@ -429,6 +450,9 @@ pub fn maybe_retry_pid1_handoff_after_mtss_change<const NPROC: usize, const MSG_
     ctx: &mut KsoContext<'_, '_, NPROC, MSG_DEPTH>,
 ) -> BootContinueResult {
     let deps = &mut ctx.boot_runtime.deps;
+    let pid1_policy = pid1_handoff_kso_policy();
+    deps.mtss.allow_cooperative_mtss = pid1_policy.allow_cooperative_mtss;
+    deps.mtss.require_preemption_for_userspace = pid1_policy.require_preemption;
     if deps.mtss.failed {
         return BootContinueResult::Fatal("MTSS failed");
     }
