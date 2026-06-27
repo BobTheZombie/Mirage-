@@ -771,3 +771,18 @@ Required rootfs userland:
 8. Interrupt handlers must not block.
 9. DMA buffers must be aligned and backed by known physical memory.
 10. QEMU device variants must be documented and tested.
+
+---
+
+## Mirage Device Database Contract
+
+1. Device knowledge must live in data and generated lookup tables, not in ad-hoc kernel probe branches that encode policy or vendor folklore inline.
+2. The source device database format is TOML because it is reviewable, diff-friendly, schema-validatable, and suitable for external provenance metadata; TOML parsing must never be linked into the Mirage kernel or target boot image.
+3. Kernel, MTSS, and early boot code may consume only generated `no_std` Rust tables or compact binary tables whose generation is reproducible from reviewed source database files.
+4. Device database entries must identify the bus and matching keys precisely, including PCI vendor/device/subsystem/class data, USB VID/PID/class/interface data, CPU/chipset signatures, and block/char/input identity fields where applicable.
+5. Database records may provide driver hints, quirk flags, capability requirements, and service preferences, but the Supervisor owns policy and the kernel must still validate hardware state before reporting devices ONLINE.
+6. Unknown, incomplete, or conflicting database matches must fall back to safe generic probing, degraded service, or explicit unsupported status; they must not panic, hang boot, or fake successful initialization.
+7. Every imported identifier, name, class mapping, or quirk derived from an external source must include license and provenance metadata sufficient for audit and must not copy incompatible code or data into Mirage.
+8. Regenerated tables must be produced by documented commands, reviewed with source diffs, and accompanied by positive and negative validation evidence for schema and lookup behavior.
+9. Device database changes must preserve Mirage boundaries: matching and hints are mechanisms, while service launch, capability grants, recovery, and device ownership remain Supervisor policy.
+10. Boot/runtime status must distinguish database match, driver selected, probe attempted, hardware initialized, service started, and ONLINE; a database hit alone is never evidence that hardware works.
