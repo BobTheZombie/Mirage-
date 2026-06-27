@@ -5,5 +5,5 @@ startup = "userspace_loader"
 required = true
 failure = "Fatal"
 after = ["mtss-pid0", "rootfs"]
-requires = ["mtss.pid0", "rootfs.mounted"]
+requires = ["mtss.pid0", "mtss.core", "mtss.scheduler", "rootfs.mounted"]
 provides = ["userspace.loader"]

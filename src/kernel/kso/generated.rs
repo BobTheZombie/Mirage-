@@ -38,144 +38,225 @@ pub const XHCI: KsoNodeId = KsoNodeId(30);
 const AHCI_AFTER: [KsoNodeId; 2] = [KsoNodeId(3), KsoNodeId(19)];
 const AHCI_WANTS: [KsoNodeId; 0] = [];
 const AHCI_REQUIRES: [KsoCapability; 2] = [KsoCapability("pci.bus"), KsoCapability("block.layer")];
+const AHCI_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const AHCI_PROVIDES: [KsoCapability; 1] = [KsoCapability("storage.ahci")];
+const AHCI_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const ARCHITECTURE_AFTER: [KsoNodeId; 1] = [KsoNodeId(13)];
 const ARCHITECTURE_WANTS: [KsoNodeId; 0] = [];
 const ARCHITECTURE_REQUIRES: [KsoCapability; 1] = [KsoCapability("kernel.main")];
+const ARCHITECTURE_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const ARCHITECTURE_PROVIDES: [KsoCapability; 1] = [KsoCapability("arch.ready")];
+const ARCHITECTURE_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const BLOCK_LAYER_AFTER: [KsoNodeId; 1] = [KsoNodeId(8)];
 const BLOCK_LAYER_WANTS: [KsoNodeId; 0] = [];
 const BLOCK_LAYER_REQUIRES: [KsoCapability; 1] = [KsoCapability("heap.ready")];
+const BLOCK_LAYER_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const BLOCK_LAYER_PROVIDES: [KsoCapability; 1] = [KsoCapability("block.layer")];
+const BLOCK_LAYER_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const BOOT_RUNTIME_AFTER: [KsoNodeId; 2] = [KsoNodeId(3), KsoNodeId(8)];
 const BOOT_RUNTIME_WANTS: [KsoNodeId; 0] = [];
 const BOOT_RUNTIME_REQUIRES: [KsoCapability; 2] =
     [KsoCapability("block.layer"), KsoCapability("heap.ready")];
-const BOOT_RUNTIME_PROVIDES: [KsoCapability; 1] = [KsoCapability("boot.runtime.validated")];
+const BOOT_RUNTIME_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
+const BOOT_RUNTIME_PROVIDES: [KsoCapability; 2] = [
+    KsoCapability("boot.runtime.validated"),
+    KsoCapability("boot.spider_rs_image"),
+];
+const BOOT_RUNTIME_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const BOOTINFO_AFTER: [KsoNodeId; 1] = [KsoNodeId(25)];
 const BOOTINFO_WANTS: [KsoNodeId; 0] = [];
 const BOOTINFO_REQUIRES: [KsoCapability; 1] = [KsoCapability("boot.seed")];
+const BOOTINFO_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const BOOTINFO_PROVIDES: [KsoCapability; 1] = [KsoCapability("boot.info")];
+const BOOTINFO_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const FRAMEBUFFER_AFTER: [KsoNodeId; 2] = [KsoNodeId(5), KsoNodeId(18)];
 const FRAMEBUFFER_WANTS: [KsoNodeId; 0] = [];
 const FRAMEBUFFER_REQUIRES: [KsoCapability; 2] =
     [KsoCapability("boot.info"), KsoCapability("paging.ready")];
+const FRAMEBUFFER_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const FRAMEBUFFER_PROVIDES: [KsoCapability; 1] = [KsoCapability("framebuffer.ready")];
+const FRAMEBUFFER_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const GDT_AFTER: [KsoNodeId; 1] = [KsoNodeId(2)];
 const GDT_WANTS: [KsoNodeId; 0] = [];
 const GDT_REQUIRES: [KsoCapability; 1] = [KsoCapability("arch.ready")];
+const GDT_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const GDT_PROVIDES: [KsoCapability; 1] = [KsoCapability("gdt.ready")];
+const GDT_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const HEAP_AFTER: [KsoNodeId; 1] = [KsoNodeId(18)];
 const HEAP_WANTS: [KsoNodeId; 0] = [];
 const HEAP_REQUIRES: [KsoCapability; 1] = [KsoCapability("paging.ready")];
+const HEAP_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const HEAP_PROVIDES: [KsoCapability; 1] = [KsoCapability("heap.ready")];
+const HEAP_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const I8042_AFTER: [KsoNodeId; 1] = [KsoNodeId(12)];
 const I8042_WANTS: [KsoNodeId; 0] = [];
 const I8042_REQUIRES: [KsoCapability; 1] = [KsoCapability("interrupts.ready")];
+const I8042_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const I8042_PROVIDES: [KsoCapability; 1] = [KsoCapability("i8042.controller")];
+const I8042_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const IDLELOOP_AFTER: [KsoNodeId; 1] = [KsoNodeId(22)];
 const IDLELOOP_WANTS: [KsoNodeId; 0] = [];
 const IDLELOOP_REQUIRES: [KsoCapability; 1] = [KsoCapability("pid1.handoff")];
+const IDLELOOP_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const IDLELOOP_PROVIDES: [KsoCapability; 1] = [KsoCapability("idleloop.ready")];
+const IDLELOOP_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const IDT_AFTER: [KsoNodeId; 1] = [KsoNodeId(7)];
 const IDT_WANTS: [KsoNodeId; 0] = [];
 const IDT_REQUIRES: [KsoCapability; 1] = [KsoCapability("gdt.ready")];
+const IDT_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const IDT_PROVIDES: [KsoCapability; 1] = [KsoCapability("idt.ready")];
+const IDT_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const INTERRUPTS_AFTER: [KsoNodeId; 2] = [KsoNodeId(11), KsoNodeId(21)];
 const INTERRUPTS_WANTS: [KsoNodeId; 0] = [];
 const INTERRUPTS_REQUIRES: [KsoCapability; 2] =
     [KsoCapability("pic.ready"), KsoCapability("idt.ready")];
+const INTERRUPTS_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const INTERRUPTS_PROVIDES: [KsoCapability; 1] = [KsoCapability("interrupts.ready")];
+const INTERRUPTS_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const KERNEL_MAIN_AFTER: [KsoNodeId; 1] = [KsoNodeId(5)];
 const KERNEL_MAIN_WANTS: [KsoNodeId; 0] = [];
 const KERNEL_MAIN_REQUIRES: [KsoCapability; 1] = [KsoCapability("boot.info")];
+const KERNEL_MAIN_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const KERNEL_MAIN_PROVIDES: [KsoCapability; 1] = [KsoCapability("kernel.main")];
+const KERNEL_MAIN_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const KERNEL_MAPPER_AFTER: [KsoNodeId; 1] = [KsoNodeId(20)];
 const KERNEL_MAPPER_WANTS: [KsoNodeId; 0] = [];
 const KERNEL_MAPPER_REQUIRES: [KsoCapability; 1] = [KsoCapability("memory.physical_allocator")];
+const KERNEL_MAPPER_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const KERNEL_MAPPER_PROVIDES: [KsoCapability; 1] = [KsoCapability("memory.kernel_mapper")];
+const KERNEL_MAPPER_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const MEMORY_MAP_AFTER: [KsoNodeId; 1] = [KsoNodeId(5)];
 const MEMORY_MAP_WANTS: [KsoNodeId; 0] = [];
 const MEMORY_MAP_REQUIRES: [KsoCapability; 1] = [KsoCapability("boot.info")];
+const MEMORY_MAP_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const MEMORY_MAP_PROVIDES: [KsoCapability; 1] = [KsoCapability("memory.map")];
+const MEMORY_MAP_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const MTSS_PID0_AFTER: [KsoNodeId; 2] = [KsoNodeId(8), KsoNodeId(27)];
 const MTSS_PID0_WANTS: [KsoNodeId; 0] = [];
 const MTSS_PID0_REQUIRES: [KsoCapability; 2] = [
     KsoCapability("supervisor.ready"),
     KsoCapability("heap.ready"),
 ];
-const MTSS_PID0_PROVIDES: [KsoCapability; 1] = [KsoCapability("mtss.pid0")];
+const MTSS_PID0_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
+const MTSS_PID0_PROVIDES: [KsoCapability; 4] = [
+    KsoCapability("mtss.pid0"),
+    KsoCapability("mtss.core"),
+    KsoCapability("mtss.scheduler"),
+    KsoCapability("mtss.cooperative"),
+];
+const MTSS_PID0_OPTIONAL_PROVIDES: [KsoCapability; 2] = [
+    KsoCapability("mtss.timer"),
+    KsoCapability("mtss.preemption"),
+];
 const NVME_AFTER: [KsoNodeId; 2] = [KsoNodeId(3), KsoNodeId(19)];
 const NVME_WANTS: [KsoNodeId; 0] = [];
 const NVME_REQUIRES: [KsoCapability; 2] = [KsoCapability("pci.bus"), KsoCapability("block.layer")];
+const NVME_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const NVME_PROVIDES: [KsoCapability; 1] = [KsoCapability("storage.nvme")];
+const NVME_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const PAGING_AFTER: [KsoNodeId; 2] = [KsoNodeId(7), KsoNodeId(14)];
 const PAGING_WANTS: [KsoNodeId; 0] = [];
 const PAGING_REQUIRES: [KsoCapability; 2] = [
     KsoCapability("memory.kernel_mapper"),
     KsoCapability("gdt.ready"),
 ];
+const PAGING_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const PAGING_PROVIDES: [KsoCapability; 1] = [KsoCapability("paging.ready")];
+const PAGING_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const PCI_AFTER: [KsoNodeId; 2] = [KsoNodeId(12), KsoNodeId(18)];
 const PCI_WANTS: [KsoNodeId; 0] = [];
 const PCI_REQUIRES: [KsoCapability; 2] = [
     KsoCapability("paging.ready"),
     KsoCapability("interrupts.ready"),
 ];
+const PCI_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const PCI_PROVIDES: [KsoCapability; 1] = [KsoCapability("pci.bus")];
+const PCI_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const PHYSICAL_ALLOCATOR_AFTER: [KsoNodeId; 1] = [KsoNodeId(15)];
 const PHYSICAL_ALLOCATOR_WANTS: [KsoNodeId; 0] = [];
 const PHYSICAL_ALLOCATOR_REQUIRES: [KsoCapability; 1] = [KsoCapability("memory.map")];
+const PHYSICAL_ALLOCATOR_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const PHYSICAL_ALLOCATOR_PROVIDES: [KsoCapability; 1] =
     [KsoCapability("memory.physical_allocator")];
+const PHYSICAL_ALLOCATOR_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const PIC_AFTER: [KsoNodeId; 1] = [KsoNodeId(11)];
 const PIC_WANTS: [KsoNodeId; 0] = [];
 const PIC_REQUIRES: [KsoCapability; 1] = [KsoCapability("idt.ready")];
+const PIC_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const PIC_PROVIDES: [KsoCapability; 1] = [KsoCapability("pic.ready")];
-const PID1_HANDOFF_AFTER: [KsoNodeId; 2] = [KsoNodeId(27), KsoNodeId(29)];
-const PID1_HANDOFF_WANTS: [KsoNodeId; 0] = [];
-const PID1_HANDOFF_REQUIRES: [KsoCapability; 2] = [
+const PIC_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
+const PID1_HANDOFF_AFTER: [KsoNodeId; 3] = [KsoNodeId(16), KsoNodeId(27), KsoNodeId(29)];
+const PID1_HANDOFF_WANTS: [KsoNodeId; 1] = [KsoNodeId(16)];
+const PID1_HANDOFF_REQUIRES: [KsoCapability; 5] = [
+    KsoCapability("boot.spider_rs_image"),
+    KsoCapability("supervisor.launch_grants"),
+    KsoCapability("mtss.pid0"),
+    KsoCapability("mtss.scheduler"),
     KsoCapability("userspace.loader"),
-    KsoCapability("supervisor.ready"),
 ];
+const PID1_HANDOFF_WANTS_CAPABILITIES: [KsoCapability; 1] = [KsoCapability("mtss.preemption")];
 const PID1_HANDOFF_PROVIDES: [KsoCapability; 1] = [KsoCapability("pid1.handoff")];
+const PID1_HANDOFF_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const PS2_KEYBOARD_AFTER: [KsoNodeId; 1] = [KsoNodeId(9)];
 const PS2_KEYBOARD_WANTS: [KsoNodeId; 0] = [];
 const PS2_KEYBOARD_REQUIRES: [KsoCapability; 1] = [KsoCapability("i8042.controller")];
+const PS2_KEYBOARD_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const PS2_KEYBOARD_PROVIDES: [KsoCapability; 1] = [KsoCapability("input.keyboard.ps2")];
+const PS2_KEYBOARD_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const ROOTFS_AFTER: [KsoNodeId; 1] = [KsoNodeId(4)];
 const ROOTFS_WANTS: [KsoNodeId; 0] = [];
 const ROOTFS_REQUIRES: [KsoCapability; 1] = [KsoCapability("boot.runtime.validated")];
+const ROOTFS_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const ROOTFS_PROVIDES: [KsoCapability; 1] = [KsoCapability("rootfs.mounted")];
+const ROOTFS_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const SEED_RS_AFTER: [KsoNodeId; 0] = [];
 const SEED_RS_WANTS: [KsoNodeId; 0] = [];
 const SEED_RS_REQUIRES: [KsoCapability; 0] = [];
+const SEED_RS_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const SEED_RS_PROVIDES: [KsoCapability; 1] = [KsoCapability("boot.seed")];
+const SEED_RS_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const SERIAL_AFTER: [KsoNodeId; 1] = [KsoNodeId(2)];
 const SERIAL_WANTS: [KsoNodeId; 0] = [];
 const SERIAL_REQUIRES: [KsoCapability; 1] = [KsoCapability("arch.ready")];
+const SERIAL_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const SERIAL_PROVIDES: [KsoCapability; 1] = [KsoCapability("serial.console")];
+const SERIAL_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const SUPERVISOR_AFTER: [KsoNodeId; 2] = [KsoNodeId(12), KsoNodeId(24)];
 const SUPERVISOR_WANTS: [KsoNodeId; 0] = [];
 const SUPERVISOR_REQUIRES: [KsoCapability; 2] = [
     KsoCapability("rootfs.mounted"),
     KsoCapability("interrupts.ready"),
 ];
-const SUPERVISOR_PROVIDES: [KsoCapability; 1] = [KsoCapability("supervisor.ready")];
+const SUPERVISOR_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
+const SUPERVISOR_PROVIDES: [KsoCapability; 2] = [
+    KsoCapability("supervisor.ready"),
+    KsoCapability("supervisor.launch_grants"),
+];
+const SUPERVISOR_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const USB_CORE_AFTER: [KsoNodeId; 1] = [KsoNodeId(30)];
 const USB_CORE_WANTS: [KsoNodeId; 0] = [];
 const USB_CORE_REQUIRES: [KsoCapability; 1] = [KsoCapability("usb.xhci")];
+const USB_CORE_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const USB_CORE_PROVIDES: [KsoCapability; 1] = [KsoCapability("usb.core")];
+const USB_CORE_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const USERSPACE_LOADER_AFTER: [KsoNodeId; 2] = [KsoNodeId(16), KsoNodeId(24)];
 const USERSPACE_LOADER_WANTS: [KsoNodeId; 0] = [];
-const USERSPACE_LOADER_REQUIRES: [KsoCapability; 2] =
-    [KsoCapability("mtss.pid0"), KsoCapability("rootfs.mounted")];
+const USERSPACE_LOADER_REQUIRES: [KsoCapability; 4] = [
+    KsoCapability("mtss.pid0"),
+    KsoCapability("mtss.core"),
+    KsoCapability("mtss.scheduler"),
+    KsoCapability("rootfs.mounted"),
+];
+const USERSPACE_LOADER_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const USERSPACE_LOADER_PROVIDES: [KsoCapability; 1] = [KsoCapability("userspace.loader")];
+const USERSPACE_LOADER_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const XHCI_AFTER: [KsoNodeId; 2] = [KsoNodeId(12), KsoNodeId(19)];
 const XHCI_WANTS: [KsoNodeId; 0] = [];
 const XHCI_REQUIRES: [KsoCapability; 2] =
     [KsoCapability("pci.bus"), KsoCapability("interrupts.ready")];
+const XHCI_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const XHCI_PROVIDES: [KsoCapability; 1] = [KsoCapability("usb.xhci")];
+const XHCI_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 pub static KSO_NODES: &[KsoNode] = &[
     KsoNode {
         id: AHCI,
@@ -185,11 +266,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &AHCI_AFTER,
         wants: &AHCI_WANTS,
         requires: &AHCI_REQUIRES,
+        wants_capabilities: &AHCI_WANTS_CAPABILITIES,
         provides: &AHCI_PROVIDES,
+        optional_provides: &AHCI_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: false,
             allow_missing_wants: true,
             failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -200,11 +285,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &ARCHITECTURE_AFTER,
         wants: &ARCHITECTURE_WANTS,
         requires: &ARCHITECTURE_REQUIRES,
+        wants_capabilities: &ARCHITECTURE_WANTS_CAPABILITIES,
         provides: &ARCHITECTURE_PROVIDES,
+        optional_provides: &ARCHITECTURE_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -215,11 +304,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &BLOCK_LAYER_AFTER,
         wants: &BLOCK_LAYER_WANTS,
         requires: &BLOCK_LAYER_REQUIRES,
+        wants_capabilities: &BLOCK_LAYER_WANTS_CAPABILITIES,
         provides: &BLOCK_LAYER_PROVIDES,
+        optional_provides: &BLOCK_LAYER_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -230,11 +323,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &BOOT_RUNTIME_AFTER,
         wants: &BOOT_RUNTIME_WANTS,
         requires: &BOOT_RUNTIME_REQUIRES,
+        wants_capabilities: &BOOT_RUNTIME_WANTS_CAPABILITIES,
         provides: &BOOT_RUNTIME_PROVIDES,
+        optional_provides: &BOOT_RUNTIME_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -245,11 +342,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &BOOTINFO_AFTER,
         wants: &BOOTINFO_WANTS,
         requires: &BOOTINFO_REQUIRES,
+        wants_capabilities: &BOOTINFO_WANTS_CAPABILITIES,
         provides: &BOOTINFO_PROVIDES,
+        optional_provides: &BOOTINFO_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -260,11 +361,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &FRAMEBUFFER_AFTER,
         wants: &FRAMEBUFFER_WANTS,
         requires: &FRAMEBUFFER_REQUIRES,
+        wants_capabilities: &FRAMEBUFFER_WANTS_CAPABILITIES,
         provides: &FRAMEBUFFER_PROVIDES,
+        optional_provides: &FRAMEBUFFER_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: false,
             allow_missing_wants: true,
             failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -275,11 +380,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &GDT_AFTER,
         wants: &GDT_WANTS,
         requires: &GDT_REQUIRES,
+        wants_capabilities: &GDT_WANTS_CAPABILITIES,
         provides: &GDT_PROVIDES,
+        optional_provides: &GDT_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -290,11 +399,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &HEAP_AFTER,
         wants: &HEAP_WANTS,
         requires: &HEAP_REQUIRES,
+        wants_capabilities: &HEAP_WANTS_CAPABILITIES,
         provides: &HEAP_PROVIDES,
+        optional_provides: &HEAP_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -305,11 +418,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &I8042_AFTER,
         wants: &I8042_WANTS,
         requires: &I8042_REQUIRES,
+        wants_capabilities: &I8042_WANTS_CAPABILITIES,
         provides: &I8042_PROVIDES,
+        optional_provides: &I8042_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: false,
             allow_missing_wants: true,
             failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -320,11 +437,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &IDLELOOP_AFTER,
         wants: &IDLELOOP_WANTS,
         requires: &IDLELOOP_REQUIRES,
+        wants_capabilities: &IDLELOOP_WANTS_CAPABILITIES,
         provides: &IDLELOOP_PROVIDES,
+        optional_provides: &IDLELOOP_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -335,11 +456,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &IDT_AFTER,
         wants: &IDT_WANTS,
         requires: &IDT_REQUIRES,
+        wants_capabilities: &IDT_WANTS_CAPABILITIES,
         provides: &IDT_PROVIDES,
+        optional_provides: &IDT_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -350,11 +475,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &INTERRUPTS_AFTER,
         wants: &INTERRUPTS_WANTS,
         requires: &INTERRUPTS_REQUIRES,
+        wants_capabilities: &INTERRUPTS_WANTS_CAPABILITIES,
         provides: &INTERRUPTS_PROVIDES,
+        optional_provides: &INTERRUPTS_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -365,11 +494,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &KERNEL_MAIN_AFTER,
         wants: &KERNEL_MAIN_WANTS,
         requires: &KERNEL_MAIN_REQUIRES,
+        wants_capabilities: &KERNEL_MAIN_WANTS_CAPABILITIES,
         provides: &KERNEL_MAIN_PROVIDES,
+        optional_provides: &KERNEL_MAIN_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -380,11 +513,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &KERNEL_MAPPER_AFTER,
         wants: &KERNEL_MAPPER_WANTS,
         requires: &KERNEL_MAPPER_REQUIRES,
+        wants_capabilities: &KERNEL_MAPPER_WANTS_CAPABILITIES,
         provides: &KERNEL_MAPPER_PROVIDES,
+        optional_provides: &KERNEL_MAPPER_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -395,11 +532,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &MEMORY_MAP_AFTER,
         wants: &MEMORY_MAP_WANTS,
         requires: &MEMORY_MAP_REQUIRES,
+        wants_capabilities: &MEMORY_MAP_WANTS_CAPABILITIES,
         provides: &MEMORY_MAP_PROVIDES,
+        optional_provides: &MEMORY_MAP_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -410,11 +551,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &MTSS_PID0_AFTER,
         wants: &MTSS_PID0_WANTS,
         requires: &MTSS_PID0_REQUIRES,
+        wants_capabilities: &MTSS_PID0_WANTS_CAPABILITIES,
         provides: &MTSS_PID0_PROVIDES,
+        optional_provides: &MTSS_PID0_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -425,11 +570,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &NVME_AFTER,
         wants: &NVME_WANTS,
         requires: &NVME_REQUIRES,
+        wants_capabilities: &NVME_WANTS_CAPABILITIES,
         provides: &NVME_PROVIDES,
+        optional_provides: &NVME_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: false,
             allow_missing_wants: true,
             failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -440,11 +589,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &PAGING_AFTER,
         wants: &PAGING_WANTS,
         requires: &PAGING_REQUIRES,
+        wants_capabilities: &PAGING_WANTS_CAPABILITIES,
         provides: &PAGING_PROVIDES,
+        optional_provides: &PAGING_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -455,11 +608,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &PCI_AFTER,
         wants: &PCI_WANTS,
         requires: &PCI_REQUIRES,
+        wants_capabilities: &PCI_WANTS_CAPABILITIES,
         provides: &PCI_PROVIDES,
+        optional_provides: &PCI_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: false,
             allow_missing_wants: true,
             failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -470,11 +627,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &PHYSICAL_ALLOCATOR_AFTER,
         wants: &PHYSICAL_ALLOCATOR_WANTS,
         requires: &PHYSICAL_ALLOCATOR_REQUIRES,
+        wants_capabilities: &PHYSICAL_ALLOCATOR_WANTS_CAPABILITIES,
         provides: &PHYSICAL_ALLOCATOR_PROVIDES,
+        optional_provides: &PHYSICAL_ALLOCATOR_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -485,11 +646,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &PIC_AFTER,
         wants: &PIC_WANTS,
         requires: &PIC_REQUIRES,
+        wants_capabilities: &PIC_WANTS_CAPABILITIES,
         provides: &PIC_PROVIDES,
+        optional_provides: &PIC_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -500,11 +665,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &PID1_HANDOFF_AFTER,
         wants: &PID1_HANDOFF_WANTS,
         requires: &PID1_HANDOFF_REQUIRES,
+        wants_capabilities: &PID1_HANDOFF_WANTS_CAPABILITIES,
         provides: &PID1_HANDOFF_PROVIDES,
+        optional_provides: &PID1_HANDOFF_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: true,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -515,11 +684,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &PS2_KEYBOARD_AFTER,
         wants: &PS2_KEYBOARD_WANTS,
         requires: &PS2_KEYBOARD_REQUIRES,
+        wants_capabilities: &PS2_KEYBOARD_WANTS_CAPABILITIES,
         provides: &PS2_KEYBOARD_PROVIDES,
+        optional_provides: &PS2_KEYBOARD_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: false,
             allow_missing_wants: true,
             failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -530,11 +703,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &ROOTFS_AFTER,
         wants: &ROOTFS_WANTS,
         requires: &ROOTFS_REQUIRES,
+        wants_capabilities: &ROOTFS_WANTS_CAPABILITIES,
         provides: &ROOTFS_PROVIDES,
+        optional_provides: &ROOTFS_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -545,11 +722,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &SEED_RS_AFTER,
         wants: &SEED_RS_WANTS,
         requires: &SEED_RS_REQUIRES,
+        wants_capabilities: &SEED_RS_WANTS_CAPABILITIES,
         provides: &SEED_RS_PROVIDES,
+        optional_provides: &SEED_RS_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -560,11 +741,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &SERIAL_AFTER,
         wants: &SERIAL_WANTS,
         requires: &SERIAL_REQUIRES,
+        wants_capabilities: &SERIAL_WANTS_CAPABILITIES,
         provides: &SERIAL_PROVIDES,
+        optional_provides: &SERIAL_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -575,11 +760,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &SUPERVISOR_AFTER,
         wants: &SUPERVISOR_WANTS,
         requires: &SUPERVISOR_REQUIRES,
+        wants_capabilities: &SUPERVISOR_WANTS_CAPABILITIES,
         provides: &SUPERVISOR_PROVIDES,
+        optional_provides: &SUPERVISOR_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -590,11 +779,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &USB_CORE_AFTER,
         wants: &USB_CORE_WANTS,
         requires: &USB_CORE_REQUIRES,
+        wants_capabilities: &USB_CORE_WANTS_CAPABILITIES,
         provides: &USB_CORE_PROVIDES,
+        optional_provides: &USB_CORE_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: false,
             allow_missing_wants: true,
             failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -605,11 +798,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &USERSPACE_LOADER_AFTER,
         wants: &USERSPACE_LOADER_WANTS,
         requires: &USERSPACE_LOADER_REQUIRES,
+        wants_capabilities: &USERSPACE_LOADER_WANTS_CAPABILITIES,
         provides: &USERSPACE_LOADER_PROVIDES,
+        optional_provides: &USERSPACE_LOADER_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
     KsoNode {
@@ -620,11 +817,15 @@ pub static KSO_NODES: &[KsoNode] = &[
         after: &XHCI_AFTER,
         wants: &XHCI_WANTS,
         requires: &XHCI_REQUIRES,
+        wants_capabilities: &XHCI_WANTS_CAPABILITIES,
         provides: &XHCI_PROVIDES,
+        optional_provides: &XHCI_OPTIONAL_PROVIDES,
         policy: KsoPolicy {
             required: false,
             allow_missing_wants: true,
             failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
         },
     },
 ];

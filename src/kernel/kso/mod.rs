@@ -43,7 +43,9 @@ mod tests {
             after: &[],
             wants: &[],
             requires: &[SCHED_CAP],
+            wants_capabilities: &[],
             provides: &[],
+            optional_provides: &[],
             policy: KsoPolicy::REQUIRED,
         }];
         let mut runtime = [KsoNodeRuntime::new()];
@@ -73,7 +75,9 @@ mod tests {
                 after: &[MTSS],
                 wants: &[],
                 requires: &[],
+                wants_capabilities: &[],
                 provides: &[],
+                optional_provides: &[],
                 policy: KsoPolicy::REQUIRED,
             },
             KsoNode {
@@ -84,7 +88,9 @@ mod tests {
                 after: &[],
                 wants: &[],
                 requires: &[],
+                wants_capabilities: &[],
                 provides: &[],
+                optional_provides: &[],
                 policy: KsoPolicy::REQUIRED,
             },
         ];
@@ -106,7 +112,9 @@ mod tests {
             after: &[],
             wants: &[],
             requires: &[],
+            wants_capabilities: &[],
             provides: &[],
+            optional_provides: &[],
             policy: KsoPolicy::REQUIRED,
         }];
         let mut runtime = [KsoNodeRuntime::new()];
@@ -131,7 +139,9 @@ mod tests {
             after: &[],
             wants: &[MTSS],
             requires: &[],
+            wants_capabilities: &[],
             provides: &[],
+            optional_provides: &[],
             policy: KsoPolicy::OPTIONAL_DRIVER,
         }];
         let mut runtime = [KsoNodeRuntime::new()];

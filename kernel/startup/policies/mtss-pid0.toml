@@ -6,4 +6,5 @@ required = true
 failure = "Fatal"
 after = ["supervisor", "heap"]
 requires = ["supervisor.ready", "heap.ready"]
-provides = ["mtss.pid0"]
+provides = ["mtss.pid0", "mtss.core", "mtss.scheduler", "mtss.cooperative"]
+optional_provides = ["mtss.timer", "mtss.preemption"]

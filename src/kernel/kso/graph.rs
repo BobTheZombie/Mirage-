@@ -14,7 +14,9 @@ pub struct KsoNode {
     pub after: &'static [KsoNodeId],
     pub wants: &'static [KsoNodeId],
     pub requires: &'static [KsoCapability],
+    pub wants_capabilities: &'static [KsoCapability],
     pub provides: &'static [KsoCapability],
+    pub optional_provides: &'static [KsoCapability],
     pub policy: KsoPolicy,
 }
 

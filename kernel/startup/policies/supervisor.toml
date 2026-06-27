@@ -6,4 +6,4 @@ required = true
 failure = "Fatal"
 after = ["rootfs", "interrupts"]
 requires = ["rootfs.mounted", "interrupts.ready"]
-provides = ["supervisor.ready"]
+provides = ["supervisor.ready", "supervisor.launch_grants"]
