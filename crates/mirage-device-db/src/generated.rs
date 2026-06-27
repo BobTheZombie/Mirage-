@@ -1,8 +1,35 @@
 //! Generated no_std CPU diagnostic lookup tables.
 //!
-//! Source descriptors live under `devices/db/cpu/*.toml`. These tables are
-//! diagnostic metadata only; Mirage still binds hardware through raw CPUID/PCI
+//! Source descriptors live under `devices/db/cpu/*.toml` and
+//! `devices/db/input/classes.toml`. These tables are diagnostic metadata only;
+//! Mirage still binds hardware through raw CPUID/PCI
 //! facts, capabilities, and supervisor policy.
+
+/// Known input device/controller metadata for platform diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InputDeviceDescriptor {
+    pub kind: &'static str,
+    pub name: &'static str,
+    pub driver_hints: &'static [&'static str],
+}
+
+const INPUT_DEVICE_DESCRIPTORS: &[InputDeviceDescriptor] = &[
+    InputDeviceDescriptor {
+        kind: "i8042-controller",
+        name: "Intel 8042-compatible PS/2 Controller",
+        driver_hints: &["i8042", "inputd"],
+    },
+    InputDeviceDescriptor {
+        kind: "ps2-keyboard",
+        name: "PS/2 Keyboard",
+        driver_hints: &["ps2-keyboard", "inputd"],
+    },
+    InputDeviceDescriptor {
+        kind: "usb-hid-keyboard",
+        name: "USB HID Keyboard",
+        driver_hints: &["xhci", "usbd", "hid", "inputd"],
+    },
+];
 
 /// Known CPU metadata for platform diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,4 +171,17 @@ pub const fn lookup_cpu_amd(family: u16, model: u16, stepping: u8) -> Option<&'s
 
 pub const fn lookup_cpu_intel(family: u16, model: u16, stepping: u8) -> Option<&'static CpuInfo> {
     lookup_cpu(INTEL_CPU_INFOS, family, model, stepping)
+}
+
+/// Looks up input device/controller metadata by stable Mirage input kind.
+pub fn lookup_input_kind(kind: &str) -> Option<&'static InputDeviceDescriptor> {
+    let mut index = 0;
+    while index < INPUT_DEVICE_DESCRIPTORS.len() {
+        let entry = &INPUT_DEVICE_DESCRIPTORS[index];
+        if entry.kind == kind {
+            return Some(entry);
+        }
+        index += 1;
+    }
+    None
 }

@@ -4,7 +4,7 @@
 //! starts, or reports any driver/service lifecycle state.
 
 use mirage_device_db::{
-    lookup_cpu_amd, lookup_cpu_intel, lookup_input_device, lookup_pci_class, lookup_pci_device,
+    lookup_cpu_amd, lookup_cpu_intel, lookup_input_kind, lookup_pci_class, lookup_pci_device,
 };
 use mirage_platform::{PlatformDevice, PlatformDeviceKind, PlatformLocation, PlatformRegistry};
 
@@ -31,7 +31,9 @@ pub fn platform_device_found(device: PlatformDevice) {
 
     match device.kind {
         PlatformDeviceKind::Cpu => write_cpu_descriptor(device),
-        PlatformDeviceKind::I8042 | PlatformDeviceKind::Input => write_input_descriptor(device),
+        PlatformDeviceKind::I8042 | PlatformDeviceKind::Input | PlatformDeviceKind::Usb => {
+            write_input_descriptor(device)
+        }
         _ if matches!(device.location, PlatformLocation::Pci { .. }) => {
             write_pci_descriptor(device)
         }
@@ -106,14 +108,27 @@ fn write_cpu_descriptor(device: PlatformDevice) {
 }
 
 fn write_input_descriptor(device: PlatformDevice) {
-    let descriptor = match device.kind {
-        PlatformDeviceKind::I8042 => lookup_input_device("i8042"),
-        PlatformDeviceKind::Input => lookup_input_device("input"),
+    let kind = match device.kind {
+        PlatformDeviceKind::I8042 => Some("i8042-controller"),
+        PlatformDeviceKind::Input if device.name == "PS/2 Keyboard" => Some("ps2-keyboard"),
+        PlatformDeviceKind::Input if device.name == "USB HID Keyboard" => Some("usb-hid-keyboard"),
+        PlatformDeviceKind::Usb if device.name == "USB HID Keyboard" => Some("usb-hid-keyboard"),
         _ => None,
     };
 
-    if let Some(input) = descriptor {
-        write_driver_hints(input.driver_hints);
+    let Some(kind) = kind else {
+        return;
+    };
+
+    match lookup_input_kind(kind) {
+        Some(input) => {
+            crate::kprintln!("    Input kind: {} ({})", input.kind, input.name);
+            write_driver_hints(input.driver_hints);
+        }
+        None => {
+            crate::kprintln!("    Input kind: {} (descriptor unavailable)", kind);
+            write_driver_hint(None);
+        }
     }
 }
 
