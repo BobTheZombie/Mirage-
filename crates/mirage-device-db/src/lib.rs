@@ -6,6 +6,9 @@
 //! binding must continue to use raw PCI class/subclass/programming-interface
 //! codes and capability-mediated driver policy rather than trusting strings.
 
+mod generated;
+pub use generated::{lookup_cpu_amd, lookup_cpu_intel, CpuInfo};
+
 /// Known PCI vendor metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PciVendorInfo {
@@ -193,7 +196,31 @@ pub const fn lookup_pci_class(
 
 #[cfg(test)]
 mod tests {
+    use super::{lookup_cpu_amd, lookup_cpu_intel};
     use super::{lookup_pci_class, lookup_pci_device, lookup_pci_vendor};
+
+    #[test]
+    fn cpu_lookup_prefers_exact_stepping_before_model_fallback() {
+        let exact = lookup_cpu_amd(0x17, 0x60, 0x1).expect("exact Renoir stepping entry");
+        assert_eq!(exact.name, "AMD Ryzen 5 4500U");
+        assert_eq!(exact.codename, Some("Renoir"));
+        assert_eq!(
+            exact.driver_hints,
+            &["amd/renoir", "amdgpu/displayd", "xhci/usbd"]
+        );
+
+        let fallback = lookup_cpu_amd(0x17, 0x60, 0x2).expect("Renoir model fallback entry");
+        assert_eq!(fallback.name, "AMD Ryzen 4000 Mobile APU");
+    }
+
+    #[test]
+    fn cpu_lookup_uses_family_fallback_after_model_miss() {
+        let amd = lookup_cpu_amd(0x19, 0xff, 0x0).expect("AMD family fallback");
+        assert_eq!(amd.codename, Some("Zen family 19h"));
+
+        let intel = lookup_cpu_intel(0x06, 0xff, 0x0).expect("Intel family fallback");
+        assert_eq!(intel.name, "Intel 64 CPU");
+    }
 
     #[test]
     fn looks_up_known_device_and_driver_hint() {

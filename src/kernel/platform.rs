@@ -62,7 +62,7 @@ fn write_hardware_id(device: PlatformDevice) {
     match device.kind {
         PlatformDeviceKind::Cpu => {
             crate::kprint!(
-                "AuthenticAMD family=0x{:x} model=0x{:x} stepping=0x{:x}",
+                "CPUID family=0x{:x} model=0x{:x} stepping=0x{:x}",
                 device.class_code.unwrap_or(0),
                 device.subclass.unwrap_or(0),
                 device.prog_if.unwrap_or(0)

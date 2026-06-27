@@ -1,0 +1,41 @@
+# Mirage no_std CPU diagnostic descriptors.
+# Authority and driver binding still come from CPUID, capabilities, and supervisor policy.
+
+[[cpu]]
+vendor = "GenuineIntel"
+family = 0x06
+model = 0x3c
+name = "Intel Core 4th Gen CPU"
+codename = "Haswell"
+driver_hints = ["intel64"]
+
+[[cpu]]
+vendor = "GenuineIntel"
+family = 0x06
+model = 0x4e
+name = "Intel Core 6th Gen Mobile CPU"
+codename = "Skylake-U/Y"
+driver_hints = ["intel64"]
+
+[[cpu]]
+vendor = "GenuineIntel"
+family = 0x06
+model = 0x55
+name = "Intel Xeon Scalable CPU"
+codename = "Skylake-SP/Cascade Lake-SP"
+driver_hints = ["intel64"]
+
+[[cpu]]
+vendor = "GenuineIntel"
+family = 0x06
+model = 0x6a
+name = "Intel Xeon Scalable CPU"
+codename = "Ice Lake-SP"
+driver_hints = ["intel64"]
+
+[[cpu]]
+vendor = "GenuineIntel"
+family = 0x06
+name = "Intel 64 CPU"
+codename = "Family 6"
+driver_hints = ["intel64"]

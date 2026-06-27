@@ -1,0 +1,33 @@
+# Mirage no_std CPU diagnostic descriptors.
+# Authority and driver binding still come from CPUID, capabilities, and supervisor policy.
+
+[[cpu]]
+vendor = "AuthenticAMD"
+family = 0x17
+model = 0x60
+stepping = 0x1
+name = "AMD Ryzen 5 4500U"
+codename = "Renoir"
+driver_hints = ["amd/renoir", "amdgpu/displayd", "xhci/usbd"]
+
+[[cpu]]
+vendor = "AuthenticAMD"
+family = 0x17
+model = 0x60
+name = "AMD Ryzen 4000 Mobile APU"
+codename = "Renoir"
+driver_hints = ["amd/renoir", "amdgpu/displayd", "xhci/usbd"]
+
+[[cpu]]
+vendor = "AuthenticAMD"
+family = 0x17
+name = "AMD Zen/Zen+ CPU"
+codename = "Zen family 17h"
+driver_hints = ["amd64", "ryzen"]
+
+[[cpu]]
+vendor = "AuthenticAMD"
+family = 0x19
+name = "AMD Zen 3/Zen 4 CPU"
+codename = "Zen family 19h"
+driver_hints = ["amd64", "ryzen"]
