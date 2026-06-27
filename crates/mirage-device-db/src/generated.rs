@@ -1,7 +1,7 @@
 //! Generated no_std CPU diagnostic lookup tables.
 //!
 //! Source descriptors live under `devices/db/cpu/*.toml` and
-//! `devices/db/input/classes.toml`. These tables are diagnostic metadata only;
+//! `devices/db/input/classes.toml`, and `devices/db/block/classes.toml`. These tables are diagnostic metadata only;
 //! Mirage still binds hardware through raw CPUID/PCI
 //! facts, capabilities, and supervisor policy.
 
@@ -28,6 +28,36 @@ const INPUT_DEVICE_DESCRIPTORS: &[InputDeviceDescriptor] = &[
         kind: "usb-hid-keyboard",
         name: "USB HID Keyboard",
         driver_hints: &["xhci", "usbd", "hid", "inputd"],
+    },
+];
+
+/// Known block device metadata for platform diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockDeviceDescriptor {
+    pub kind: &'static str,
+    pub name: &'static str,
+    pub driver_hint: &'static str,
+    pub default_block_size: u32,
+}
+
+const BLOCK_DEVICE_DESCRIPTORS: &[BlockDeviceDescriptor] = &[
+    BlockDeviceDescriptor {
+        kind: "ahci-disk",
+        name: "AHCI SATA Disk",
+        driver_hint: "ahci/storaged",
+        default_block_size: 512,
+    },
+    BlockDeviceDescriptor {
+        kind: "atapi",
+        name: "ATAPI Optical Media",
+        driver_hint: "ahci-atapi/storaged",
+        default_block_size: 2048,
+    },
+    BlockDeviceDescriptor {
+        kind: "nvme",
+        name: "NVMe Namespace",
+        driver_hint: "nvme/storaged",
+        default_block_size: 512,
     },
 ];
 
@@ -171,6 +201,19 @@ pub const fn lookup_cpu_amd(family: u16, model: u16, stepping: u8) -> Option<&'s
 
 pub const fn lookup_cpu_intel(family: u16, model: u16, stepping: u8) -> Option<&'static CpuInfo> {
     lookup_cpu(INTEL_CPU_INFOS, family, model, stepping)
+}
+
+/// Looks up block device metadata by stable Mirage block kind.
+pub fn lookup_block_kind(kind: &str) -> Option<&'static BlockDeviceDescriptor> {
+    let mut index = 0;
+    while index < BLOCK_DEVICE_DESCRIPTORS.len() {
+        let entry = &BLOCK_DEVICE_DESCRIPTORS[index];
+        if entry.kind == kind {
+            return Some(entry);
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Looks up input device/controller metadata by stable Mirage input kind.

@@ -1070,6 +1070,25 @@ fn cpu_platform_name(cpu: CpuProbe) -> &'static str {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
+fn print_block_descriptor_diagnostic(kind: &str, block_size: u32, block_count: u64) {
+    match mirage_device_db::lookup_block_kind(kind) {
+        Some(descriptor) => crate::kprintln!(
+            "Kind: {}\nDriver: {}\nBlock size: {}\nBlocks: {}",
+            descriptor.name,
+            descriptor.driver_hint,
+            block_size,
+            block_count
+        ),
+        None => crate::kprintln!(
+            "Kind: {}\nDriver: unknown\nBlock size: {}\nBlocks: {}",
+            kind,
+            block_size,
+            block_count
+        ),
+    }
+}
+
+#[cfg(not(feature = "emergency-boot"))]
 #[allow(unused_mut, unused_variables)]
 fn initialize_storage_hardware(
     boot_info: &BootInfo,
@@ -1084,6 +1103,7 @@ fn initialize_storage_hardware(
     if nvme_present {
         boot_phase_detected(BootPhase::Nvme);
         boot_phase_start(BootPhase::Nvme);
+        print_block_descriptor_diagnostic("nvme", 0, 0);
         // Kernel policy is honest: discovering PCIe NVMe hardware is not the same as
         // registering a namespace. The hardware driver crates contain bounded queue
         // mechanics, but this early arch path does not claim Online until a namespace
@@ -1112,10 +1132,13 @@ fn initialize_storage_hardware(
                         boot_phase_start(BootPhase::SataDisk);
                         boot_phase_online(BootPhase::SataDisk);
                         crate::kprintln!(
-                            "[block] registered {} kind=SataDisk block_size={} blocks={}",
-                            info.name,
+                            "[block] registered {} descriptor-backed diagnostics:",
+                            info.name
+                        );
+                        print_block_descriptor_diagnostic(
+                            "ahci-disk",
                             info.block_size,
-                            info.block_count
+                            info.block_count,
                         );
                     } else {
                         boot_phase_skipped(BootPhase::SataDisk, "no SATA disk detected");
@@ -1128,10 +1151,13 @@ fn initialize_storage_hardware(
                         boot_phase_start(BootPhase::OpticalDisk);
                         boot_phase_online(BootPhase::OpticalDisk);
                         crate::kprintln!(
-                            "[block] registered {} kind=OpticalDisk block_size={} blocks={}",
-                            info.name,
+                            "[block] registered {} descriptor-backed diagnostics:",
+                            info.name
+                        );
+                        print_block_descriptor_diagnostic(
+                            "atapi",
                             info.block_size,
-                            info.block_count
+                            info.block_count,
                         );
                     } else if scan.atapi_detected {
                         boot_phase_detected(BootPhase::Atapi);
