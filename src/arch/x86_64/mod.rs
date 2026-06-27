@@ -421,6 +421,7 @@ fn mark_driver_phase(phase: BootPhase, status: DriverStatus, skipped: &'static s
         DriverStatus::Skipped => boot_phase_skipped(phase, skipped),
         DriverStatus::Failed => boot_phase_failed(phase, "driver module failed"),
         DriverStatus::Registered => boot_phase_skipped(phase, "driver module did not start"),
+        DriverStatus::Started | DriverStatus::Pending => boot_phase_skipped(phase, skipped),
     }
 }
 
