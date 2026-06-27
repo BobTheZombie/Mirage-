@@ -526,7 +526,7 @@ impl DriverModule for UsbCoreModule {
             }
         };
 
-        validate_root_hub_register_access(controller).map_err(|error| match error {
+        unsafe { validate_root_hub_register_access(controller) }.map_err(|error| match error {
             UsbKbdError::DmaAllocationFailed => DriverError::DmaAllocationFailed,
             UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
             UsbKbdError::Timeout(stage) => DriverError::Timeout(stage),
@@ -592,6 +592,7 @@ impl DriverModule for UsbCoreModule {
                             error.message()
                         );
                         return Err(match error {
+                            UsbKbdError::DmaAllocationFailed => DriverError::DmaAllocationFailed,
                             UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
                             UsbKbdError::Timeout(_) => DriverError::PortResetTimeout,
                         });
@@ -639,6 +640,7 @@ impl DriverModule for UsbCoreModule {
                         .registry
                         .set_status(USB_CORE_MODULE, DriverStatus::Failed);
                     return Err(match error {
+                        UsbKbdError::DmaAllocationFailed => DriverError::DmaAllocationFailed,
                         UsbKbdError::InvalidMmio(stage) => DriverError::InvalidMmio(stage),
                         UsbKbdError::Timeout(stage) => DriverError::Timeout(stage),
                     });
@@ -886,7 +888,7 @@ impl DriverModule for UsbKeyboardModule {
                 configured = true;
                 crate::kprintln!(
                     "[usbkbd] interrupt IN ep={} max_packet={} interval={} configured",
-                    hid.interrupt_in_endpoint & 0x0f,
+                    u32::from(hid.interrupt_in_endpoint & 0x0f),
                     hid.max_packet_size,
                     hid.interval
                 );
@@ -1042,7 +1044,8 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
             | PhaseState::Registered
             | PhaseState::Pending
             | PhaseState::Started
-            | PhaseState::Detected => {
+            | PhaseState::Detected
+            | PhaseState::Found => {
                 let reason = "required dependency unavailable";
                 let mut stack = USB_DRIVER_STACK.lock();
                 stack.registry.set_status(slot, DriverStatus::Skipped);
@@ -1222,6 +1225,7 @@ enum UsbKbdError {
 impl UsbKbdError {
     const fn message(self) -> &'static str {
         match self {
+            Self::DmaAllocationFailed => "xHCI DMA allocation failed",
             Self::InvalidMmio(stage) | Self::Timeout(stage) => stage,
         }
     }
@@ -1355,7 +1359,10 @@ pub fn hid_modifiers(bits: u8) -> KeyModifiers {
         right_shift: bits & (1 << 5) != 0,
         ctrl: bits & ((1 << 0) | (1 << 4)) != 0,
         alt: bits & ((1 << 2) | (1 << 6)) != 0,
+        meta: bits & ((1 << 3) | (1 << 7)) != 0,
         caps_lock: false,
+        num_lock: false,
+        scroll_lock: false,
     }
 }
 
@@ -1814,8 +1821,8 @@ unsafe fn configure_static_xhci_rings(
         core::mem::size_of::<XhciAlignedU64<64>>(),
         64,
     )?;
-    XHCI_COMMAND_RING.0[126] = command_ring_dma;
-    XHCI_COMMAND_RING.0[127] = ((6u64) << 10) | (1 << 1) | 1;
+    XHCI_COMMAND_RING.0[62] = command_ring_dma;
+    XHCI_COMMAND_RING.0[63] = ((6u64) << 10) | (1 << 1) | 1;
 
     let dcbaa = xhci_dma_address(
         core::ptr::addr_of_mut!(XHCI_DCBAA.0) as u64,
@@ -2102,14 +2109,14 @@ unsafe fn submit_command_and_wait_raw(
 ) -> Result<XhciCommandEvent, UsbKbdError> {
     XHCI_EVENT_RING.0[0] = 0;
     XHCI_EVENT_RING.0[1] = 0;
-    let index = controller.command_index.min(125);
+    let index = controller.command_index.min(30);
     let cycle_control = (control & !1) | u64::from(controller.command_cycle);
     XHCI_COMMAND_RING.0[index * 2] = parameter;
     XHCI_COMMAND_RING.0[index * 2 + 1] = ((status as u64) & 0xffff_ffff) | (cycle_control << 32);
     mmio_write32(controller.doorbells as *mut u8, 0, 0);
     let event = wait_command_completion(controller, stage)?;
     controller.command_index += 1;
-    if controller.command_index >= 126 {
+    if controller.command_index >= 31 {
         controller.command_index = 0;
         controller.command_cycle = !controller.command_cycle;
     }
@@ -2130,7 +2137,7 @@ unsafe fn wait_command_completion(
         {
             let completion_code = ((status >> 24) & 0xff) as u8;
             let slot_id = ((control >> 24) & 0xff) as u8;
-            acknowledge_event(controller, 1)?;
+            acknowledge_event(*controller, 1)?;
             if completion_code == 1 {
                 return Ok(XhciCommandEvent {
                     completion_code,
@@ -2200,8 +2207,8 @@ unsafe fn prepare_device_contexts(
 
     let ep0_ring_dma =
         dma_address(core::ptr::addr_of_mut!(XHCI_EP0_TRANSFER_RINGS[index].0) as u64)?;
-    XHCI_EP0_TRANSFER_RINGS[index].0[126] = ep0_ring_dma;
-    XHCI_EP0_TRANSFER_RINGS[index].0[127] = ((6u64) << 42) | (1u64 << 33) | 1;
+    XHCI_EP0_TRANSFER_RINGS[index].0[62] = ep0_ring_dma;
+    XHCI_EP0_TRANSFER_RINGS[index].0[63] = ((6u64) << 42) | (1u64 << 33) | 1;
 
     let ep0_type_control = 4u32 << 3;
     write_context_u32(
@@ -2264,7 +2271,7 @@ unsafe fn ep0_get_descriptor(
     buffer.fill(0);
     let buffer_dma = dma_address(buffer.as_mut_ptr() as u64)?;
     let ring = &mut XHCI_EP0_TRANSFER_RINGS[index].0;
-    let start = XHCI_EP0_DEQUEUE_INDEX[index].min(57);
+    let start = XHCI_EP0_DEQUEUE_INDEX[index].min(28);
     let cycle = u64::from(XHCI_EP0_CYCLE[index]);
     let setup = 0x80u64
         | ((6u64) << 8)
@@ -2285,7 +2292,7 @@ unsafe fn ep0_get_descriptor(
     );
     wait_transfer_completion(controller, slot_id, "USB descriptor control transfer")?;
     XHCI_EP0_DEQUEUE_INDEX[index] += 3;
-    if XHCI_EP0_DEQUEUE_INDEX[index] >= 58 {
+    if XHCI_EP0_DEQUEUE_INDEX[index] >= 29 {
         XHCI_EP0_DEQUEUE_INDEX[index] = 0;
         XHCI_EP0_CYCLE[index] = !XHCI_EP0_CYCLE[index];
     }
@@ -2332,7 +2339,7 @@ unsafe fn ep0_control_no_data(
 ) -> Result<(), UsbKbdError> {
     let index = (device_id - 1) as usize;
     let ring = &mut XHCI_EP0_TRANSFER_RINGS[index].0;
-    let start = XHCI_EP0_DEQUEUE_INDEX[index].min(57);
+    let start = XHCI_EP0_DEQUEUE_INDEX[index].min(28);
     let cycle = u64::from(XHCI_EP0_CYCLE[index]);
     let setup = (request_type as u64)
         | ((request as u64) << 8)
@@ -2351,7 +2358,7 @@ unsafe fn ep0_control_no_data(
     );
     wait_transfer_completion(controller, slot_id, stage)?;
     XHCI_EP0_DEQUEUE_INDEX[index] += 2;
-    if XHCI_EP0_DEQUEUE_INDEX[index] >= 58 {
+    if XHCI_EP0_DEQUEUE_INDEX[index] >= 29 {
         XHCI_EP0_DEQUEUE_INDEX[index] = 0;
         XHCI_EP0_CYCLE[index] = !XHCI_EP0_CYCLE[index];
     }
@@ -2417,8 +2424,8 @@ unsafe fn configure_interrupt_in_endpoint_context(
     );
     let ring_dma =
         dma_address(core::ptr::addr_of_mut!(XHCI_INTERRUPT_IN_RINGS[device_index].0) as u64)?;
-    XHCI_INTERRUPT_IN_RINGS[device_index].0[126] = ring_dma;
-    XHCI_INTERRUPT_IN_RINGS[device_index].0[127] = ((6u64) << 42) | (1u64 << 33) | 1;
+    XHCI_INTERRUPT_IN_RINGS[device_index].0[62] = ring_dma;
+    XHCI_INTERRUPT_IN_RINGS[device_index].0[63] = ((6u64) << 42) | (1u64 << 33) | 1;
     let interval = hid.interval.max(1) as u32;
     let ep_type_interrupt_in = 7u32 << 3;
     write_context_u32(
@@ -2476,7 +2483,7 @@ unsafe fn prime_interrupt_in_transfer(
 ) -> Result<(), UsbKbdError> {
     let index = (hid.device_id - 1) as usize;
     let ring = &mut XHCI_INTERRUPT_IN_RINGS[index].0;
-    let start = XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index].min(125);
+    let start = XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index].min(30);
     let cycle = u64::from(XHCI_INTERRUPT_IN_CYCLE[index]);
     let report = &mut USB_INTERRUPT_REPORT_BUFFER[index].0;
     report.fill(0);
@@ -2488,7 +2495,7 @@ unsafe fn prime_interrupt_in_transfer(
     mmio_write32(
         (controller.doorbells as *mut u8).add(hid.slot_id as usize * 4),
         0,
-        hid.interrupt_in_endpoint & 0x0f,
+        u32::from(hid.interrupt_in_endpoint & 0x0f),
     );
     Ok(())
 }
@@ -2547,7 +2554,7 @@ unsafe fn poll_hid_keyboard_once(
                     hid.previous_report = report;
                 }
                 XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index] += 1;
-                if XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index] >= 126 {
+                if XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index] >= 31 {
                     XHCI_INTERRUPT_IN_DEQUEUE_INDEX[index] = 0;
                     XHCI_INTERRUPT_IN_CYCLE[index] = !XHCI_INTERRUPT_IN_CYCLE[index];
                 }
