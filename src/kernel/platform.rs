@@ -3,6 +3,9 @@
 //! Platform discovery records hardware presence before Mirage-dispatch-rs binds,
 //! starts, or reports any driver/service lifecycle state.
 
+use mirage_device_db::{
+    lookup_cpu_amd, lookup_cpu_intel, lookup_input_device, lookup_pci_class, lookup_pci_device,
+};
 use mirage_platform::{PlatformDevice, PlatformDeviceKind, PlatformLocation, PlatformRegistry};
 
 use crate::kernel::boot_phase::{boot_phase_detected, boot_phase_state, BootPhase, PhaseState};
@@ -19,11 +22,122 @@ pub fn register_platform_device<const CAPACITY: usize>(
 
 pub fn platform_device_found(device: PlatformDevice) {
     crate::kprintln!("[Platform] Device found:");
-    crate::kprintln!("    {}", device.name);
+    crate::kprintln!("    {}", display_name(device));
     crate::kprint!("    Location: ");
     write_location(device.location);
     crate::kprint!("\n    ID: ");
     write_hardware_id(device);
+    crate::kprintln!();
+
+    match device.kind {
+        PlatformDeviceKind::Cpu => write_cpu_descriptor(device),
+        PlatformDeviceKind::I8042 | PlatformDeviceKind::Input => write_input_descriptor(device),
+        _ if matches!(device.location, PlatformLocation::Pci { .. }) => {
+            write_pci_descriptor(device)
+        }
+        _ => {}
+    }
+}
+
+fn display_name(device: PlatformDevice) -> &'static str {
+    match (device.vendor_id, device.device_id) {
+        (Some(vendor), Some(device_id)) => lookup_pci_device(vendor, device_id)
+            .map(|entry| entry.name)
+            .unwrap_or(device.name),
+        _ => device.name,
+    }
+}
+
+fn write_pci_descriptor(device: PlatformDevice) {
+    if let (Some(class), Some(subclass), Some(prog_if)) =
+        (device.class_code, device.subclass, device.prog_if)
+    {
+        match lookup_pci_class(class, subclass, prog_if) {
+            Some(class_info) => {
+                crate::kprintln!(
+                    "    Class: {} (class=0x{:02x}, subclass=0x{:02x}, prog-if=0x{:02x})",
+                    class_info.name,
+                    class,
+                    subclass,
+                    prog_if
+                );
+                write_driver_hint(pci_device_hint(device).or(class_info.driver_hint));
+            }
+            None => {
+                crate::kprintln!(
+                    "    Class: unknown (class=0x{:02x}, subclass=0x{:02x}, prog-if=0x{:02x})",
+                    class,
+                    subclass,
+                    prog_if
+                );
+                write_driver_hint(pci_device_hint(device));
+            }
+        }
+    } else {
+        write_driver_hint(pci_device_hint(device));
+    }
+}
+
+fn pci_device_hint(device: PlatformDevice) -> Option<&'static str> {
+    match (device.vendor_id, device.device_id) {
+        (Some(vendor), Some(device_id)) => {
+            lookup_pci_device(vendor, device_id).and_then(|entry| entry.driver_hint)
+        }
+        _ => None,
+    }
+}
+
+fn write_cpu_descriptor(device: PlatformDevice) {
+    let (Some(family), Some(model), Some(stepping)) =
+        (device.class_code, device.subclass, device.prog_if)
+    else {
+        return;
+    };
+
+    let descriptor = lookup_cpu_amd(family as u16, model as u16, stepping)
+        .or_else(|| lookup_cpu_intel(family as u16, model as u16, stepping));
+
+    if let Some(cpu) = descriptor {
+        if let Some(codename) = cpu.codename {
+            crate::kprintln!("    Codename: {}", codename);
+        }
+        write_driver_hints(cpu.driver_hints);
+    }
+}
+
+fn write_input_descriptor(device: PlatformDevice) {
+    let descriptor = match device.kind {
+        PlatformDeviceKind::I8042 => lookup_input_device("i8042"),
+        PlatformDeviceKind::Input => lookup_input_device("input"),
+        _ => None,
+    };
+
+    if let Some(input) = descriptor {
+        write_driver_hints(input.driver_hints);
+    }
+}
+
+fn write_driver_hint(hint: Option<&'static str>) {
+    match hint {
+        Some(hint) => crate::kprintln!("    Driver hint: {}", hint),
+        None => crate::kprintln!("    Driver hint: none"),
+    }
+}
+
+fn write_driver_hints(hints: &[&'static str]) {
+    crate::kprint!("    Driver hint: ");
+    if hints.is_empty() {
+        crate::kprintln!("none");
+        return;
+    }
+    let mut index = 0;
+    while index < hints.len() {
+        if index != 0 {
+            crate::kprint!(", ");
+        }
+        crate::kprint!("{}", hints[index]);
+        index += 1;
+    }
     crate::kprintln!();
 }
 
