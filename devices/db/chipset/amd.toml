@@ -1,0 +1,13 @@
+# Mirage AMD chipset descriptors.
+
+[[chipset]]
+family = "Renoir"
+name = "AMD Ryzen 4000 Mobile SoC"
+components = ["root-complex", "iommu", "xhci", "sata", "gpu"]
+driver_hints = ["amd-chipset/platformd", "amd-iommu", "xhci/usbd", "amdgpu/displayd"]
+
+[[chipset]]
+family = "Promontory"
+name = "AMD 300/400/500-Series Chipset"
+components = ["pcie-root", "sata", "usb"]
+driver_hints = ["amd-chipset/platformd", "ahci/storaged", "xhci/usbd"]

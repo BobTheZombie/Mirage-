@@ -1,0 +1,31 @@
+# Mirage USB device descriptors for QEMU-visible devices and common HID diagnostics.
+
+[[device]]
+vendor_id = 0x046d
+product_id = 0xc31c
+name = "Logitech Keyboard K120"
+driver_hint = "hid/inputd"
+
+[[device]]
+vendor_id = 0x046d
+product_id = 0xc077
+name = "Logitech USB Optical Mouse"
+driver_hint = "hid/inputd"
+
+[[device]]
+vendor_id = 0x0627
+product_id = 0x0001
+name = "QEMU USB Tablet"
+driver_hint = "hid/inputd"
+
+[[device]]
+vendor_id = 0x1d6b
+product_id = 0x0002
+name = "USB 2.0 Root Hub"
+driver_hint = "usbhub/usbd"
+
+[[device]]
+vendor_id = 0x1d6b
+product_id = 0x0003
+name = "USB 3.0 Root Hub"
+driver_hint = "usbhub/usbd"

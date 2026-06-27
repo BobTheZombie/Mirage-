@@ -1,0 +1,30 @@
+# Stable Mirage descriptor aliases.
+
+[aliases.cpu]
+"amd-ryzen-5-4500u" = "cpu/amd:AuthenticAMD:0x17:0x60:0x1"
+"qemu64" = "cpu/intel:GenuineIntel:0x06"
+
+[aliases.pci]
+"qemu-vga" = "pci:0x1234:0x1111"
+"qemu-q35-host" = "pci:0x8086:0x29c0"
+"qemu-ich9-ahci" = "pci:0x8086:0x2922"
+"qemu-e1000" = "pci:0x8086:0x100e"
+"virtio-blk" = "pci:0x1af4:0x1001"
+"virtio-gpu" = "pci:0x1af4:0x1050"
+
+[aliases.usb]
+"qemu-usb-tablet" = "usb:0x0627:0x0001"
+"usb-hid-keyboard" = "usb-class:0x03"
+
+[aliases.block]
+"sata" = "block:ahci-disk"
+"optical" = "block:atapi"
+"namespace" = "block:nvme"
+
+[aliases.input]
+"keyboard" = "input:ps2-keyboard"
+"usb-keyboard" = "input:usb-hid-keyboard"
+
+[aliases.char]
+"console" = "char:serial-console"
+"fbcon" = "char:framebuffer-console"

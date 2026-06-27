@@ -1,0 +1,153 @@
+# Mirage PCI device descriptors for QEMU and Mirage bring-up targets.
+# Names are diagnostic metadata, not proof that a device is initialized.
+
+[[device]]
+vendor_id = 0x1002
+device_id = 0x1636
+name = "AMD Radeon Renoir Graphics"
+driver_hint = "amdgpu/displayd"
+
+[[device]]
+vendor_id = 0x1002
+device_id = 0x1638
+name = "AMD Radeon Renoir Graphics"
+driver_hint = "amdgpu/displayd"
+
+[[device]]
+vendor_id = 0x1022
+device_id = 0x15e0
+name = "AMD Renoir Root Complex"
+driver_hint = "amd-chipset/platformd"
+
+[[device]]
+vendor_id = 0x1022
+device_id = 0x15e5
+name = "AMD Renoir USB 3.1 xHCI Controller"
+driver_hint = "xhci/usbd"
+
+[[device]]
+vendor_id = 0x1234
+device_id = 0x1111
+name = "QEMU VGA Display Controller"
+driver_hint = "displayd"
+
+[[device]]
+vendor_id = 0x1af4
+device_id = 0x1000
+name = "VirtIO Network Device"
+driver_hint = "virtio-net/netd"
+
+[[device]]
+vendor_id = 0x1af4
+device_id = 0x1001
+name = "VirtIO Block Device"
+driver_hint = "virtio-blk/storaged"
+
+[[device]]
+vendor_id = 0x1af4
+device_id = 0x1002
+name = "VirtIO Memory Balloon"
+driver_hint = "virtio-balloon"
+
+[[device]]
+vendor_id = 0x1af4
+device_id = 0x1003
+name = "VirtIO Console"
+driver_hint = "virtio-console/console"
+
+[[device]]
+vendor_id = 0x1af4
+device_id = 0x1004
+name = "VirtIO SCSI Host"
+driver_hint = "virtio-scsi/storaged"
+
+[[device]]
+vendor_id = 0x1af4
+device_id = 0x1005
+name = "VirtIO RNG"
+driver_hint = "virtio-rng"
+
+[[device]]
+vendor_id = 0x1af4
+device_id = 0x1009
+name = "VirtIO 9P Transport"
+driver_hint = "virtio-9p/fsd"
+
+[[device]]
+vendor_id = 0x1af4
+device_id = 0x1050
+name = "VirtIO GPU"
+driver_hint = "virtio-gpu/displayd"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x100e
+name = "Intel 82540EM Gigabit Ethernet Controller"
+driver_hint = "e1000/netd"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x10d3
+name = "Intel 82574L Gigabit Network Connection"
+driver_hint = "e1000e/netd"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x1237
+name = "Intel 440FX Host Bridge"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x2415
+name = "Intel 82801AA AC'97 Audio Controller"
+driver_hint = "ac97/audiod"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x2668
+name = "Intel ICH6 HD Audio Controller"
+driver_hint = "hda/audiod"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x2918
+name = "Intel ICH9 LPC Interface Controller"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x2922
+name = "Intel ICH9 AHCI Controller"
+driver_hint = "ahci/storaged"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x2934
+name = "Intel ICH9 USB UHCI Controller"
+driver_hint = "uhci/usbd"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x293a
+name = "Intel ICH9 USB2 EHCI Controller"
+driver_hint = "ehci/usbd"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x29c0
+name = "Intel Q35 Host Bridge"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x7000
+name = "Intel 82371SB PIIX3 ISA Bridge"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x7010
+name = "Intel 82371SB PIIX3 IDE Interface"
+driver_hint = "ata/storaged"
+
+[[device]]
+vendor_id = 0x8086
+device_id = 0x7113
+name = "Intel 82371AB/EB/MB PIIX4 ACPI Bridge"

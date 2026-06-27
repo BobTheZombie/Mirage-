@@ -1,0 +1,27 @@
+# Mirage PCI vendor descriptors.
+# Metadata only: hardware binding and capability grants remain policy-owned.
+
+[[vendor]]
+id = 0x1002
+name = "AMD"
+aliases = ["ATI Technologies"]
+
+[[vendor]]
+id = 0x1022
+name = "AMD"
+aliases = ["Advanced Micro Devices"]
+
+[[vendor]]
+id = 0x1234
+name = "QEMU"
+aliases = ["QEMU Project"]
+
+[[vendor]]
+id = 0x1af4
+name = "VirtIO"
+aliases = ["Red Hat VirtIO"]
+
+[[vendor]]
+id = 0x8086
+name = "Intel"
+aliases = ["Intel Corporation"]
