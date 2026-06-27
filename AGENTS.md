@@ -756,3 +756,18 @@ Required rootfs userland:
 8. No required milestone may remain vaguely PENDING at 100% boot.
 9. QEMU and VirtualBox must both be tested for full boot changes.
 10. Do not mark OK/ONLINE/RUNNING/RUNNABLE/BOOTED unless the underlying system state actually exists.
+
+---
+
+## Mirage Hardware Driver Port Contract
+
+1. External OS driver code may be studied, but copying requires license/provenance documentation.
+2. Mirage drivers must use Mirage PCI/MMIO/DMA abstractions.
+3. Hardware polling loops must be bounded.
+4. Optional driver failure must degrade/disable the device, not stop boot.
+5. AHCI/ATAPI boot path must not regress when adding NVMe.
+6. PS/2 input must not regress when adding xHCI/USB keyboard.
+7. Do not mark devices ONLINE unless real hardware initialization completed.
+8. Interrupt handlers must not block.
+9. DMA buffers must be aligned and backed by known physical memory.
+10. QEMU device variants must be documented and tested.
