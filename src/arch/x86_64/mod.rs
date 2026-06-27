@@ -619,6 +619,11 @@ fn cpu_vendor_is_amd(cpu: CpuProbe) -> bool {
 }
 
 #[cfg(not(feature = "emergency-boot"))]
+fn cpu_vendor_is_intel(cpu: CpuProbe) -> bool {
+    cpu.vendor_ebx == 0x756e_6547 && cpu.vendor_edx == 0x4965_6e69 && cpu.vendor_ecx == 0x6c65_746e
+}
+
+#[cfg(not(feature = "emergency-boot"))]
 fn cpu_is_supported_ryzen(cpu: CpuProbe) -> bool {
     cpu_vendor_is_amd(cpu) && matches!(cpu.family, 0x17 | 0x19)
 }
@@ -1046,14 +1051,21 @@ fn initialize_platform_probes(
 
 #[cfg(not(feature = "emergency-boot"))]
 fn cpu_platform_name(cpu: CpuProbe) -> &'static str {
-    if cpu_vendor_is_amd(cpu) && cpu.family == 0x17 && cpu.model == 0x60 {
-        "AMD Ryzen 5 4500U"
-    } else if cpu_vendor_is_amd(cpu) && matches!(cpu.family, 0x17 | 0x19) {
-        "AMD Ryzen CPU"
-    } else if cpu_vendor_is_amd(cpu) {
-        "AMD64 CPU"
+    if cpu_vendor_is_amd(cpu) {
+        if let Some(info) = mirage_device_db::lookup_cpu_amd(cpu.family, cpu.model, cpu.stepping) {
+            info.diagnostic_name
+        } else {
+            "AuthenticAMD x86_64 CPU (raw CPUID fallback)"
+        }
+    } else if cpu_vendor_is_intel(cpu) {
+        if let Some(info) = mirage_device_db::lookup_cpu_intel(cpu.family, cpu.model, cpu.stepping)
+        {
+            info.diagnostic_name
+        } else {
+            "GenuineIntel x86_64 CPU (raw CPUID fallback)"
+        }
     } else {
-        "x86_64 CPU"
+        "x86_64 CPU (vendor/raw CPUID fallback)"
     }
 }
 
