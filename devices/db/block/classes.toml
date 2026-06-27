@@ -1,0 +1,22 @@
+# Mirage no_std block diagnostic descriptors.
+# These descriptors are metadata for platform logging only; hardware probing,
+# device registration, and capability grants remain owned by real driver and
+# supervisor policy paths.
+
+[[block]]
+kind = "ahci-disk"
+name = "AHCI SATA Disk"
+driver_hint = "ahci/storaged"
+default_block_size = 512
+
+[[block]]
+kind = "atapi"
+name = "ATAPI Optical Media"
+driver_hint = "ahci-atapi/storaged"
+default_block_size = 2048
+
+[[block]]
+kind = "nvme"
+name = "NVMe Namespace"
+driver_hint = "nvme/storaged"
+default_block_size = 512

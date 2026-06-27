@@ -8,7 +8,8 @@
 
 mod generated;
 pub use generated::{
-    lookup_cpu_amd, lookup_cpu_intel, lookup_input_kind, CpuInfo, InputDeviceDescriptor,
+    lookup_block_kind, lookup_cpu_amd, lookup_cpu_intel, lookup_input_kind, BlockDeviceDescriptor,
+    CpuInfo, InputDeviceDescriptor,
 };
 
 /// Known PCI vendor metadata.
@@ -198,8 +199,11 @@ pub const fn lookup_pci_class(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        lookup_block_kind, lookup_input_kind, lookup_pci_class, lookup_pci_device,
+        lookup_pci_vendor,
+    };
     use super::{lookup_cpu_amd, lookup_cpu_intel};
-    use super::{lookup_input_kind, lookup_pci_class, lookup_pci_device, lookup_pci_vendor};
 
     #[test]
     fn cpu_lookup_prefers_exact_stepping_before_model_fallback() {
@@ -239,6 +243,22 @@ mod tests {
     }
 
     #[test]
+    fn looks_up_block_driver_hints() {
+        let sata = lookup_block_kind("ahci-disk").expect("AHCI disk block descriptor");
+        assert_eq!(sata.name, "AHCI SATA Disk");
+        assert_eq!(sata.driver_hint, "ahci/storaged");
+        assert_eq!(sata.default_block_size, 512);
+
+        let atapi = lookup_block_kind("atapi").expect("ATAPI block descriptor");
+        assert_eq!(atapi.name, "ATAPI Optical Media");
+        assert_eq!(atapi.driver_hint, "ahci-atapi/storaged");
+        assert_eq!(atapi.default_block_size, 2048);
+
+        let nvme = lookup_block_kind("nvme").expect("NVMe block descriptor");
+        assert_eq!(nvme.driver_hint, "nvme/storaged");
+    }
+
+    #[test]
     fn looks_up_input_driver_hints() {
         let i8042 = lookup_input_kind("i8042-controller").expect("i8042 input descriptor");
         assert_eq!(i8042.name, "Intel 8042-compatible PS/2 Controller");
@@ -253,6 +273,7 @@ mod tests {
         assert!(lookup_pci_vendor(0xffff).is_none());
         assert!(lookup_pci_device(0xffff, 0xffff).is_none());
         assert!(lookup_pci_class(0xff, 0xff, 0xff).is_none());
+        assert!(lookup_block_kind("unknown").is_none());
         assert!(lookup_input_kind("unknown").is_none());
     }
 }
