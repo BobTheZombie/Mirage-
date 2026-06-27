@@ -1,0 +1,9 @@
+id = "architecture"
+name = "Architecture"
+kind = "KernelMechanism"
+startup = "architecture"
+required = true
+failure = "Fatal"
+after = ["kernel-main"]
+requires = ["kernel.main"]
+provides = ["arch.ready"]

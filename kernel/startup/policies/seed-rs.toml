@@ -1,0 +1,7 @@
+id = "seed-rs"
+name = "Seed RS"
+kind = "KernelMechanism"
+startup = "seed_rs"
+required = true
+failure = "Fatal"
+provides = ["boot.seed"]

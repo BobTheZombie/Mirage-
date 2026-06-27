@@ -1,0 +1,10 @@
+id = "pci"
+name = "PCI"
+kind = "KernelMechanism"
+startup = "pci"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional hardware/service may degrade without blocking boot"
+after = ["paging", "interrupts"]
+requires = ["paging.ready", "interrupts.ready"]
+provides = ["pci.bus"]

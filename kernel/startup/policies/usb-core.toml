@@ -1,0 +1,10 @@
+id = "usb-core"
+name = "USB Core"
+kind = "DriverService"
+startup = "usb_core"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional hardware/service may degrade without blocking boot"
+after = ["xhci"]
+requires = ["usb.xhci"]
+provides = ["usb.core"]

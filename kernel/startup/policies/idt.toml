@@ -1,0 +1,9 @@
+id = "idt"
+name = "IDT"
+kind = "KernelMechanism"
+startup = "idt"
+required = true
+failure = "Fatal"
+after = ["gdt"]
+requires = ["gdt.ready"]
+provides = ["idt.ready"]

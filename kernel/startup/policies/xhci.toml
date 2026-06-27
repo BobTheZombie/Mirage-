@@ -1,0 +1,10 @@
+id = "xhci"
+name = "xHCI"
+kind = "DriverService"
+startup = "xhci"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional hardware/service may degrade without blocking boot"
+after = ["pci", "interrupts"]
+requires = ["pci.bus", "interrupts.ready"]
+provides = ["usb.xhci"]

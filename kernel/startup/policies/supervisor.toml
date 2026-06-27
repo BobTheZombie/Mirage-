@@ -1,0 +1,9 @@
+id = "supervisor"
+name = "Mirage Supervisor"
+kind = "SupervisorService"
+startup = "supervisor"
+required = true
+failure = "Fatal"
+after = ["rootfs", "interrupts"]
+requires = ["rootfs.mounted", "interrupts.ready"]
+provides = ["supervisor.ready"]

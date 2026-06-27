@@ -1,0 +1,9 @@
+id = "rootfs"
+name = "Root Filesystem"
+kind = "SupervisorService"
+startup = "rootfs"
+required = true
+failure = "Fatal"
+after = ["boot-runtime"]
+requires = ["boot.runtime.validated"]
+provides = ["rootfs.mounted"]

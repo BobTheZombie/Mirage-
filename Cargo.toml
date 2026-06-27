@@ -4,6 +4,7 @@ members = [
     "tools/mirageconfig",
     "tools/mk-runtime-image",
     "tools/gen-device-db",
+    "tools/gen-kso-policy",
     "crates/mirage-abi",
     "crates/mirage-acpi",
     "crates/mirage-ahci",

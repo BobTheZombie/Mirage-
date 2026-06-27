@@ -1,0 +1,9 @@
+id = "userspace-loader"
+name = "Userspace Loader"
+kind = "UserspaceBootstrap"
+startup = "userspace_loader"
+required = true
+failure = "Fatal"
+after = ["mtss-pid0", "rootfs"]
+requires = ["mtss.pid0", "rootfs.mounted"]
+provides = ["userspace.loader"]

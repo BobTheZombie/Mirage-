@@ -1,0 +1,9 @@
+id = "pid1-handoff"
+name = "PID1 Handoff"
+kind = "UserspaceBootstrap"
+startup = "pid1_handoff"
+required = true
+failure = "Fatal"
+after = ["userspace-loader", "supervisor"]
+requires = ["userspace.loader", "supervisor.ready"]
+provides = ["pid1.handoff"]

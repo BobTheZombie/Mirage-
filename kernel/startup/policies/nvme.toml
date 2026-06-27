@@ -1,0 +1,10 @@
+id = "nvme"
+name = "NVMe"
+kind = "DriverService"
+startup = "nvme"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional hardware/service may degrade without blocking boot"
+after = ["pci", "block-layer"]
+requires = ["pci.bus", "block.layer"]
+provides = ["storage.nvme"]

@@ -1,0 +1,9 @@
+id = "idleloop"
+name = "Idle Loop"
+kind = "KernelMechanism"
+startup = "idleloop"
+required = true
+failure = "Fatal"
+after = ["pid1-handoff"]
+requires = ["pid1.handoff"]
+provides = ["idleloop.ready"]
