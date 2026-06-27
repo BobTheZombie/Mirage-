@@ -7,14 +7,17 @@ pub struct KsoNodeId(pub u16);
 /// Runtime lifecycle state tracked by the deterministic KSO runner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KsoState {
+    NotStarted,
     New,
     WaitingDeps,
     Starting,
+    Ready,
     Online,
     Degraded,
     Skipped,
     Disabled,
     Failed,
+    Running,
 }
 
 /// Public status snapshot for a node.

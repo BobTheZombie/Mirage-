@@ -217,14 +217,14 @@ fn status_color(state: PhaseState) -> crate::arch::x86_64::framebuffer_console::
     use crate::arch::x86_64::framebuffer_console::RgbColor;
 
     match state {
-        PhaseState::Ok => RgbColor::GREEN,
+        PhaseState::Ok | PhaseState::Ready => RgbColor::GREEN,
         PhaseState::Online | PhaseState::Running => RgbColor::BRIGHT_GREEN,
         PhaseState::Enabled => RgbColor::CYAN,
         PhaseState::Detected | PhaseState::Found => RgbColor::BLUE,
         PhaseState::Started => RgbColor::WHITE,
         PhaseState::Pending => RgbColor::YELLOW,
-        PhaseState::Stub => RgbColor::MAGENTA,
-        PhaseState::Skipped => RgbColor::DARK_GRAY,
+        PhaseState::Stub | PhaseState::Degraded => RgbColor::MAGENTA,
+        PhaseState::Skipped | PhaseState::Disabled => RgbColor::DARK_GRAY,
         PhaseState::Failed => RgbColor::RED,
         PhaseState::Registered | PhaseState::Unregistered => RgbColor::GRAY,
     }

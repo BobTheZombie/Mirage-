@@ -3,6 +3,7 @@
 use super::graph::{KsoNode, KsoNodeRuntime};
 use super::policy::{KsoCapability, KsoFailurePolicy, KsoStartupFnId};
 use super::state::{KsoNodeId, KsoRunOutcome, KsoStartResult, KsoState, KsoStatus};
+use crate::kernel::boot_phase::boot_phase_apply_kso_transition;
 
 pub type KsoStartFn = fn(KsoStartupFnId) -> KsoStartResult;
 
@@ -54,40 +55,40 @@ impl<'a> KsoRunner<'a> {
         for idx in 0..self.nodes.len() {
             if !matches!(
                 self.runtime[idx].state,
-                KsoState::New | KsoState::WaitingDeps
+                KsoState::NotStarted | KsoState::New | KsoState::WaitingDeps
             ) {
                 continue;
             }
             if let Some(blocker) = self.blocker_for(idx) {
-                self.runtime[idx].state = KsoState::WaitingDeps;
+                self.set_state(idx, KsoState::WaitingDeps, "waiting for dependency");
                 self.runtime[idx].blocker = Some(blocker);
                 continue;
             }
-            self.runtime[idx].state = KsoState::Starting;
+            self.set_state(idx, KsoState::Starting, "starting");
             self.runtime[idx].blocker = None;
             match start(self.nodes[idx].startup) {
                 KsoStartResult::Started => {
-                    self.runtime[idx].state = KsoState::Online;
+                    self.set_state(idx, KsoState::Online, "online");
                     self.publish_caps(idx);
                     progress = true;
                 }
                 KsoStartResult::StartedDegraded => {
-                    self.runtime[idx].state = KsoState::Degraded;
+                    self.set_state(idx, KsoState::Degraded, "degraded");
                     self.publish_caps(idx);
                     progress = true;
                 }
                 KsoStartResult::Skipped => {
-                    self.runtime[idx].state = KsoState::Skipped;
+                    self.set_state(idx, KsoState::Skipped, "skipped");
                     progress = true;
                 }
                 KsoStartResult::Disabled => {
-                    self.runtime[idx].state = KsoState::Disabled;
+                    self.set_state(idx, KsoState::Disabled, "disabled");
                     progress = true;
                 }
                 KsoStartResult::Failed => match self.failure_state(idx) {
                     Err(outcome) => return outcome,
                     Ok(state) => {
-                        self.runtime[idx].state = state;
+                        self.set_state(idx, state, "failure policy applied");
                         progress = true;
                     }
                 },
@@ -117,7 +118,11 @@ impl<'a> KsoRunner<'a> {
             let dep_idx = self.index_of(*dep)?;
             if !matches!(
                 self.runtime[dep_idx].state,
-                KsoState::Online | KsoState::Degraded | KsoState::Skipped | KsoState::Disabled
+                KsoState::Ready
+                    | KsoState::Online
+                    | KsoState::Degraded
+                    | KsoState::Skipped
+                    | KsoState::Disabled
             ) {
                 return Some(self.nodes[dep_idx].name);
             }
@@ -132,7 +137,11 @@ impl<'a> KsoRunner<'a> {
                 let dep_idx = self.index_of(*dep)?;
                 if !matches!(
                     self.runtime[dep_idx].state,
-                    KsoState::Online | KsoState::Degraded | KsoState::Skipped | KsoState::Disabled
+                    KsoState::Ready
+                        | KsoState::Online
+                        | KsoState::Degraded
+                        | KsoState::Skipped
+                        | KsoState::Disabled
                 ) {
                     return Some(self.nodes[dep_idx].name);
                 }
@@ -162,6 +171,11 @@ impl<'a> KsoRunner<'a> {
         }
     }
 
+    fn set_state(&mut self, idx: usize, state: KsoState, message: &'static str) {
+        self.runtime[idx].state = state;
+        let _ = boot_phase_apply_kso_transition(self.nodes[idx].id, state, message);
+    }
+
     fn publish_caps(&mut self, idx: usize) {
         for cap in self.nodes[idx].provides {
             let _ = self.grant_capability(*cap);
@@ -178,7 +192,7 @@ impl<'a> KsoRunner<'a> {
         self.runtime.iter().all(|rt| {
             !matches!(
                 rt.state,
-                KsoState::New | KsoState::WaitingDeps | KsoState::Starting
+                KsoState::NotStarted | KsoState::New | KsoState::WaitingDeps | KsoState::Starting
             )
         })
     }
