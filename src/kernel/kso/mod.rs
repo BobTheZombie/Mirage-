@@ -13,7 +13,10 @@ pub mod state;
 pub use graph::{KsoNode, KsoNodeRuntime};
 pub use policy::{KsoCapability, KsoFailurePolicy, KsoNodeKind, KsoPolicy, KsoStartupFnId};
 pub use runner::{KsoRunner, KsoStartFn};
-pub use state::{KsoNodeId, KsoRunOutcome, KsoStartResult, KsoState, KsoStatus};
+pub use state::{
+    maybe_retry_pid1_handoff_after_mtss_change, BootContinueResult, BootRuntimeDeps, KsoContext,
+    KsoNodeId, KsoRunOutcome, KsoStartResult, KsoState, KsoStatus, MtssReadiness,
+};
 
 #[cfg(test)]
 mod tests {
