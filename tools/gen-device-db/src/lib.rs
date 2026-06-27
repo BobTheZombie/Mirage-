@@ -584,7 +584,136 @@ fn emit_cpu(o: &mut String, db: &Database) {
         }
         o.push_str("];\n");
     }
-    o.push_str("const fn lookup_cpu(table: &'static [CpuInfo], family: u16, model: u16, stepping: u8) -> Option<&'static CpuInfo> { let mut mf=None; let mut ff=None; let mut i=0; while i<table.len(){ let e=&table[i]; if e.family==family { match (e.model,e.stepping){ (Some(m),Some(s)) if m==model && s==stepping => return Some(e), (Some(m),None) if m==model && mf.is_none()=>mf=Some(e), (None,None) if ff.is_none()=>ff=Some(e), _=>{} } } i+=1;} match mf { Some(e)=>Some(e), None=>ff } }\npub const fn lookup_cpu_amd(family:u16, model:u16, stepping:u8)->Option<&'static CpuInfo>{lookup_cpu(AMD_CPU_INFOS,family,model,stepping)}\npub const fn lookup_cpu_intel(family:u16, model:u16, stepping:u8)->Option<&'static CpuInfo>{lookup_cpu(INTEL_CPU_INFOS,family,model,stepping)}\npub fn lookup_block_kind(kind:&str)->Option<&'static BlockDeviceDescriptor>{BLOCK_DEVICE_DESCRIPTORS.iter().find(|e|e.kind==kind)}\npub fn lookup_input_kind(kind:&str)->Option<&'static InputDeviceDescriptor>{INPUT_DEVICE_DESCRIPTORS.iter().find(|e|e.kind==kind)}\n");
+    o.push_str(r#"const fn lookup_cpu(table: &'static [CpuInfo], family: u16, model: u16, stepping: u8) -> Option<&'static CpuInfo> {
+    let mut model_fallback = None;
+    let mut family_fallback = None;
+    let mut index = 0;
+    while index < table.len() {
+        let entry = &table[index];
+        if entry.family == family {
+            match (entry.model, entry.stepping) {
+                (Some(m), Some(s)) if m == model && s == stepping => return Some(entry),
+                (Some(m), None) if m == model && model_fallback.is_none() => model_fallback = Some(entry),
+                (None, None) if family_fallback.is_none() => family_fallback = Some(entry),
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    match model_fallback { Some(entry) => Some(entry), None => family_fallback }
+}
+
+const fn class_matches(entry_class: u8, entry_subclass: Option<u8>, entry_prog_if: Option<u8>, class: u8, subclass: u8, prog_if: u8) -> bool {
+    entry_class == class
+        && match entry_subclass { Some(required) => required == subclass, None => true }
+        && match entry_prog_if { Some(required) => required == prog_if, None => true }
+}
+
+pub const fn lookup_pci_vendor(id: u16) -> Option<&'static PciVendorDescriptor> {
+    let mut index = 0;
+    while index < PCI_VENDOR_DESCRIPTORS.len() {
+        let entry = &PCI_VENDOR_DESCRIPTORS[index];
+        if entry.id == id { return Some(entry); }
+        index += 1;
+    }
+    None
+}
+
+pub const fn lookup_pci_device(vendor_id: u16, device_id: u16) -> Option<&'static PciDeviceDescriptor> {
+    let mut index = 0;
+    while index < PCI_DEVICE_DESCRIPTORS.len() {
+        let entry = &PCI_DEVICE_DESCRIPTORS[index];
+        if entry.vendor_id == vendor_id && entry.device_id == device_id { return Some(entry); }
+        index += 1;
+    }
+    None
+}
+
+pub const fn lookup_pci_class(class: u8, subclass: u8, prog_if: u8) -> Option<&'static PciClassDescriptor> {
+    let mut fallback = None;
+    let mut index = 0;
+    while index < PCI_CLASS_DESCRIPTORS.len() {
+        let entry = &PCI_CLASS_DESCRIPTORS[index];
+        if class_matches(entry.class, entry.subclass, entry.prog_if, class, subclass, prog_if) {
+            if entry.subclass.is_some() && entry.prog_if.is_some() { return Some(entry); }
+            if fallback.is_none() { fallback = Some(entry); }
+        }
+        index += 1;
+    }
+    fallback
+}
+
+pub const fn lookup_usb_vendor(id: u16) -> Option<&'static UsbVendorDescriptor> {
+    let mut index = 0;
+    while index < USB_VENDOR_DESCRIPTORS.len() {
+        let entry = &USB_VENDOR_DESCRIPTORS[index];
+        if entry.id == id { return Some(entry); }
+        index += 1;
+    }
+    None
+}
+
+pub const fn lookup_usb_device(vendor_id: u16, product_id: u16) -> Option<&'static UsbDeviceDescriptor> {
+    let mut index = 0;
+    while index < USB_DEVICE_DESCRIPTORS.len() {
+        let entry = &USB_DEVICE_DESCRIPTORS[index];
+        if entry.vendor_id == vendor_id && entry.product_id == product_id { return Some(entry); }
+        index += 1;
+    }
+    None
+}
+
+pub const fn lookup_usb_class(class: u8, subclass: u8, prog_if: u8) -> Option<&'static UsbClassDescriptor> {
+    let mut fallback = None;
+    let mut index = 0;
+    while index < USB_CLASS_DESCRIPTORS.len() {
+        let entry = &USB_CLASS_DESCRIPTORS[index];
+        if class_matches(entry.class, entry.subclass, entry.prog_if, class, subclass, prog_if) {
+            if entry.subclass.is_some() && entry.prog_if.is_some() { return Some(entry); }
+            if fallback.is_none() { fallback = Some(entry); }
+        }
+        index += 1;
+    }
+    fallback
+}
+
+pub const fn lookup_cpu_amd(family: u16, model: u16, stepping: u8) -> Option<&'static CpuInfo> { lookup_cpu(AMD_CPU_INFOS, family, model, stepping) }
+pub const fn lookup_cpu_intel(family: u16, model: u16, stepping: u8) -> Option<&'static CpuInfo> { lookup_cpu(INTEL_CPU_INFOS, family, model, stepping) }
+
+pub fn lookup_block_kind(kind: &str) -> Option<&'static BlockDeviceDescriptor> { find_block(kind) }
+pub fn lookup_char_kind(kind: &str) -> Option<&'static CharDeviceDescriptor> { find_char(kind) }
+pub fn lookup_input_kind(kind: &str) -> Option<&'static InputDeviceDescriptor> { find_input(kind) }
+
+fn find_block(kind: &str) -> Option<&'static BlockDeviceDescriptor> {
+    let mut index = 0;
+    while index < BLOCK_DEVICE_DESCRIPTORS.len() {
+        let entry = &BLOCK_DEVICE_DESCRIPTORS[index];
+        if entry.kind == kind { return Some(entry); }
+        index += 1;
+    }
+    None
+}
+
+fn find_char(kind: &str) -> Option<&'static CharDeviceDescriptor> {
+    let mut index = 0;
+    while index < CHAR_DEVICE_DESCRIPTORS.len() {
+        let entry = &CHAR_DEVICE_DESCRIPTORS[index];
+        if entry.kind == kind { return Some(entry); }
+        index += 1;
+    }
+    None
+}
+
+fn find_input(kind: &str) -> Option<&'static InputDeviceDescriptor> {
+    let mut index = 0;
+    while index < INPUT_DEVICE_DESCRIPTORS.len() {
+        let entry = &INPUT_DEVICE_DESCRIPTORS[index];
+        if entry.kind == kind { return Some(entry); }
+        index += 1;
+    }
+    None
+}
+"#);
 }
 fn opt16(v: Option<u16>) -> String {
     v.map(|x| format!("Some({:#04x})", x))
