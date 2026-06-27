@@ -98,7 +98,11 @@ pub type KernelThreadScheduleRecord =
 
 pub const MAX_PROCESSES: usize = 64;
 pub const MESSAGE_DEPTH: usize = 16;
-pub const MAX_DEVICES: usize = 12;
+// Keep enough logical device slots for early architecture drivers (serial, PS/2,
+// optional USB/EC input, Limine module block media, AHCI SATA/ATAPI) plus
+// core kernel service devices registered during BootInfoApplied. A full QEMU
+// boot with one module-backed rootfs and ATAPI media can exceed twelve slots.
+pub const MAX_DEVICES: usize = 24;
 pub const MAX_OPEN_FILES: usize = 64;
 pub const MAX_KERNEL_PIPES: usize = 32;
 pub const MAX_KERNEL_EVENTFDS: usize = 32;
@@ -5703,6 +5707,16 @@ mod tests {
     use crate::kernel::memory::{PROT_EXECUTE, PROT_READ, PROT_WRITE};
     use crate::libc;
     use crate::subkernel::{CapabilitySet, IsolationLevel, SecurityLabel};
+
+    #[test]
+    fn boot_device_registry_has_headroom_for_real_and_core_drivers() {
+        // Architecture bring-up can discover serial, PS/2, USB-HID, ACPI EC,
+        // Limine module block media, and AHCI SATA/ATAPI drivers before the
+        // core logical devices are registered during BootInfoApplied.
+        const WORST_CASE_EARLY_REAL_DRIVERS: usize = 7;
+        const CORE_LOGICAL_DRIVERS: usize = 8;
+        assert!(MAX_DEVICES >= WORST_CASE_EARLY_REAL_DRIVERS + CORE_LOGICAL_DRIVERS);
+    }
 
     fn boot_kernel() -> Kernel<16, 4> {
         let mut kernel = Kernel::<16, 4>::new();
