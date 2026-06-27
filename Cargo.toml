@@ -3,6 +3,7 @@ members = [
     ".",
     "tools/mirageconfig",
     "tools/mk-runtime-image",
+    "tools/gen-device-db",
     "crates/mirage-abi",
     "crates/mirage-acpi",
     "crates/mirage-ahci",
