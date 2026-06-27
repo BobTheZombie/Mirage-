@@ -1,0 +1,28 @@
+# Mirage USB class descriptors.
+
+[[class]]
+class = 0x03
+name = "Human Interface Device"
+driver_hint = "hid/inputd"
+
+[[class]]
+class = 0x08
+name = "Mass Storage"
+driver_hint = "usb-storage/storaged"
+
+[[class]]
+class = 0x09
+name = "Hub"
+driver_hint = "usbhub/usbd"
+
+[[class]]
+class = 0x0a
+name = "CDC Data"
+driver_hint = "cdc/netd"
+
+[[class]]
+class = 0xe0
+subclass = 0x01
+prog_if = 0x01
+name = "Bluetooth Wireless Controller"
+driver_hint = "bluetoothd"

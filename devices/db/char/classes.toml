@@ -1,0 +1,26 @@
+# Mirage character device descriptors.
+
+[[char]]
+kind = "serial-console"
+name = "16550-Compatible Serial Console"
+driver_hints = ["uart16550", "console"]
+
+[[char]]
+kind = "framebuffer-console"
+name = "Framebuffer Console"
+driver_hints = ["fb", "console"]
+
+[[char]]
+kind = "virtio-console"
+name = "VirtIO Console Port"
+driver_hints = ["virtio-console", "console"]
+
+[[char]]
+kind = "entropy"
+name = "Entropy Source"
+driver_hints = ["rngd"]
+
+[[char]]
+kind = "null"
+name = "Null Character Device"
+driver_hints = ["devfs"]

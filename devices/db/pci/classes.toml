@@ -1,0 +1,70 @@
+# Mirage PCI class descriptors.
+# These records describe observable PCI class codes; drivers still validate hardware.
+
+[[class]]
+class = 0x01
+subclass = 0x01
+prog_if = 0x8a
+name = "IDE Controller"
+driver_hint = "ata/storaged"
+
+[[class]]
+class = 0x01
+subclass = 0x06
+prog_if = 0x01
+name = "AHCI Controller"
+driver_hint = "ahci/storaged"
+
+[[class]]
+class = 0x01
+subclass = 0x08
+prog_if = 0x02
+name = "NVMe Controller"
+driver_hint = "nvme/storaged"
+
+[[class]]
+class = 0x02
+subclass = 0x00
+name = "Ethernet Controller"
+driver_hint = "netd"
+
+[[class]]
+class = 0x03
+subclass = 0x00
+name = "VGA Display Controller"
+driver_hint = "displayd"
+
+[[class]]
+class = 0x03
+subclass = 0x80
+name = "Display Controller"
+driver_hint = "displayd"
+
+[[class]]
+class = 0x06
+subclass = 0x00
+name = "Host Bridge"
+
+[[class]]
+class = 0x06
+subclass = 0x01
+name = "ISA Bridge"
+
+[[class]]
+class = 0x06
+subclass = 0x04
+name = "PCI-to-PCI Bridge"
+
+[[class]]
+class = 0x0c
+subclass = 0x03
+prog_if = 0x20
+name = "EHCI USB Controller"
+driver_hint = "ehci/usbd"
+
+[[class]]
+class = 0x0c
+subclass = 0x03
+prog_if = 0x30
+name = "xHCI Controller"
+driver_hint = "xhci/usbd"

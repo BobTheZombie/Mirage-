@@ -1,0 +1,13 @@
+# Mirage Intel/QEMU chipset descriptors.
+
+[[chipset]]
+family = "440FX"
+name = "Intel 440FX/PIIX3 QEMU PC Chipset"
+components = ["host-bridge", "isa-bridge", "ide", "acpi"]
+driver_hints = ["pci", "ata/storaged", "acpi"]
+
+[[chipset]]
+family = "Q35"
+name = "Intel Q35/ICH9 QEMU PC Chipset"
+components = ["host-bridge", "lpc", "ahci", "ehci", "uhci", "hda"]
+driver_hints = ["pci", "ahci/storaged", "ehci/usbd", "uhci/usbd", "hda/audiod"]

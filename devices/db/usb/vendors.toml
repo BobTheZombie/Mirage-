@@ -1,0 +1,17 @@
+# Mirage USB vendor descriptors for diagnostics.
+
+[[vendor]]
+id = 0x046d
+name = "Logitech"
+
+[[vendor]]
+id = 0x0627
+name = "QEMU"
+
+[[vendor]]
+id = 0x1d6b
+name = "Linux Foundation"
+
+[[vendor]]
+id = 0x8087
+name = "Intel"
