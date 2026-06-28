@@ -459,7 +459,7 @@ impl DriverModule for XhciHostModule {
         if USB_DRIVER_STACK.lock().xhci.is_none() {
             return Err(DriverError::NoController);
         }
-        let mut stack = USB_DRIVER_STACK.lock();
+        let stack = USB_DRIVER_STACK.lock();
         let Some(mut controller) = stack.xhci else {
             return Err(DriverError::NoController);
         };
@@ -570,7 +570,7 @@ impl DriverModule for UsbCoreModule {
             ));
         }
 
-        let mut stack = USB_DRIVER_STACK.lock();
+        let stack = USB_DRIVER_STACK.lock();
         let Some(mut controller) = stack.xhci else {
             stack
                 .registry
@@ -877,7 +877,7 @@ impl DriverModule for UsbKeyboardModule {
                 .set_status(USB_KBD_MODULE, DriverStatus::Skipped);
             return Err(DriverError::NoKeyboard);
         }
-        let mut stack = USB_DRIVER_STACK.lock();
+        let stack = USB_DRIVER_STACK.lock();
         let Some(mut controller) = stack.xhci else {
             stack
                 .registry
@@ -1034,7 +1034,12 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
         let dependency = descriptor.dependencies[dep_index];
         let dependency_state = crate::kernel::boot_phase::boot_phase_state(dependency);
         match dependency_state {
-            PhaseState::Ok | PhaseState::Online | PhaseState::Enabled | PhaseState::Running => {}
+            PhaseState::Ok
+            | PhaseState::Ready
+            | PhaseState::Online
+            | PhaseState::Enabled
+            | PhaseState::Degraded
+            | PhaseState::Running => {}
             PhaseState::Failed => {
                 let reason = "required dependency failed";
                 let mut stack = USB_DRIVER_STACK.lock();
@@ -1089,6 +1094,10 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
                 ModuleInitStatus::Pending("controller started; event path pending")
             }
             DriverStatus::Initialized => ModuleInitStatus::Ok,
+            DriverStatus::Matched => ModuleInitStatus::Pending("driver matched; probe pending"),
+            DriverStatus::ProbeAttempted => {
+                ModuleInitStatus::Pending("driver probe attempted; initialization pending")
+            }
             DriverStatus::Pending => ModuleInitStatus::Pending("driver pending"),
             DriverStatus::Skipped => ModuleInitStatus::Skipped("module skipped"),
             DriverStatus::Failed => ModuleInitStatus::Failed("driver module failed"),
@@ -2511,7 +2520,7 @@ unsafe fn prime_interrupt_in_transfer(
 }
 
 fn poll_configured_hid_keyboards() {
-    let mut stack = USB_DRIVER_STACK.lock();
+    let stack = USB_DRIVER_STACK.lock();
     let Some(mut controller) = stack.xhci else {
         return;
     };
