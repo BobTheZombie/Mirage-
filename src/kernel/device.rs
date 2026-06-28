@@ -1001,8 +1001,6 @@ impl FramebufferDriver {
     }
 
     fn configure(&self, framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
-        let mut descriptor = self.descriptor.lock();
-        *descriptor = framebuffer
         let next = framebuffer
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
@@ -1061,7 +1059,6 @@ impl GpuCapabilityDriver {
         let framebuffer = framebuffer
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
-        let mut descriptor = self.descriptor.lock();
         let mut descriptor = match self.descriptor.try_lock() {
             Some(descriptor) => descriptor,
             None if self.configured.load(Ordering::Acquire) => return Ok(()),
@@ -1233,6 +1230,19 @@ mod tests {
     fn boot_framebuffer() -> FramebufferInfo {
         FramebufferInfo {
             address: VirtualAddress(0xffff_8000_000b_8000),
+            width: 80,
+            height: 25,
+            pitch: 160,
+            bits_per_pixel: 16,
+            red_mask_size: 5,
+            red_mask_shift: 11,
+            green_mask_size: 6,
+            green_mask_shift: 5,
+            blue_mask_size: 5,
+            blue_mask_shift: 0,
+        }
+    }
+
     fn test_framebuffer() -> FramebufferInfo {
         FramebufferInfo {
             address: VirtualAddress(0xffff_8000_fd00_0000),
@@ -1296,6 +1306,8 @@ mod tests {
         let gpu = read_gpu_capability_descriptor();
         assert_eq!(gpu.flags, 0);
         assert_eq!(gpu.framebuffer_count, 0);
+    }
+
     #[test]
     fn framebuffer_reconfigure_is_nonblocking_after_initial_success() {
         let driver = FramebufferDriver::new();
