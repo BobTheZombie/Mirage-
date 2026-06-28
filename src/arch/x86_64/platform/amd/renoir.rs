@@ -135,6 +135,7 @@ pub fn renoir_kernel_boot_probe(_boot_info: &BootInfo) -> Option<RenoirBootProfi
 
 fn read_cpuid_facts() -> RenoirCpuidFacts {
     // SAFETY: CPUID is an architectural identification instruction on x86_64.
+    #[allow(unused_unsafe)]
     let vendor_leaf = unsafe { __cpuid_count(0, 0) };
     let mut vendor = [0u8; 12];
     vendor[0..4].copy_from_slice(&vendor_leaf.ebx.to_le_bytes());
@@ -142,6 +143,7 @@ fn read_cpuid_facts() -> RenoirCpuidFacts {
     vendor[8..12].copy_from_slice(&vendor_leaf.ecx.to_le_bytes());
 
     // SAFETY: Leaf 1 is architectural on x86_64.
+    #[allow(unused_unsafe)]
     let leaf1 = unsafe { __cpuid_count(1, 0) };
     let base_family = ((leaf1.eax >> 8) & 0x0f) as u16;
     let base_model = ((leaf1.eax >> 4) & 0x0f) as u16;
@@ -161,9 +163,11 @@ fn read_cpuid_facts() -> RenoirCpuidFacts {
     let logical_threads = ((leaf1.ebx >> 16) & 0xff) as u16;
 
     // SAFETY: Extended maximum leaf query is a CPUID identification read.
+    #[allow(unused_unsafe)]
     let ext_max = unsafe { __cpuid_count(0x8000_0000, 0) }.eax;
     let physical_cores = if ext_max >= 0x8000_0008 {
         // SAFETY: Guarded by ext_max above; leaf 0x80000008 is available.
+        #[allow(unused_unsafe)]
         let leaf = unsafe { __cpuid_count(0x8000_0008, 0) };
         ((leaf.ecx & 0xff) as u16) + 1
     } else {

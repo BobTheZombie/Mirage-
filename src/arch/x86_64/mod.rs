@@ -463,6 +463,7 @@ struct CpuProbe {
 
 #[cfg(not(feature = "emergency-boot"))]
 fn cpuid_count(leaf: u32, subleaf: u32) -> core::arch::x86_64::CpuidResult {
+    #[allow(unused_unsafe)]
     unsafe { core::arch::x86_64::__cpuid_count(leaf, subleaf) }
 }
 

@@ -932,6 +932,7 @@ fn detect_input() -> Option<RyzenDetectionInput> {
     use core::arch::x86_64::__cpuid;
 
     // SAFETY: CPUID is a CPU identification instruction available on this x86_64 backend.
+    #[allow(unused_unsafe)]
     let vendor_leaf = unsafe { __cpuid(0) };
     let mut vendor = [0_u8; 12];
     vendor[0..4].copy_from_slice(&vendor_leaf.ebx.to_le_bytes());
@@ -939,6 +940,7 @@ fn detect_input() -> Option<RyzenDetectionInput> {
     vendor[8..12].copy_from_slice(&vendor_leaf.ecx.to_le_bytes());
 
     // SAFETY: Same CPUID backend as above; leaf 1 is architectural on x86_64.
+    #[allow(unused_unsafe)]
     let leaf1 = unsafe { __cpuid(1) };
     Some(RyzenDetectionInput::new(
         vendor,
