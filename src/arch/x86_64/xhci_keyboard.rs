@@ -60,6 +60,8 @@ pub enum DriverCategory {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriverStatus {
     Registered,
+    Matched,
+    ProbeAttempted,
     Started,
     Initialized,
     Online,
@@ -400,11 +402,15 @@ impl DriverModule for XhciHostModule {
         };
 
         crate::kprintln!(
-            "[xhci] pci device found: {}:{}.{}",
+            "[xhci] device matched: pci {}:{}.{}",
             function.bus,
             function.device,
             function.function
         );
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(XHCI_MODULE, DriverStatus::Matched);
         enable_pci_command(function);
         let Some(bar0) = selected_xhci_mmio_bar().or_else(|| pci_mmio_bar_base(function, 0x10))
         else {
@@ -417,7 +423,11 @@ impl DriverModule for XhciHostModule {
         let mmio = current_hhdm_offset()
             .map(|offset| (offset + bar0) as usize)
             .unwrap_or(bar0 as usize);
-        crate::kprintln!("[xhci] mmio base: {:#x}", bar0);
+        crate::kprintln!("[xhci] probe attempted: mmio base {:#x}", bar0);
+        USB_DRIVER_STACK
+            .lock()
+            .registry
+            .set_status(XHCI_MODULE, DriverStatus::ProbeAttempted);
 
         let controller = unsafe { bring_up_xhci(mmio as *mut u8, function, bar0 as usize) }
             .map_err(|error| match error {
@@ -462,7 +472,7 @@ impl DriverModule for XhciHostModule {
         let mut stack = USB_DRIVER_STACK.lock();
         stack.xhci = Some(controller);
         stack.registry.set_status(XHCI_MODULE, DriverStatus::Online);
-        crate::kprintln!("[xhci] command/event rings ok; irq mode: polling");
+        crate::kprintln!("[xhci] online: command/event rings ok; irq mode: polling");
         Ok(())
     }
 

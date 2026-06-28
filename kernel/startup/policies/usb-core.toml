@@ -6,5 +6,6 @@ required = false
 failure = "AllowDegraded"
 optional_policy = "optional hardware/service may degrade without blocking boot"
 after = ["xhci"]
-requires = ["usb.xhci"]
+wants_capabilities = ["usb.xhci"]
 provides = ["usb.core"]
+wants = ["usb-hid"]

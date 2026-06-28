@@ -154,4 +154,30 @@ mod tests {
             KsoState::Degraded
         );
     }
+    #[test]
+    fn optional_input_policy_does_not_hard_require_keyboard_capabilities() {
+        let ps2 = generated::KSO_NODES
+            .iter()
+            .find(|node| node.id == generated::PS2_KEYBOARD)
+            .unwrap();
+        assert!(!ps2.policy.required);
+        assert!(ps2.requires.is_empty());
+        assert_eq!(ps2.wants_capabilities, &[KsoCapability("i8042.controller")]);
+
+        let usb_keyboard = generated::KSO_NODES
+            .iter()
+            .find(|node| node.id == generated::USB_KEYBOARD)
+            .unwrap();
+        assert!(!usb_keyboard.policy.required);
+        assert!(usb_keyboard.requires.is_empty());
+        assert_eq!(usb_keyboard.wants_capabilities, &[KsoCapability("usb.hid")]);
+
+        let input = generated::KSO_NODES
+            .iter()
+            .find(|node| node.id == generated::INPUT)
+            .unwrap();
+        assert!(!input.policy.required);
+        assert!(input.policy.allow_missing_wants);
+        assert!(input.requires.is_empty());
+    }
 }

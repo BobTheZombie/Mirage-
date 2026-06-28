@@ -420,6 +420,11 @@ fn mark_driver_phase(phase: BootPhase, status: DriverStatus, skipped: &'static s
         }
         DriverStatus::Skipped => boot_phase_skipped(phase, skipped),
         DriverStatus::Failed => boot_phase_failed(phase, "driver module failed"),
+        DriverStatus::Matched => crate::kernel::boot_phase::boot_phase_found(phase),
+        DriverStatus::ProbeAttempted => crate::kernel::boot_phase::boot_phase_degraded(
+            phase,
+            "probe attempted but initialization not complete",
+        ),
         DriverStatus::Registered => boot_phase_skipped(phase, "driver module did not start"),
         DriverStatus::Started | DriverStatus::Pending => boot_phase_skipped(phase, skipped),
     }
@@ -1272,9 +1277,9 @@ fn initialize_input_hardware(
                 boot_phase_ok(BootPhase::Ps2Keyboard);
             }
             Err(error) => {
-                boot_phase_failed(
+                crate::kernel::boot_phase::boot_phase_degraded(
                     BootPhase::Ps2Keyboard,
-                    "PS/2 keyboard initialization failed",
+                    "PS/2 keyboard probe failed; input optional",
                 );
                 crate::kprintln!("PS/2 keyboard initialization failed: {:?}", error);
             }
