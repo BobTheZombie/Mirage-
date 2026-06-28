@@ -1,0 +1,10 @@
+id = "usb-keyboard"
+name = "USB Keyboard"
+kind = "DriverService"
+startup = "usb_keyboard"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional device-specific input driver; missing USB keyboard hardware must not block boot"
+after = ["usb-hid"]
+wants_capabilities = ["usb.hid"]
+provides = ["input.keyboard.usb"]

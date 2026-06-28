@@ -6,5 +6,5 @@ required = false
 failure = "AllowDegraded"
 optional_policy = "optional hardware/service may degrade without blocking boot"
 after = ["i8042"]
-requires = ["i8042.controller"]
+wants_capabilities = ["i8042.controller"]
 provides = ["input.keyboard.ps2"]

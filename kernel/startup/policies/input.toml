@@ -1,0 +1,11 @@
+id = "input"
+name = "Input Subsystem"
+kind = "DriverService"
+startup = "input"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional input aggregation; absent keyboards and debug-shell hotkey polling are not boot dependencies"
+after = ["ps2-keyboard", "usb-keyboard"]
+wants = ["ps2-keyboard", "usb-keyboard"]
+wants_capabilities = ["input.keyboard.ps2", "input.keyboard.usb"]
+provides = ["input.ready"]

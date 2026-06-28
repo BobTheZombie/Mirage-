@@ -1,0 +1,10 @@
+id = "usb-hid"
+name = "USB HID"
+kind = "DriverService"
+startup = "usb_hid"
+required = false
+failure = "AllowDegraded"
+optional_policy = "optional device-specific input driver; missing/unknown HID hardware must not block boot"
+after = ["usb-core"]
+wants_capabilities = ["usb.core"]
+provides = ["usb.hid"]

@@ -15,33 +15,36 @@ pub const HEAP: KsoNodeId = KsoNodeId(8);
 pub const I8042: KsoNodeId = KsoNodeId(9);
 pub const IDLELOOP: KsoNodeId = KsoNodeId(10);
 pub const IDT: KsoNodeId = KsoNodeId(11);
-pub const INTERRUPTS: KsoNodeId = KsoNodeId(12);
-pub const KERNEL_MAIN: KsoNodeId = KsoNodeId(13);
-pub const KERNEL_MAPPER: KsoNodeId = KsoNodeId(14);
-pub const MEMORY_MAP: KsoNodeId = KsoNodeId(15);
-pub const MTSS_PID0: KsoNodeId = KsoNodeId(16);
-pub const NVME: KsoNodeId = KsoNodeId(17);
-pub const PAGING: KsoNodeId = KsoNodeId(18);
-pub const PCI: KsoNodeId = KsoNodeId(19);
-pub const PHYSICAL_ALLOCATOR: KsoNodeId = KsoNodeId(20);
-pub const PIC: KsoNodeId = KsoNodeId(21);
-pub const PID1_HANDOFF: KsoNodeId = KsoNodeId(22);
-pub const PS2_KEYBOARD: KsoNodeId = KsoNodeId(23);
-pub const ROOTFS: KsoNodeId = KsoNodeId(24);
-pub const SEED_RS: KsoNodeId = KsoNodeId(25);
-pub const SERIAL: KsoNodeId = KsoNodeId(26);
-pub const SUPERVISOR: KsoNodeId = KsoNodeId(27);
-pub const USB_CORE: KsoNodeId = KsoNodeId(28);
-pub const USERSPACE_LOADER: KsoNodeId = KsoNodeId(29);
-pub const XHCI: KsoNodeId = KsoNodeId(30);
+pub const INPUT: KsoNodeId = KsoNodeId(12);
+pub const INTERRUPTS: KsoNodeId = KsoNodeId(13);
+pub const KERNEL_MAIN: KsoNodeId = KsoNodeId(14);
+pub const KERNEL_MAPPER: KsoNodeId = KsoNodeId(15);
+pub const MEMORY_MAP: KsoNodeId = KsoNodeId(16);
+pub const MTSS_PID0: KsoNodeId = KsoNodeId(17);
+pub const NVME: KsoNodeId = KsoNodeId(18);
+pub const PAGING: KsoNodeId = KsoNodeId(19);
+pub const PCI: KsoNodeId = KsoNodeId(20);
+pub const PHYSICAL_ALLOCATOR: KsoNodeId = KsoNodeId(21);
+pub const PIC: KsoNodeId = KsoNodeId(22);
+pub const PID1_HANDOFF: KsoNodeId = KsoNodeId(23);
+pub const PS2_KEYBOARD: KsoNodeId = KsoNodeId(24);
+pub const ROOTFS: KsoNodeId = KsoNodeId(25);
+pub const SEED_RS: KsoNodeId = KsoNodeId(26);
+pub const SERIAL: KsoNodeId = KsoNodeId(27);
+pub const SUPERVISOR: KsoNodeId = KsoNodeId(28);
+pub const USB_CORE: KsoNodeId = KsoNodeId(29);
+pub const USB_HID: KsoNodeId = KsoNodeId(30);
+pub const USB_KEYBOARD: KsoNodeId = KsoNodeId(31);
+pub const USERSPACE_LOADER: KsoNodeId = KsoNodeId(32);
+pub const XHCI: KsoNodeId = KsoNodeId(33);
 
-const AHCI_AFTER: [KsoNodeId; 2] = [KsoNodeId(3), KsoNodeId(19)];
+const AHCI_AFTER: [KsoNodeId; 2] = [KsoNodeId(3), KsoNodeId(20)];
 const AHCI_WANTS: [KsoNodeId; 0] = [];
 const AHCI_REQUIRES: [KsoCapability; 2] = [KsoCapability("pci.bus"), KsoCapability("block.layer")];
 const AHCI_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const AHCI_PROVIDES: [KsoCapability; 1] = [KsoCapability("storage.ahci")];
 const AHCI_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const ARCHITECTURE_AFTER: [KsoNodeId; 1] = [KsoNodeId(13)];
+const ARCHITECTURE_AFTER: [KsoNodeId; 1] = [KsoNodeId(14)];
 const ARCHITECTURE_WANTS: [KsoNodeId; 0] = [];
 const ARCHITECTURE_REQUIRES: [KsoCapability; 1] = [KsoCapability("kernel.main")];
 const ARCHITECTURE_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
@@ -63,13 +66,13 @@ const BOOT_RUNTIME_PROVIDES: [KsoCapability; 2] = [
     KsoCapability("boot.spider_rs_image"),
 ];
 const BOOT_RUNTIME_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const BOOTINFO_AFTER: [KsoNodeId; 1] = [KsoNodeId(25)];
+const BOOTINFO_AFTER: [KsoNodeId; 1] = [KsoNodeId(26)];
 const BOOTINFO_WANTS: [KsoNodeId; 0] = [];
 const BOOTINFO_REQUIRES: [KsoCapability; 1] = [KsoCapability("boot.seed")];
 const BOOTINFO_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const BOOTINFO_PROVIDES: [KsoCapability; 1] = [KsoCapability("boot.info")];
 const BOOTINFO_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const FRAMEBUFFER_AFTER: [KsoNodeId; 2] = [KsoNodeId(5), KsoNodeId(18)];
+const FRAMEBUFFER_AFTER: [KsoNodeId; 2] = [KsoNodeId(5), KsoNodeId(19)];
 const FRAMEBUFFER_WANTS: [KsoNodeId; 0] = [];
 const FRAMEBUFFER_REQUIRES: [KsoCapability; 2] =
     [KsoCapability("boot.info"), KsoCapability("paging.ready")];
@@ -82,19 +85,19 @@ const GDT_REQUIRES: [KsoCapability; 1] = [KsoCapability("arch.ready")];
 const GDT_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const GDT_PROVIDES: [KsoCapability; 1] = [KsoCapability("gdt.ready")];
 const GDT_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const HEAP_AFTER: [KsoNodeId; 1] = [KsoNodeId(18)];
+const HEAP_AFTER: [KsoNodeId; 1] = [KsoNodeId(19)];
 const HEAP_WANTS: [KsoNodeId; 0] = [];
 const HEAP_REQUIRES: [KsoCapability; 1] = [KsoCapability("paging.ready")];
 const HEAP_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const HEAP_PROVIDES: [KsoCapability; 1] = [KsoCapability("heap.ready")];
 const HEAP_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const I8042_AFTER: [KsoNodeId; 1] = [KsoNodeId(12)];
+const I8042_AFTER: [KsoNodeId; 1] = [KsoNodeId(13)];
 const I8042_WANTS: [KsoNodeId; 0] = [];
 const I8042_REQUIRES: [KsoCapability; 1] = [KsoCapability("interrupts.ready")];
 const I8042_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const I8042_PROVIDES: [KsoCapability; 1] = [KsoCapability("i8042.controller")];
 const I8042_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const IDLELOOP_AFTER: [KsoNodeId; 1] = [KsoNodeId(22)];
+const IDLELOOP_AFTER: [KsoNodeId; 1] = [KsoNodeId(23)];
 const IDLELOOP_WANTS: [KsoNodeId; 0] = [];
 const IDLELOOP_REQUIRES: [KsoCapability; 1] = [KsoCapability("pid1.handoff")];
 const IDLELOOP_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
@@ -106,7 +109,16 @@ const IDT_REQUIRES: [KsoCapability; 1] = [KsoCapability("gdt.ready")];
 const IDT_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const IDT_PROVIDES: [KsoCapability; 1] = [KsoCapability("idt.ready")];
 const IDT_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const INTERRUPTS_AFTER: [KsoNodeId; 2] = [KsoNodeId(11), KsoNodeId(21)];
+const INPUT_AFTER: [KsoNodeId; 2] = [KsoNodeId(24), KsoNodeId(31)];
+const INPUT_WANTS: [KsoNodeId; 2] = [KsoNodeId(24), KsoNodeId(31)];
+const INPUT_REQUIRES: [KsoCapability; 0] = [];
+const INPUT_WANTS_CAPABILITIES: [KsoCapability; 2] = [
+    KsoCapability("input.keyboard.ps2"),
+    KsoCapability("input.keyboard.usb"),
+];
+const INPUT_PROVIDES: [KsoCapability; 1] = [KsoCapability("input.ready")];
+const INPUT_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
+const INTERRUPTS_AFTER: [KsoNodeId; 2] = [KsoNodeId(11), KsoNodeId(22)];
 const INTERRUPTS_WANTS: [KsoNodeId; 0] = [];
 const INTERRUPTS_REQUIRES: [KsoCapability; 2] =
     [KsoCapability("pic.ready"), KsoCapability("idt.ready")];
@@ -119,7 +131,7 @@ const KERNEL_MAIN_REQUIRES: [KsoCapability; 1] = [KsoCapability("boot.info")];
 const KERNEL_MAIN_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const KERNEL_MAIN_PROVIDES: [KsoCapability; 1] = [KsoCapability("kernel.main")];
 const KERNEL_MAIN_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const KERNEL_MAPPER_AFTER: [KsoNodeId; 1] = [KsoNodeId(20)];
+const KERNEL_MAPPER_AFTER: [KsoNodeId; 1] = [KsoNodeId(21)];
 const KERNEL_MAPPER_WANTS: [KsoNodeId; 0] = [];
 const KERNEL_MAPPER_REQUIRES: [KsoCapability; 1] = [KsoCapability("memory.physical_allocator")];
 const KERNEL_MAPPER_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
@@ -131,7 +143,7 @@ const MEMORY_MAP_REQUIRES: [KsoCapability; 1] = [KsoCapability("boot.info")];
 const MEMORY_MAP_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const MEMORY_MAP_PROVIDES: [KsoCapability; 1] = [KsoCapability("memory.map")];
 const MEMORY_MAP_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const MTSS_PID0_AFTER: [KsoNodeId; 2] = [KsoNodeId(8), KsoNodeId(27)];
+const MTSS_PID0_AFTER: [KsoNodeId; 2] = [KsoNodeId(8), KsoNodeId(28)];
 const MTSS_PID0_WANTS: [KsoNodeId; 0] = [];
 const MTSS_PID0_REQUIRES: [KsoCapability; 2] = [
     KsoCapability("supervisor.ready"),
@@ -148,13 +160,13 @@ const MTSS_PID0_OPTIONAL_PROVIDES: [KsoCapability; 2] = [
     KsoCapability("mtss.timer"),
     KsoCapability("mtss.preemption"),
 ];
-const NVME_AFTER: [KsoNodeId; 2] = [KsoNodeId(3), KsoNodeId(19)];
+const NVME_AFTER: [KsoNodeId; 2] = [KsoNodeId(3), KsoNodeId(20)];
 const NVME_WANTS: [KsoNodeId; 0] = [];
 const NVME_REQUIRES: [KsoCapability; 2] = [KsoCapability("pci.bus"), KsoCapability("block.layer")];
 const NVME_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const NVME_PROVIDES: [KsoCapability; 1] = [KsoCapability("storage.nvme")];
 const NVME_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const PAGING_AFTER: [KsoNodeId; 2] = [KsoNodeId(7), KsoNodeId(14)];
+const PAGING_AFTER: [KsoNodeId; 2] = [KsoNodeId(7), KsoNodeId(15)];
 const PAGING_WANTS: [KsoNodeId; 0] = [];
 const PAGING_REQUIRES: [KsoCapability; 2] = [
     KsoCapability("memory.kernel_mapper"),
@@ -163,7 +175,7 @@ const PAGING_REQUIRES: [KsoCapability; 2] = [
 const PAGING_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const PAGING_PROVIDES: [KsoCapability; 1] = [KsoCapability("paging.ready")];
 const PAGING_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const PCI_AFTER: [KsoNodeId; 2] = [KsoNodeId(12), KsoNodeId(18)];
+const PCI_AFTER: [KsoNodeId; 2] = [KsoNodeId(13), KsoNodeId(19)];
 const PCI_WANTS: [KsoNodeId; 0] = [];
 const PCI_REQUIRES: [KsoCapability; 2] = [
     KsoCapability("paging.ready"),
@@ -172,7 +184,7 @@ const PCI_REQUIRES: [KsoCapability; 2] = [
 const PCI_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const PCI_PROVIDES: [KsoCapability; 1] = [KsoCapability("pci.bus")];
 const PCI_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const PHYSICAL_ALLOCATOR_AFTER: [KsoNodeId; 1] = [KsoNodeId(15)];
+const PHYSICAL_ALLOCATOR_AFTER: [KsoNodeId; 1] = [KsoNodeId(16)];
 const PHYSICAL_ALLOCATOR_WANTS: [KsoNodeId; 0] = [];
 const PHYSICAL_ALLOCATOR_REQUIRES: [KsoCapability; 1] = [KsoCapability("memory.map")];
 const PHYSICAL_ALLOCATOR_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
@@ -185,8 +197,8 @@ const PIC_REQUIRES: [KsoCapability; 1] = [KsoCapability("idt.ready")];
 const PIC_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const PIC_PROVIDES: [KsoCapability; 1] = [KsoCapability("pic.ready")];
 const PIC_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const PID1_HANDOFF_AFTER: [KsoNodeId; 3] = [KsoNodeId(16), KsoNodeId(27), KsoNodeId(29)];
-const PID1_HANDOFF_WANTS: [KsoNodeId; 1] = [KsoNodeId(16)];
+const PID1_HANDOFF_AFTER: [KsoNodeId; 3] = [KsoNodeId(17), KsoNodeId(28), KsoNodeId(32)];
+const PID1_HANDOFF_WANTS: [KsoNodeId; 1] = [KsoNodeId(17)];
 const PID1_HANDOFF_REQUIRES: [KsoCapability; 5] = [
     KsoCapability("boot.spider_rs_image"),
     KsoCapability("supervisor.launch_grants"),
@@ -199,8 +211,8 @@ const PID1_HANDOFF_PROVIDES: [KsoCapability; 1] = [KsoCapability("pid1.handoff")
 const PID1_HANDOFF_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const PS2_KEYBOARD_AFTER: [KsoNodeId; 1] = [KsoNodeId(9)];
 const PS2_KEYBOARD_WANTS: [KsoNodeId; 0] = [];
-const PS2_KEYBOARD_REQUIRES: [KsoCapability; 1] = [KsoCapability("i8042.controller")];
-const PS2_KEYBOARD_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
+const PS2_KEYBOARD_REQUIRES: [KsoCapability; 0] = [];
+const PS2_KEYBOARD_WANTS_CAPABILITIES: [KsoCapability; 1] = [KsoCapability("i8042.controller")];
 const PS2_KEYBOARD_PROVIDES: [KsoCapability; 1] = [KsoCapability("input.keyboard.ps2")];
 const PS2_KEYBOARD_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
 const ROOTFS_AFTER: [KsoNodeId; 1] = [KsoNodeId(4)];
@@ -221,7 +233,7 @@ const SERIAL_REQUIRES: [KsoCapability; 1] = [KsoCapability("arch.ready")];
 const SERIAL_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const SERIAL_PROVIDES: [KsoCapability; 1] = [KsoCapability("serial.console")];
 const SERIAL_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const SUPERVISOR_AFTER: [KsoNodeId; 2] = [KsoNodeId(12), KsoNodeId(24)];
+const SUPERVISOR_AFTER: [KsoNodeId; 2] = [KsoNodeId(13), KsoNodeId(25)];
 const SUPERVISOR_WANTS: [KsoNodeId; 0] = [];
 const SUPERVISOR_REQUIRES: [KsoCapability; 2] = [
     KsoCapability("rootfs.mounted"),
@@ -233,13 +245,25 @@ const SUPERVISOR_PROVIDES: [KsoCapability; 2] = [
     KsoCapability("supervisor.launch_grants"),
 ];
 const SUPERVISOR_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const USB_CORE_AFTER: [KsoNodeId; 1] = [KsoNodeId(30)];
-const USB_CORE_WANTS: [KsoNodeId; 0] = [];
-const USB_CORE_REQUIRES: [KsoCapability; 1] = [KsoCapability("usb.xhci")];
-const USB_CORE_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
+const USB_CORE_AFTER: [KsoNodeId; 1] = [KsoNodeId(33)];
+const USB_CORE_WANTS: [KsoNodeId; 1] = [KsoNodeId(30)];
+const USB_CORE_REQUIRES: [KsoCapability; 0] = [];
+const USB_CORE_WANTS_CAPABILITIES: [KsoCapability; 1] = [KsoCapability("usb.xhci")];
 const USB_CORE_PROVIDES: [KsoCapability; 1] = [KsoCapability("usb.core")];
 const USB_CORE_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const USERSPACE_LOADER_AFTER: [KsoNodeId; 2] = [KsoNodeId(16), KsoNodeId(24)];
+const USB_HID_AFTER: [KsoNodeId; 1] = [KsoNodeId(29)];
+const USB_HID_WANTS: [KsoNodeId; 0] = [];
+const USB_HID_REQUIRES: [KsoCapability; 0] = [];
+const USB_HID_WANTS_CAPABILITIES: [KsoCapability; 1] = [KsoCapability("usb.core")];
+const USB_HID_PROVIDES: [KsoCapability; 1] = [KsoCapability("usb.hid")];
+const USB_HID_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
+const USB_KEYBOARD_AFTER: [KsoNodeId; 1] = [KsoNodeId(30)];
+const USB_KEYBOARD_WANTS: [KsoNodeId; 0] = [];
+const USB_KEYBOARD_REQUIRES: [KsoCapability; 0] = [];
+const USB_KEYBOARD_WANTS_CAPABILITIES: [KsoCapability; 1] = [KsoCapability("usb.hid")];
+const USB_KEYBOARD_PROVIDES: [KsoCapability; 1] = [KsoCapability("input.keyboard.usb")];
+const USB_KEYBOARD_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
+const USERSPACE_LOADER_AFTER: [KsoNodeId; 2] = [KsoNodeId(17), KsoNodeId(25)];
 const USERSPACE_LOADER_WANTS: [KsoNodeId; 0] = [];
 const USERSPACE_LOADER_REQUIRES: [KsoCapability; 4] = [
     KsoCapability("mtss.pid0"),
@@ -250,7 +274,7 @@ const USERSPACE_LOADER_REQUIRES: [KsoCapability; 4] = [
 const USERSPACE_LOADER_WANTS_CAPABILITIES: [KsoCapability; 0] = [];
 const USERSPACE_LOADER_PROVIDES: [KsoCapability; 1] = [KsoCapability("userspace.loader")];
 const USERSPACE_LOADER_OPTIONAL_PROVIDES: [KsoCapability; 0] = [];
-const XHCI_AFTER: [KsoNodeId; 2] = [KsoNodeId(12), KsoNodeId(19)];
+const XHCI_AFTER: [KsoNodeId; 2] = [KsoNodeId(13), KsoNodeId(20)];
 const XHCI_WANTS: [KsoNodeId; 0] = [];
 const XHCI_REQUIRES: [KsoCapability; 2] =
     [KsoCapability("pci.bus"), KsoCapability("interrupts.ready")];
@@ -319,7 +343,7 @@ pub static KSO_NODES: &[KsoNode] = &[
         id: BOOT_RUNTIME,
         name: "Boot Runtime Validator",
         kind: KsoNodeKind::SupervisorService,
-        startup: KsoStartupFnId(24),
+        startup: KsoStartupFnId(27),
         after: &BOOT_RUNTIME_AFTER,
         wants: &BOOT_RUNTIME_WANTS,
         requires: &BOOT_RUNTIME_REQUIRES,
@@ -433,7 +457,7 @@ pub static KSO_NODES: &[KsoNode] = &[
         id: IDLELOOP,
         name: "Idle Loop",
         kind: KsoNodeKind::KernelMechanism,
-        startup: KsoStartupFnId(30),
+        startup: KsoStartupFnId(33),
         after: &IDLELOOP_AFTER,
         wants: &IDLELOOP_WANTS,
         requires: &IDLELOOP_REQUIRES,
@@ -463,6 +487,25 @@ pub static KSO_NODES: &[KsoNode] = &[
             required: true,
             allow_missing_wants: false,
             failure: KsoFailurePolicy::Fatal,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
+        },
+    },
+    KsoNode {
+        id: INPUT,
+        name: "Input Subsystem",
+        kind: KsoNodeKind::DriverService,
+        startup: KsoStartupFnId(26),
+        after: &INPUT_AFTER,
+        wants: &INPUT_WANTS,
+        requires: &INPUT_REQUIRES,
+        wants_capabilities: &INPUT_WANTS_CAPABILITIES,
+        provides: &INPUT_PROVIDES,
+        optional_provides: &INPUT_OPTIONAL_PROVIDES,
+        policy: KsoPolicy {
+            required: false,
+            allow_missing_wants: true,
+            failure: KsoFailurePolicy::AllowDegraded,
             allow_cooperative_mtss: false,
             require_preemption: false,
         },
@@ -547,7 +590,7 @@ pub static KSO_NODES: &[KsoNode] = &[
         id: MTSS_PID0,
         name: "MTSS PID0",
         kind: KsoNodeKind::MtssMechanism,
-        startup: KsoStartupFnId(27),
+        startup: KsoStartupFnId(30),
         after: &MTSS_PID0_AFTER,
         wants: &MTSS_PID0_WANTS,
         requires: &MTSS_PID0_REQUIRES,
@@ -661,7 +704,7 @@ pub static KSO_NODES: &[KsoNode] = &[
         id: PID1_HANDOFF,
         name: "PID1 Handoff",
         kind: KsoNodeKind::UserspaceBootstrap,
-        startup: KsoStartupFnId(29),
+        startup: KsoStartupFnId(32),
         after: &PID1_HANDOFF_AFTER,
         wants: &PID1_HANDOFF_WANTS,
         requires: &PID1_HANDOFF_REQUIRES,
@@ -699,7 +742,7 @@ pub static KSO_NODES: &[KsoNode] = &[
         id: ROOTFS,
         name: "Root Filesystem",
         kind: KsoNodeKind::SupervisorService,
-        startup: KsoStartupFnId(25),
+        startup: KsoStartupFnId(28),
         after: &ROOTFS_AFTER,
         wants: &ROOTFS_WANTS,
         requires: &ROOTFS_REQUIRES,
@@ -756,7 +799,7 @@ pub static KSO_NODES: &[KsoNode] = &[
         id: SUPERVISOR,
         name: "Mirage Supervisor",
         kind: KsoNodeKind::SupervisorService,
-        startup: KsoStartupFnId(26),
+        startup: KsoStartupFnId(29),
         after: &SUPERVISOR_AFTER,
         wants: &SUPERVISOR_WANTS,
         requires: &SUPERVISOR_REQUIRES,
@@ -791,10 +834,48 @@ pub static KSO_NODES: &[KsoNode] = &[
         },
     },
     KsoNode {
+        id: USB_HID,
+        name: "USB HID",
+        kind: KsoNodeKind::DriverService,
+        startup: KsoStartupFnId(24),
+        after: &USB_HID_AFTER,
+        wants: &USB_HID_WANTS,
+        requires: &USB_HID_REQUIRES,
+        wants_capabilities: &USB_HID_WANTS_CAPABILITIES,
+        provides: &USB_HID_PROVIDES,
+        optional_provides: &USB_HID_OPTIONAL_PROVIDES,
+        policy: KsoPolicy {
+            required: false,
+            allow_missing_wants: true,
+            failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
+        },
+    },
+    KsoNode {
+        id: USB_KEYBOARD,
+        name: "USB Keyboard",
+        kind: KsoNodeKind::DriverService,
+        startup: KsoStartupFnId(25),
+        after: &USB_KEYBOARD_AFTER,
+        wants: &USB_KEYBOARD_WANTS,
+        requires: &USB_KEYBOARD_REQUIRES,
+        wants_capabilities: &USB_KEYBOARD_WANTS_CAPABILITIES,
+        provides: &USB_KEYBOARD_PROVIDES,
+        optional_provides: &USB_KEYBOARD_OPTIONAL_PROVIDES,
+        policy: KsoPolicy {
+            required: false,
+            allow_missing_wants: true,
+            failure: KsoFailurePolicy::AllowDegraded,
+            allow_cooperative_mtss: false,
+            require_preemption: false,
+        },
+    },
+    KsoNode {
         id: USERSPACE_LOADER,
         name: "Userspace Loader",
         kind: KsoNodeKind::UserspaceBootstrap,
-        startup: KsoStartupFnId(28),
+        startup: KsoStartupFnId(31),
         after: &USERSPACE_LOADER_AFTER,
         wants: &USERSPACE_LOADER_WANTS,
         requires: &USERSPACE_LOADER_REQUIRES,
