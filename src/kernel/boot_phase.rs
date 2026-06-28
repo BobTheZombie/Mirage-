@@ -161,8 +161,10 @@ pub enum PhaseState {
     Ok,
     Online,
     Enabled,
+    Degraded,
     Stub,
     Skipped,
+    Disabled,
     Failed,
     Running,
 }
@@ -179,8 +181,10 @@ impl PhaseState {
             Self::Ok => "Ok",
             Self::Online => "Online",
             Self::Enabled => "Enabled",
+            Self::Degraded => "Degraded",
             Self::Stub => "Stub",
             Self::Skipped => "Skipped",
+            Self::Disabled => "Disabled",
             Self::Failed => "Failed",
             Self::Running => "Running",
         }
@@ -190,13 +194,14 @@ impl PhaseState {
         let weight = weight as u16;
         match self {
             Self::Ok | Self::Online | Self::Enabled | Self::Running => weight,
-            Self::Skipped | Self::Detected | Self::Found | Self::Stub => {
+            Self::Skipped | Self::Detected | Self::Found | Self::Stub | Self::Disabled => {
                 if required {
                     weight / 2
                 } else {
                     weight
                 }
             }
+            Self::Degraded => (weight * 3) / 4,
             Self::Started => (weight + 1) / 2,
             Self::Unregistered | Self::Registered | Self::Pending | Self::Failed => 0,
         }
@@ -952,6 +957,14 @@ pub fn boot_phase_enabled(phase: BootPhase) {
     transition(phase, PhaseState::Enabled, "enabled");
 }
 
+pub fn boot_phase_degraded(phase: BootPhase, message: &'static str) {
+    transition(phase, PhaseState::Degraded, message);
+}
+
+pub fn boot_phase_disabled(phase: BootPhase, message: &'static str) {
+    transition(phase, PhaseState::Disabled, message);
+}
+
 pub fn boot_phase_failed(phase: BootPhase, message: &'static str) {
     crate::kernel::boot_diagnostics::boot_trace_phase_failed(phase.name(), message);
     transition(phase, PhaseState::Failed, message);
@@ -1071,6 +1084,7 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             PhaseState::Ok
             | PhaseState::Online
             | PhaseState::Enabled
+            | PhaseState::Degraded
             | PhaseState::Running
             | PhaseState::Found
             | PhaseState::Stub,
@@ -1093,10 +1107,12 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | PhaseState::Ok
             | PhaseState::Online
             | PhaseState::Enabled
+            | PhaseState::Degraded
             | PhaseState::Running
             | PhaseState::Found
             | PhaseState::Stub
-            | PhaseState::Skipped,
+            | PhaseState::Skipped
+            | PhaseState::Disabled,
         ) => false,
     }
 }
@@ -1172,7 +1188,11 @@ fn write_transition_serial(phase: BootPhase, state: PhaseState, message: &'stati
         crate::arch::x86_64::early_debug::com1_write_str(": ");
         crate::arch::x86_64::early_debug::com1_write_str(state.as_str());
         match state {
-            PhaseState::Failed | PhaseState::Skipped | PhaseState::Stub => {
+            PhaseState::Failed
+            | PhaseState::Skipped
+            | PhaseState::Stub
+            | PhaseState::Degraded
+            | PhaseState::Disabled => {
                 crate::arch::x86_64::early_debug::com1_write_str(": ");
                 crate::arch::x86_64::early_debug::com1_write_str(message);
             }

@@ -117,7 +117,11 @@ impl<'a> KsoRunner<'a> {
             let dep_idx = self.index_of(*dep)?;
             if !matches!(
                 self.runtime[dep_idx].state,
-                KsoState::Online | KsoState::Degraded | KsoState::Skipped | KsoState::Disabled
+                KsoState::Found
+                    | KsoState::Online
+                    | KsoState::Degraded
+                    | KsoState::Skipped
+                    | KsoState::Disabled
             ) {
                 return Some(self.nodes[dep_idx].name);
             }
@@ -132,7 +136,11 @@ impl<'a> KsoRunner<'a> {
                 let dep_idx = self.index_of(*dep)?;
                 if !matches!(
                     self.runtime[dep_idx].state,
-                    KsoState::Online | KsoState::Degraded | KsoState::Skipped | KsoState::Disabled
+                    KsoState::Found
+                        | KsoState::Online
+                        | KsoState::Degraded
+                        | KsoState::Skipped
+                        | KsoState::Disabled
                 ) {
                     return Some(self.nodes[dep_idx].name);
                 }

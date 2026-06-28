@@ -11,15 +11,15 @@ use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
-    boot_phase_failed, boot_phase_found, boot_phase_ok, boot_phase_online, boot_phase_pending,
-    boot_phase_running, boot_phase_skipped, boot_phase_start, boot_phase_stub,
-    boot_phase_validate_no_unresolved, BootPhase,
+    boot_phase_failed, boot_phase_ok, boot_phase_start, boot_phase_validate_no_unresolved,
+    BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::kso::{
-    maybe_retry_pid1_handoff_after_mtss_change, BootContinueResult, BootRuntimeDeps, KsoContext,
+    kso_transition, maybe_retry_pid1_handoff_after_mtss_change, BootContinueResult,
+    BootRuntimeDeps, KsoBootNode, KsoContext, KsoState,
 };
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::{cpu, debug_shell, Kernel, MAX_PROCESSES, MESSAGE_DEPTH};
@@ -132,16 +132,16 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         let mut boot_deps = BootRuntimeDeps::default();
 
         bootflow(5, "boot_runtime_validation", "enter");
-        boot_phase_start(BootPhase::BootRuntime);
+        kso_transition(KsoBootNode::BootRuntime, KsoState::Starting, "started");
         let boot_runtime =
             mirage::kernel::boot_runtime::find_boot_runtime_module(boot_info.modules).and_then(
                 |image| match mirage::kernel::boot_runtime::BootRuntimeRamFs::mount(image) {
                     Ok((_runtime, fs)) => {
-                        boot_phase_ok(BootPhase::BootRuntime);
+                        kso_transition(KsoBootNode::BootRuntime, KsoState::Online, "ok");
                         bootflow(5, "boot_runtime_validation", "ok");
                         bootflow(6, "runtime_vfs_mount", "ok");
-                        boot_phase_found(BootPhase::SpiderRs);
-                        boot_phase_found(BootPhase::SystemDispatcher);
+                        kso_transition(KsoBootNode::SpiderRs, KsoState::Found, "found");
+                        kso_transition(KsoBootNode::SystemDispatcher, KsoState::Found, "found");
                         mirage::kprintln!("BOOT RUNTIME [OK]");
                         mirage::kprintln!("SPIDER-RS IMAGE [FOUND]");
                         mirage::kprintln!("SPIDER-RSD IMAGE [FOUND]");
@@ -150,8 +150,9 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                         Some(fs)
                     }
                     Err(error) => {
-                        boot_phase_failed(
-                            BootPhase::BootRuntime,
+                        kso_transition(
+                            KsoBootNode::BootRuntime,
+                            KsoState::Failed,
                             "Boot Runtime image validation failed",
                         );
                         bootflow(5, "boot_runtime_validation", "failed: validation failed");
@@ -161,14 +162,27 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 },
             );
         if boot_runtime.is_none() {
-            boot_phase_failed(
-                BootPhase::BootRuntime,
+            kso_transition(
+                KsoBootNode::BootRuntime,
+                KsoState::Failed,
                 "Spider-rs-required Boot Runtime image missing",
             );
             bootflow(5, "boot_runtime_validation", "failed: image missing");
-            boot_phase_failed(BootPhase::SpiderRs, "missing from Boot Runtime image");
-            boot_phase_skipped(BootPhase::RootFs, "boot runtime invalid");
-            boot_phase_skipped(BootPhase::UserspaceLoader, "boot runtime invalid");
+            kso_transition(
+                KsoBootNode::SpiderRs,
+                KsoState::Failed,
+                "missing from Boot Runtime image",
+            );
+            kso_transition(
+                KsoBootNode::RootFs,
+                KsoState::Skipped,
+                "boot runtime invalid",
+            );
+            kso_transition(
+                KsoBootNode::UserspaceLoader,
+                KsoState::Skipped,
+                "boot runtime invalid",
+            );
             mirage::kprintln!(
                 "[BOOTDIAG] ERROR BOOT RUNTIME: BOOT RUNTIME IMAGE VALIDATION FAILED"
             );
@@ -182,10 +196,10 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             mirage::kprintln!("[bootdiag] rootfs mount starting");
             bootflow(7, "rootfs_mount", "enter");
             if boot_runtime.is_some() {
-                boot_phase_start(BootPhase::RootFs);
+                kso_transition(KsoBootNode::RootFs, KsoState::Starting, "started");
                 match kernel.mount_root_from_boot_sources(boot_info.modules) {
                     Ok(source) => {
-                        boot_phase_ok(BootPhase::RootFs);
+                        kso_transition(KsoBootNode::RootFs, KsoState::Online, "ok");
                         bootflow(7, "rootfs_mount", "ok");
                         boot_deps.root_fs_resolved = true;
                         boot_deps.root_fs_online = true;
@@ -194,7 +208,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                     }
                     Err(error) => {
                         boot_deps.root_fs_resolved = true;
-                        boot_phase_failed(BootPhase::RootFs, "no root source configured");
+                        kso_transition(
+                            KsoBootNode::RootFs,
+                            KsoState::Failed,
+                            "no root source configured",
+                        );
                         bootflow(7, "rootfs_mount", "failed: no root source configured");
                         mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
                         mirage::kprintln!("root mount attempt failed: {:?}", error);
@@ -202,7 +220,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             } else {
                 boot_deps.root_fs_resolved = true;
-                boot_phase_skipped(BootPhase::RootFs, "boot runtime invalid");
+                kso_transition(
+                    KsoBootNode::RootFs,
+                    KsoState::Skipped,
+                    "boot runtime invalid",
+                );
                 bootflow(7, "rootfs_mount", "failed: boot runtime invalid");
                 mirage::kprintln!("ROOT FS [SKIPPED: boot runtime invalid]");
             }
@@ -210,10 +232,10 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
             mirage::kprintln!("[bootdiag] supervisor bootstrap starting");
             bootflow(8, "supervisor_init", "enter");
-            boot_phase_start(BootPhase::Supervisor);
+            kso_transition(KsoBootNode::Supervisor, KsoState::Starting, "started");
             let service_report = supervisor.bootstrap_services(kernel);
             if service_report.all_running() {
-                boot_phase_ok(BootPhase::Supervisor);
+                kso_transition(KsoBootNode::Supervisor, KsoState::Online, "ok");
                 bootflow(8, "supervisor_init", "ok");
                 boot_deps.supervisor_online = true;
                 mirage::kprintln!("Supervisor [Ok]");
@@ -221,7 +243,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                     "supervisor initialization succeeded: full service manifest running"
                 );
             } else {
-                boot_phase_failed(BootPhase::Supervisor, "full service manifest incomplete");
+                kso_transition(
+                    KsoBootNode::Supervisor,
+                    KsoState::Failed,
+                    "full service manifest incomplete",
+                );
                 bootflow(
                     8,
                     "supervisor_init",
@@ -246,8 +272,16 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
 
-            boot_phase_stub(BootPhase::Userspace, "PENDING: MTSS scheduler not ready");
-            boot_phase_stub(BootPhase::SpiderRs, "PENDING: MTSS scheduler not ready");
+            kso_transition(
+                KsoBootNode::Userspace,
+                KsoState::WaitingDeps,
+                "MTSS scheduler not ready",
+            );
+            kso_transition(
+                KsoBootNode::SpiderRs,
+                KsoState::WaitingDeps,
+                "MTSS scheduler not ready",
+            );
             mirage::kprintln!("PID1 HANDOFF [PENDING: MTSS scheduler not ready]");
         }
 
@@ -257,10 +291,10 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             mirage::kprintln!("[bootdiag] rootfs mount starting");
             bootflow(7, "rootfs_mount", "enter");
             if boot_runtime.is_some() {
-                boot_phase_start(BootPhase::RootFs);
+                kso_transition(KsoBootNode::RootFs, KsoState::Starting, "started");
                 match kernel.mount_root_from_boot_sources(boot_info.modules) {
                     Ok(source) => {
-                        boot_phase_ok(BootPhase::RootFs);
+                        kso_transition(KsoBootNode::RootFs, KsoState::Online, "ok");
                         bootflow(7, "rootfs_mount", "ok");
                         boot_deps.root_fs_resolved = true;
                         boot_deps.root_fs_online = true;
@@ -269,7 +303,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                     }
                     Err(error) => {
                         boot_deps.root_fs_resolved = true;
-                        boot_phase_failed(BootPhase::RootFs, "no root source configured");
+                        kso_transition(
+                            KsoBootNode::RootFs,
+                            KsoState::Failed,
+                            "no root source configured",
+                        );
                         bootflow(7, "rootfs_mount", "failed: no root source configured");
                         mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
                         mirage::kprintln!("root mount attempt failed: {:?}", error);
@@ -277,20 +315,28 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             } else {
                 boot_deps.root_fs_resolved = true;
-                boot_phase_skipped(BootPhase::RootFs, "boot runtime invalid");
+                kso_transition(
+                    KsoBootNode::RootFs,
+                    KsoState::Skipped,
+                    "boot runtime invalid",
+                );
                 bootflow(7, "rootfs_mount", "failed: boot runtime invalid");
                 mirage::kprintln!("ROOT FS [SKIPPED: boot runtime invalid]");
             }
             #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
             mirage::kprintln!("[bootdiag] supervisor bootstrap starting");
             bootflow(8, "supervisor_init", "enter");
-            boot_phase_start(BootPhase::Supervisor);
+            kso_transition(KsoBootNode::Supervisor, KsoState::Starting, "started");
             mirage::kprintln!("minimal supervisor bootstrap starting");
             let minimal_report = supervisor.bootstrap_minimal(kernel);
             mirage::kprintln!("minimal supervisor bootstrap complete");
             match minimal_report.failure {
                 Some(error) => {
-                    boot_phase_failed(BootPhase::Supervisor, "minimal supervisor bootstrap failed");
+                    kso_transition(
+                        KsoBootNode::Supervisor,
+                        KsoState::Failed,
+                        "minimal supervisor bootstrap failed",
+                    );
                     bootflow(
                         8,
                         "supervisor_init",
@@ -299,7 +345,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                     mirage::kprintln!("supervisor initialization failed: {:?}", error);
                 }
                 None => {
-                    boot_phase_ok(BootPhase::Supervisor);
+                    kso_transition(KsoBootNode::Supervisor, KsoState::Online, "ok");
                     bootflow(8, "supervisor_init", "ok");
                     boot_deps.supervisor_online = true;
                     mirage::kprintln!("Supervisor [Ok]");
@@ -310,8 +356,16 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 }
             }
 
-            boot_phase_stub(BootPhase::Userspace, "PENDING: MTSS scheduler not ready");
-            boot_phase_stub(BootPhase::SpiderRs, "PENDING: MTSS scheduler not ready");
+            kso_transition(
+                KsoBootNode::Userspace,
+                KsoState::WaitingDeps,
+                "MTSS scheduler not ready",
+            );
+            kso_transition(
+                KsoBootNode::SpiderRs,
+                KsoState::WaitingDeps,
+                "MTSS scheduler not ready",
+            );
             mirage::kprintln!("PID1 HANDOFF [PENDING: MTSS scheduler not ready]");
 
             mirage::kprintln!("loading boot manifest");
@@ -378,7 +432,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
         mirage::kprintln!("[bootdiag] MTSS init starting");
         bootflow(9, "mtss_init", "enter");
-        boot_phase_start(BootPhase::Mtss);
+        kso_transition(KsoBootNode::Mtss, KsoState::Starting, "started");
         match kernel.kernel_mtss_init() {
             Ok(report) => {
                 #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
@@ -424,15 +478,23 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 boot_deps.mtss.mark_runnable_api_ready = report.api_ready;
 
                 if boot_deps.mtss.fully_online() {
-                    boot_phase_online(BootPhase::Mtss);
+                    kso_transition(KsoBootNode::Mtss, KsoState::Online, "online");
                     bootflow(9, "mtss_init", "ok");
                     mirage::kprintln!("MTSS [ ONLINE ]");
                 } else if !report.timer_ready || !report.preemption_ready {
-                    boot_phase_pending(BootPhase::Mtss, "timer/preemption backend pending");
+                    kso_transition(
+                        KsoBootNode::Mtss,
+                        KsoState::Degraded,
+                        "timer/preemption backend pending",
+                    );
                     bootflow(9, "mtss_init", "ok");
                     mirage::kprintln!("MTSS [DEGRADED: timer/preemption backend pending]");
                 } else {
-                    boot_phase_pending(BootPhase::Mtss, "required component pending");
+                    kso_transition(
+                        KsoBootNode::Mtss,
+                        KsoState::WaitingDeps,
+                        "required component pending",
+                    );
                     bootflow(9, "mtss_init", "failed: required component pending");
                     mirage::kprintln!("MTSS [PENDING: required component pending]");
                 }
@@ -441,7 +503,11 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
                 mirage::kprintln!("[bootdiag] MTSS init failed");
                 boot_deps.mtss.failed = true;
-                boot_phase_failed(BootPhase::Mtss, "MTSS initialization failed");
+                kso_transition(
+                    KsoBootNode::Mtss,
+                    KsoState::Failed,
+                    "MTSS initialization failed",
+                );
                 bootflow(9, "mtss_init", "failed: MTSS initialization failed");
                 mirage::kprintln!("MTSS [FAILED: {:?}]", error);
             }
@@ -480,15 +546,15 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 );
             }
             BootContinueResult::Fatal(reason) => {
-                boot_phase_failed(BootPhase::SystemDispatcher, reason);
+                kso_transition(KsoBootNode::SystemDispatcher, KsoState::Failed, reason);
                 mirage::kprintln!("post-MTSS continuation fatal: {}", reason);
             }
         }
         boot_phase_start(BootPhase::BootScreen);
         boot_phase_ok(BootPhase::BootScreen);
         bootflow(21, "scheduler_idleloop", "enter");
-        boot_phase_start(BootPhase::IdleLoop);
-        boot_phase_running(BootPhase::IdleLoop);
+        kso_transition(KsoBootNode::IdleLoop, KsoState::Starting, "started");
+        kso_transition(KsoBootNode::IdleLoop, KsoState::Online, "running");
         boot_deps.idleloop_started = true;
         bootflow(21, "scheduler_idleloop", "ok");
         mirage::kprintln!("IDLELOOP [RUNNING]");

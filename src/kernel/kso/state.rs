@@ -10,6 +10,7 @@ pub enum KsoState {
     New,
     WaitingDeps,
     Starting,
+    Found,
     Online,
     Degraded,
     Skipped,
@@ -65,14 +66,96 @@ pub enum KsoRunOutcome {
 use crate::arch::x86_64::boot::BootInfo;
 use crate::boot::pid1_retry::{decide_pid1_handoff, Pid1HandoffDecision, RetryReadiness};
 use crate::kernel::boot_phase::{
-    boot_phase_failed, boot_phase_ok, boot_phase_skipped, boot_phase_start, boot_phase_stub,
-    BootPhase,
+    boot_phase_degraded, boot_phase_disabled, boot_phase_failed, boot_phase_found, boot_phase_ok,
+    boot_phase_online, boot_phase_pending, boot_phase_running, boot_phase_skipped,
+    boot_phase_start, BootPhase,
 };
 use crate::kernel::boot_runtime::BootRuntimeRamFs;
 use crate::kernel::kso::generated::{KSO_NODES, PID1_HANDOFF};
+use crate::kernel::sync::SpinLock;
 use crate::kernel::Kernel;
 use crate::supervisor::pid1::{Pid1LaunchMode, SpiderPid1LaunchError};
 use crate::supervisor::Supervisor;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KsoBootNode {
+    BootRuntime,
+    RootFs,
+    Supervisor,
+    Mtss,
+    UserspaceLoader,
+    SpiderRs,
+    Pid1,
+    SystemDispatcher,
+    M1Terminal,
+    Userspace,
+    IdleLoop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KsoBootStatus {
+    pub node: KsoBootNode,
+    pub state: KsoState,
+    pub message: &'static str,
+}
+
+impl KsoBootNode {
+    pub const fn boot_phase(self) -> BootPhase {
+        match self {
+            Self::BootRuntime => BootPhase::BootRuntime,
+            Self::RootFs => BootPhase::RootFs,
+            Self::Supervisor => BootPhase::Supervisor,
+            Self::Mtss => BootPhase::Mtss,
+            Self::UserspaceLoader => BootPhase::UserspaceLoader,
+            Self::SpiderRs => BootPhase::SpiderRs,
+            Self::Pid1 => BootPhase::Pid1,
+            Self::SystemDispatcher => BootPhase::SystemDispatcher,
+            Self::M1Terminal => BootPhase::M1Terminal,
+            Self::Userspace => BootPhase::Userspace,
+            Self::IdleLoop => BootPhase::IdleLoop,
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+const KSO_BOOT_NODE_COUNT: usize = 11;
+const KSO_BOOT_STATUS_INIT: KsoBootStatus = KsoBootStatus {
+    node: KsoBootNode::BootRuntime,
+    state: KsoState::New,
+    message: "new",
+};
+
+static KSO_BOOT_STATUS: SpinLock<[KsoBootStatus; KSO_BOOT_NODE_COUNT]> =
+    SpinLock::new([KSO_BOOT_STATUS_INIT; KSO_BOOT_NODE_COUNT]);
+
+pub fn kso_transition(node: KsoBootNode, state: KsoState, message: &'static str) {
+    {
+        let mut statuses = KSO_BOOT_STATUS.lock();
+        statuses[node.index()] = KsoBootStatus {
+            node,
+            state,
+            message,
+        };
+    }
+    let phase = node.boot_phase();
+    match state {
+        KsoState::New | KsoState::WaitingDeps => boot_phase_pending(phase, message),
+        KsoState::Starting => boot_phase_start(phase),
+        KsoState::Found => boot_phase_found(phase),
+        KsoState::Online => match message {
+            "running" => boot_phase_running(phase),
+            "online" => boot_phase_online(phase),
+            _ => boot_phase_ok(phase),
+        },
+        KsoState::Degraded => boot_phase_degraded(phase, message),
+        KsoState::Skipped => boot_phase_skipped(phase, message),
+        KsoState::Disabled => boot_phase_disabled(phase, message),
+        KsoState::Failed => boot_phase_failed(phase, message),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MtssReadiness {
@@ -342,7 +425,7 @@ pub fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     bootflow(17, "pid1_handoff_eligibility", "ok");
 
     bootflow(18, "userspace_loader", "enter");
-    boot_phase_start(BootPhase::UserspaceLoader);
+    kso_transition(KsoBootNode::UserspaceLoader, KsoState::Starting, "started");
     deps.userspace_loader_started = true;
     ctx.userspace_loader.started = true;
     crate::kprintln!("USERSPACE LOADER [STARTED]");
@@ -372,10 +455,10 @@ pub fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         }
     };
     bootflow(19, "spider_rs_elf_load", "ok");
-    boot_phase_ok(BootPhase::UserspaceLoader);
+    kso_transition(KsoBootNode::UserspaceLoader, KsoState::Online, "ok");
     bootflow(18, "userspace_loader", "ok");
-    boot_phase_start(BootPhase::SpiderRs);
-    boot_phase_ok(BootPhase::SpiderRs);
+    kso_transition(KsoBootNode::SpiderRs, KsoState::Starting, "started");
+    kso_transition(KsoBootNode::SpiderRs, KsoState::Found, "found");
     deps.spider_found = true;
     crate::kprintln!("SPIDER-RS IMAGE [FOUND]");
 
@@ -411,19 +494,26 @@ pub fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
         return Ok(Pid1LaunchState::Deferred(blocker));
     }
     bootflow(20, "spider_rs_pid1_task_creation", "ok");
-    boot_phase_ok(BootPhase::SpiderRs);
-    boot_phase_stub(
-        BootPhase::Pid1,
-        "PENDING: ring3 transition not implemented after MTSS admission",
+    kso_transition(KsoBootNode::SpiderRs, KsoState::Online, "ok");
+    kso_transition(
+        KsoBootNode::Pid1,
+        KsoState::Degraded,
+        "runnable; ring3 transition not implemented",
     );
-    boot_phase_start(BootPhase::SystemDispatcher);
-    boot_phase_stub(
-        BootPhase::SystemDispatcher,
-        "PENDING: user-mode transition not implemented",
+    kso_transition(KsoBootNode::SystemDispatcher, KsoState::Starting, "started");
+    kso_transition(
+        KsoBootNode::SystemDispatcher,
+        KsoState::WaitingDeps,
+        "user-mode transition not implemented",
     );
-    boot_phase_stub(BootPhase::M1Terminal, "PENDING: dispatcher not online");
-    boot_phase_stub(
-        BootPhase::Userspace,
+    kso_transition(
+        KsoBootNode::M1Terminal,
+        KsoState::WaitingDeps,
+        "dispatcher not online",
+    );
+    kso_transition(
+        KsoBootNode::Userspace,
+        KsoState::WaitingDeps,
         "PID1 runnable; user-mode transition pending",
     );
     crate::kprintln!("SPIDER-RS ELF [OK]");
@@ -471,9 +561,9 @@ pub fn maybe_retry_pid1_handoff_after_mtss_change<const NPROC: usize, const MSG_
             ctx.userspace_loader.launch_deferred = true;
             crate::kprintln!("{}", handoff_decision.status_message());
             if reason != "root FS not online" {
-                boot_phase_skipped(BootPhase::UserspaceLoader, reason);
-                boot_phase_stub(BootPhase::Userspace, reason);
-                boot_phase_stub(BootPhase::SystemDispatcher, reason);
+                kso_transition(KsoBootNode::UserspaceLoader, KsoState::Skipped, reason);
+                kso_transition(KsoBootNode::Userspace, KsoState::WaitingDeps, reason);
+                kso_transition(KsoBootNode::SystemDispatcher, KsoState::WaitingDeps, reason);
                 crate::kprintln!("USERSPACE LOADER [SKIPPED: {}]", reason);
                 crate::kprintln!("SYSTEM DISPATCHER [PENDING: {}]", reason);
                 return BootContinueResult::DispatcherPending(reason);
@@ -483,11 +573,27 @@ pub fn maybe_retry_pid1_handoff_after_mtss_change<const NPROC: usize, const MSG_
     }
 
     if !deps.root_fs_online {
-        boot_phase_skipped(BootPhase::UserspaceLoader, "rootfs unavailable");
-        boot_phase_skipped(BootPhase::SpiderRs, "rootfs unavailable");
-        boot_phase_skipped(BootPhase::Pid1, "rootfs unavailable");
-        boot_phase_stub(BootPhase::SystemDispatcher, "PENDING: rootfs unavailable");
-        boot_phase_stub(BootPhase::Userspace, "SKIPPED: rootfs unavailable");
+        kso_transition(
+            KsoBootNode::UserspaceLoader,
+            KsoState::Skipped,
+            "rootfs unavailable",
+        );
+        kso_transition(
+            KsoBootNode::SpiderRs,
+            KsoState::Skipped,
+            "rootfs unavailable",
+        );
+        kso_transition(KsoBootNode::Pid1, KsoState::Skipped, "rootfs unavailable");
+        kso_transition(
+            KsoBootNode::SystemDispatcher,
+            KsoState::WaitingDeps,
+            "rootfs unavailable",
+        );
+        kso_transition(
+            KsoBootNode::Userspace,
+            KsoState::Skipped,
+            "rootfs unavailable",
+        );
         crate::kprintln!("USERSPACE LOADER [SKIPPED: rootfs unavailable]");
         crate::kprintln!("SPIDER-RS IMAGE [SKIPPED: rootfs unavailable]");
         crate::kprintln!("SYSTEM DISPATCHER [PENDING: rootfs unavailable]");
@@ -499,18 +605,23 @@ pub fn maybe_retry_pid1_handoff_after_mtss_change<const NPROC: usize, const MSG_
             BootContinueResult::DispatcherPending("user-mode transition not implemented")
         }
         Ok(Pid1LaunchState::Deferred(reason)) => {
-            boot_phase_skipped(BootPhase::UserspaceLoader, reason);
-            boot_phase_stub(BootPhase::Userspace, reason);
-            boot_phase_stub(BootPhase::SystemDispatcher, reason);
+            kso_transition(KsoBootNode::UserspaceLoader, KsoState::Skipped, reason);
+            kso_transition(KsoBootNode::Userspace, KsoState::WaitingDeps, reason);
+            kso_transition(KsoBootNode::SystemDispatcher, KsoState::WaitingDeps, reason);
             crate::kprintln!("USERSPACE LOADER [SKIPPED: {}]", reason);
             crate::kprintln!("SYSTEM DISPATCHER [PENDING: {}]", reason);
             BootContinueResult::DispatcherPending(reason)
         }
         Err(error) => {
-            boot_phase_failed(BootPhase::Userspace, "PID1 launch failed");
-            boot_phase_stub(
-                BootPhase::SystemDispatcher,
-                "PENDING: Spider-rs PID1 launch failed",
+            kso_transition(
+                KsoBootNode::Userspace,
+                KsoState::Failed,
+                "PID1 launch failed",
+            );
+            kso_transition(
+                KsoBootNode::SystemDispatcher,
+                KsoState::WaitingDeps,
+                "Spider-rs PID1 launch failed",
             );
             crate::kprintln!("Spider-rs PID 1 not launched: {:?}", error);
             crate::kprintln!("SYSTEM DISPATCHER [PENDING: Spider-rs PID1 launch failed]");
