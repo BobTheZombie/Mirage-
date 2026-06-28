@@ -859,7 +859,7 @@ impl FramebufferDriver {
     }
 
     fn configure(&self, framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
-        let mut descriptor = self.descriptor.try_lock().ok_or(DeviceError::Busy)?;
+        let mut descriptor = self.descriptor.lock();
         *descriptor = framebuffer
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
@@ -901,7 +901,7 @@ impl GpuCapabilityDriver {
         let framebuffer = framebuffer
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
-        let mut descriptor = self.descriptor.try_lock().ok_or(DeviceError::Busy)?;
+        let mut descriptor = self.descriptor.lock();
         *descriptor = MirageGpuCapabilityDescriptor::from_framebuffer(framebuffer);
         Ok(())
     }
@@ -1002,4 +1002,75 @@ pub fn system_timer() -> &'static SystemTimerDriver {
 
 pub const fn built_in_block_storage() -> &'static BlockStorageDriver {
     &BLOCK_STORAGE_DRIVER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::x86_64::boot::VirtualAddress;
+
+    fn boot_framebuffer() -> FramebufferInfo {
+        FramebufferInfo {
+            address: VirtualAddress(0xffff_8000_000b_8000),
+            width: 1024,
+            height: 768,
+            pitch: 4096,
+            bits_per_pixel: 32,
+            red_mask_size: 8,
+            red_mask_shift: 16,
+            green_mask_size: 8,
+            green_mask_shift: 8,
+            blue_mask_size: 8,
+            blue_mask_shift: 0,
+        }
+    }
+
+    fn read_framebuffer_descriptor() -> MirageFramebufferDescriptor {
+        let mut bytes = [0u8; core::mem::size_of::<MirageFramebufferDescriptor>()];
+        FRAMEBUFFER_DRIVER.read(&mut bytes).unwrap();
+        unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const MirageFramebufferDescriptor) }
+    }
+
+    fn read_gpu_capability_descriptor() -> MirageGpuCapabilityDescriptor {
+        let mut bytes = [0u8; core::mem::size_of::<MirageGpuCapabilityDescriptor>()];
+        GPU_CAPABILITY_DRIVER.read(&mut bytes).unwrap();
+        unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const MirageGpuCapabilityDescriptor) }
+    }
+
+    #[test]
+    fn configure_graphics_devices_accepts_normal_boot_framebuffer_and_can_clear_it() {
+        let framebuffer = boot_framebuffer();
+
+        configure_graphics_devices(Some(framebuffer)).unwrap();
+
+        let fb = read_framebuffer_descriptor();
+        assert_eq!(fb.address, framebuffer.address.0);
+        assert_eq!(fb.width, framebuffer.width);
+        assert_eq!(fb.height, framebuffer.height);
+        assert_eq!(fb.pitch, framebuffer.pitch);
+        assert_eq!(fb.bytes, framebuffer.pitch * framebuffer.height);
+        assert_eq!(fb.bits_per_pixel, framebuffer.bits_per_pixel);
+        assert_eq!(fb.flags, MirageFramebufferDescriptor::FLAG_PRESENT);
+
+        let gpu = read_gpu_capability_descriptor();
+        assert_eq!(
+            gpu.flags,
+            MirageGpuCapabilityDescriptor::FLAG_LINEAR_FRAMEBUFFER
+        );
+        assert_eq!(gpu.framebuffer_count, 1);
+        assert_eq!(gpu.preferred_width, framebuffer.width);
+        assert_eq!(gpu.preferred_height, framebuffer.height);
+        assert_eq!(gpu.preferred_bits_per_pixel, framebuffer.bits_per_pixel);
+
+        configure_graphics_devices(None).unwrap();
+
+        let fb = read_framebuffer_descriptor();
+        assert_eq!(fb.flags & MirageFramebufferDescriptor::FLAG_PRESENT, 0);
+        assert_eq!(fb.width, 0);
+        assert_eq!(fb.height, 0);
+
+        let gpu = read_gpu_capability_descriptor();
+        assert_eq!(gpu.flags, 0);
+        assert_eq!(gpu.framebuffer_count, 0);
+    }
 }
