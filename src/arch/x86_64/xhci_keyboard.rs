@@ -459,7 +459,7 @@ impl DriverModule for XhciHostModule {
         if USB_DRIVER_STACK.lock().xhci.is_none() {
             return Err(DriverError::NoController);
         }
-        let stack = USB_DRIVER_STACK.lock();
+        let mut stack = USB_DRIVER_STACK.lock();
         let Some(mut controller) = stack.xhci else {
             return Err(DriverError::NoController);
         };
@@ -570,7 +570,7 @@ impl DriverModule for UsbCoreModule {
             ));
         }
 
-        let stack = USB_DRIVER_STACK.lock();
+        let mut stack = USB_DRIVER_STACK.lock();
         let Some(mut controller) = stack.xhci else {
             stack
                 .registry
@@ -877,7 +877,7 @@ impl DriverModule for UsbKeyboardModule {
                 .set_status(USB_KBD_MODULE, DriverStatus::Skipped);
             return Err(DriverError::NoKeyboard);
         }
-        let stack = USB_DRIVER_STACK.lock();
+        let mut stack = USB_DRIVER_STACK.lock();
         let Some(mut controller) = stack.xhci else {
             stack
                 .registry
@@ -1054,6 +1054,7 @@ fn run_dependency_gated_module(module: &dyn DriverModule, slot: usize) -> Module
                 return ModuleInitStatus::Skipped(reason);
             }
             PhaseState::Skipped
+            | PhaseState::Disabled
             | PhaseState::Stub
             | PhaseState::Unregistered
             | PhaseState::Registered

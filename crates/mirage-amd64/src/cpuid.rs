@@ -372,6 +372,7 @@ fn backend_cpuid(leaf: u32, subleaf: u32) -> CpuidLeaf {
 
     // SAFETY: CPUID is a serializing CPU identification instruction.
     // Mirage only enables this backend on x86_64 hardware builds.
+    #[allow(unused_unsafe)]
     let result = unsafe { __cpuid_count(leaf, subleaf) };
     CpuidLeaf::new(result.eax, result.ebx, result.ecx, result.edx)
 }
