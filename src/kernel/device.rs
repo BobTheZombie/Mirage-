@@ -1,6 +1,6 @@
 use core::cmp::min;
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::x86_64::boot::{BootInfo, FramebufferInfo};
 use crate::kernel::sync::SpinLock;
@@ -987,26 +987,39 @@ impl BlockStorageDevice for BlockStorageDriver {
 
 pub struct FramebufferDriver {
     descriptor: SpinLock<MirageFramebufferDescriptor>,
+    configured: AtomicBool,
+    online: AtomicBool,
 }
 
 impl FramebufferDriver {
     pub const fn new() -> Self {
         Self {
             descriptor: SpinLock::new(MirageFramebufferDescriptor::empty()),
+            configured: AtomicBool::new(false),
+            online: AtomicBool::new(false),
         }
     }
 
     fn configure(&self, framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
-        let mut descriptor = self.descriptor.try_lock().ok_or(DeviceError::Busy)?;
-        *descriptor = framebuffer
+        let next = framebuffer
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
+        let mut descriptor = match self.descriptor.try_lock() {
+            Some(descriptor) => descriptor,
+            None if self.configured.load(Ordering::Acquire) => return Ok(()),
+            None => return Err(DeviceError::Busy),
+        };
+        *descriptor = next;
+        self.online.store(
+            next.flags & MirageFramebufferDescriptor::FLAG_PRESENT != 0,
+            Ordering::Release,
+        );
+        self.configured.store(true, Ordering::Release);
         Ok(())
     }
 
     fn is_online(&self) -> bool {
-        let descriptor = self.descriptor.lock();
-        descriptor.flags & MirageFramebufferDescriptor::FLAG_PRESENT != 0
+        self.online.load(Ordering::Acquire)
     }
 }
 
@@ -1031,12 +1044,14 @@ impl DeviceDriver for FramebufferDriver {
 
 pub struct GpuCapabilityDriver {
     descriptor: SpinLock<MirageGpuCapabilityDescriptor>,
+    configured: AtomicBool,
 }
 
 impl GpuCapabilityDriver {
     pub const fn new() -> Self {
         Self {
             descriptor: SpinLock::new(MirageGpuCapabilityDescriptor::empty()),
+            configured: AtomicBool::new(false),
         }
     }
 
@@ -1044,8 +1059,13 @@ impl GpuCapabilityDriver {
         let framebuffer = framebuffer
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
-        let mut descriptor = self.descriptor.try_lock().ok_or(DeviceError::Busy)?;
+        let mut descriptor = match self.descriptor.try_lock() {
+            Some(descriptor) => descriptor,
+            None if self.configured.load(Ordering::Acquire) => return Ok(()),
+            None => return Err(DeviceError::Busy),
+        };
         *descriptor = MirageGpuCapabilityDescriptor::from_framebuffer(framebuffer);
+        self.configured.store(true, Ordering::Release);
         Ok(())
     }
 }
@@ -1200,4 +1220,58 @@ pub fn system_timer() -> &'static SystemTimerDriver {
 
 pub const fn built_in_block_storage() -> &'static BlockStorageDriver {
     &BLOCK_STORAGE_DRIVER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::x86_64::boot::VirtualAddress;
+
+    fn test_framebuffer() -> FramebufferInfo {
+        FramebufferInfo {
+            address: VirtualAddress(0xffff_8000_fd00_0000),
+            width: 1024,
+            height: 768,
+            pitch: 4096,
+            bits_per_pixel: 32,
+            red_mask_size: 8,
+            red_mask_shift: 16,
+            green_mask_size: 8,
+            green_mask_shift: 8,
+            blue_mask_size: 8,
+            blue_mask_shift: 0,
+        }
+    }
+
+    #[test]
+    fn framebuffer_reconfigure_is_nonblocking_after_initial_success() {
+        let driver = FramebufferDriver::new();
+        assert_eq!(driver.configure(Some(test_framebuffer())), Ok(()));
+        assert!(driver.is_online());
+
+        let _held_descriptor = driver.descriptor.lock();
+        assert_eq!(driver.configure(Some(test_framebuffer())), Ok(()));
+        assert!(driver.is_online());
+    }
+
+    #[test]
+    fn framebuffer_first_configure_reports_busy_if_descriptor_is_held() {
+        let driver = FramebufferDriver::new();
+        let _held_descriptor = driver.descriptor.lock();
+
+        assert_eq!(
+            driver.configure(Some(test_framebuffer())),
+            Err(DeviceError::Busy)
+        );
+        assert!(!driver.is_online());
+    }
+
+    #[test]
+    fn gpu_capability_reconfigure_is_nonblocking_after_initial_success() {
+        let driver = GpuCapabilityDriver::new();
+        assert_eq!(driver.configure(Some(test_framebuffer())), Ok(()));
+
+        let _held_descriptor = driver.descriptor.lock();
+        assert_eq!(driver.configure(Some(test_framebuffer())), Ok(()));
+    }
 }
