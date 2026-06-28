@@ -374,6 +374,142 @@ fn bootflow(seq: u8, phase: &'static str, status: &'static str) {
     crate::kprintln!("[bootflow {}] phase={} {}", seq, phase, status);
 }
 
+/// Mount the root filesystem KSO node and preserve boot-contract diagnostics.
+pub fn rootfs_mount<const NPROC: usize, const MSG_DEPTH: usize>(
+    ctx: &mut KsoContext<'_, '_, NPROC, MSG_DEPTH>,
+) -> KsoStartResult {
+    #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+    crate::kprintln!("[bootdiag] rootfs mount starting");
+    bootflow(7, "rootfs_mount", "enter");
+    if ctx.boot_runtime.ramfs.is_some() {
+        kso_transition(KsoBootNode::RootFs, KsoState::Starting, "started");
+        match ctx
+            .kernel
+            .mount_root_from_boot_sources(ctx.boot_info.modules)
+        {
+            Ok(source) => {
+                kso_transition(KsoBootNode::RootFs, KsoState::Online, "ok");
+                bootflow(7, "rootfs_mount", "ok");
+                ctx.boot_runtime.deps.root_fs_resolved = true;
+                ctx.boot_runtime.deps.root_fs_online = true;
+                ctx.rootfs.resolved = true;
+                ctx.rootfs.online = true;
+                crate::kprintln!("ROOT FS [OK]");
+                crate::kprintln!("root mount attempt succeeded: {:?}", source);
+                KsoStartResult::Started
+            }
+            Err(error) => {
+                ctx.boot_runtime.deps.root_fs_resolved = true;
+                ctx.rootfs.resolved = true;
+                kso_transition(
+                    KsoBootNode::RootFs,
+                    KsoState::Failed,
+                    "no root source configured",
+                );
+                bootflow(7, "rootfs_mount", "failed: no root source configured");
+                crate::kprintln!("ROOT FS [FAILED: no root source configured]");
+                crate::kprintln!("root mount attempt failed: {:?}", error);
+                KsoStartResult::Failed
+            }
+        }
+    } else {
+        ctx.boot_runtime.deps.root_fs_resolved = true;
+        ctx.rootfs.resolved = true;
+        kso_transition(
+            KsoBootNode::RootFs,
+            KsoState::Skipped,
+            "boot runtime invalid",
+        );
+        bootflow(7, "rootfs_mount", "failed: boot runtime invalid");
+        crate::kprintln!("ROOT FS [SKIPPED: boot runtime invalid]");
+        KsoStartResult::Skipped
+    }
+}
+
+/// Start the supervisor KSO node using the boot-mode-specific supervisor policy.
+pub fn supervisor_start<const NPROC: usize, const MSG_DEPTH: usize>(
+    ctx: &mut KsoContext<'_, '_, NPROC, MSG_DEPTH>,
+) -> KsoStartResult {
+    #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
+    crate::kprintln!("[bootdiag] supervisor bootstrap starting");
+    bootflow(8, "supervisor_init", "enter");
+    kso_transition(KsoBootNode::Supervisor, KsoState::Starting, "started");
+
+    #[cfg(feature = "full-boot")]
+    {
+        let service_report = ctx.supervisor.bootstrap_services(ctx.kernel);
+        if service_report.all_running() {
+            kso_transition(KsoBootNode::Supervisor, KsoState::Online, "ok");
+            bootflow(8, "supervisor_init", "ok");
+            ctx.boot_runtime.deps.supervisor_online = true;
+            crate::kprintln!("Supervisor [Ok]");
+            crate::kprintln!("supervisor initialization succeeded: full service manifest running");
+            KsoStartResult::Started
+        } else {
+            kso_transition(
+                KsoBootNode::Supervisor,
+                KsoState::Failed,
+                "full service manifest incomplete",
+            );
+            bootflow(
+                8,
+                "supervisor_init",
+                "failed: full service manifest incomplete",
+            );
+            crate::kprintln!("supervisor initialization failed: full service manifest incomplete");
+            let mut index = 0usize;
+            while index < service_report.len() {
+                if let Some(record) = service_report.record(index) {
+                    if record.state != crate::supervisor::StartupState::Running {
+                        crate::kprintln!(
+                            "supervisor service '{}' did not reach Running: state={:?} failure={:?}",
+                            record.descriptor.name,
+                            record.state,
+                            record.failure
+                        );
+                    }
+                }
+                index += 1;
+            }
+            KsoStartResult::Failed
+        }
+    }
+
+    #[cfg(not(feature = "full-boot"))]
+    {
+        crate::kprintln!("minimal supervisor bootstrap starting");
+        let minimal_report = ctx.supervisor.bootstrap_minimal(ctx.kernel);
+        crate::kprintln!("minimal supervisor bootstrap complete");
+        match minimal_report.failure {
+            Some(error) => {
+                kso_transition(
+                    KsoBootNode::Supervisor,
+                    KsoState::Failed,
+                    "minimal supervisor bootstrap failed",
+                );
+                bootflow(
+                    8,
+                    "supervisor_init",
+                    "failed: minimal supervisor bootstrap failed",
+                );
+                crate::kprintln!("supervisor initialization failed: {:?}", error);
+                KsoStartResult::Failed
+            }
+            None => {
+                kso_transition(KsoBootNode::Supervisor, KsoState::Online, "ok");
+                bootflow(8, "supervisor_init", "ok");
+                ctx.boot_runtime.deps.supervisor_online = true;
+                crate::kprintln!("Supervisor [Ok]");
+                crate::kprintln!(
+                    "supervisor initialization succeeded: minimal registry entries={}",
+                    minimal_report.len()
+                );
+                KsoStartResult::Started
+            }
+        }
+    }
+}
+
 pub fn maybe_launch_pid1<const NPROC: usize, const MSG_DEPTH: usize>(
     ctx: &mut KsoContext<'_, '_, NPROC, MSG_DEPTH>,
 ) -> Result<Pid1LaunchState, SpiderPid1LaunchError> {

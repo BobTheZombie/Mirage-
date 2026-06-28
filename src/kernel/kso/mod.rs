@@ -14,9 +14,9 @@ pub use graph::{KsoNode, KsoNodeRuntime};
 pub use policy::{KsoCapability, KsoFailurePolicy, KsoNodeKind, KsoPolicy, KsoStartupFnId};
 pub use runner::{KsoRunner, KsoStartFn};
 pub use state::{
-    kso_transition, maybe_retry_pid1_handoff_after_mtss_change, BootContinueResult,
-    BootRuntimeDeps, KsoBootNode, KsoContext, KsoNodeId, KsoRunOutcome, KsoStartResult, KsoState,
-    KsoStatus, MtssReadiness,
+    kso_transition, maybe_retry_pid1_handoff_after_mtss_change, rootfs_mount, supervisor_start,
+    BootContinueResult, BootRuntimeDeps, KsoBootNode, KsoContext, KsoNodeId, KsoRunOutcome,
+    KsoStartResult, KsoState, KsoStatus, MtssReadiness,
 };
 
 #[cfg(test)]
