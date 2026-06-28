@@ -786,3 +786,21 @@ Required rootfs userland:
 8. Regenerated tables must be produced by documented commands, reviewed with source diffs, and accompanied by positive and negative validation evidence for schema and lookup behavior.
 9. Device database changes must preserve Mirage boundaries: matching and hints are mechanisms, while service launch, capability grants, recovery, and device ownership remain Supervisor policy.
 10. Boot/runtime status must distinguish database match, driver selected, probe attempted, hardware initialized, service started, and ONLINE; a database hit alone is never evidence that hardware works.
+
+---
+
+## Mirage Kernel Startup Orchestrator Contract
+
+1. KSO owns kernel startup order and dependency policy.
+2. KSO policies are authored in TOML but compiled into `no_std` kernel data before boot.
+3. The kernel must not parse TOML during early boot.
+4. Boot UI reads KSO/BootPhase state and must not drive boot.
+5. Kernel components must report real startup results to KSO.
+6. Required dependency failure is fatal unless policy explicitly allows degraded boot.
+7. Optional driver failure must not block required boot.
+8. KSO must distinguish requires, wants, after, before, provides, and conflicts.
+9. KSO must retry waiting nodes after capabilities become available.
+10. PID1 handoff must be dependency-policy driven, not hardcoded on MTSS ONLINE.
+11. MTSS is PID0 and provides scheduler capabilities.
+12. Supervisor provides launch authorization capabilities.
+13. No fake OK/ONLINE/RUNNING/RUNNABLE/BOOTED states.
