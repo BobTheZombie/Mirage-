@@ -48,9 +48,19 @@ pub fn init_early_serial() {
 ///
 /// Formatting is handled by `core::fmt` and does not allocate.
 pub fn early_print(args: fmt::Arguments<'_>) {
-    let _guard = EARLY_COM1_LOCK.lock();
-    init_early_serial();
-    let _ = EarlyCom1.write_fmt(args);
+    if let Some(_guard) = EARLY_COM1_LOCK.try_lock() {
+        init_early_serial();
+        let _ = EarlyCom1.write_fmt(args);
+    } else {
+        // Boot diagnostics can run after interrupts are enabled. If an
+        // interrupt/NMI path emits serial output while the current CPU already
+        // holds the early console lock, spinning here would halt boot progress
+        // in the middle of a status line. The UART writer is stateless, so use
+        // best-effort unlocked output rather than blocking the startup
+        // orchestrator or device-manager continuation edge.
+        init_early_serial();
+        let _ = EarlyCom1.write_fmt(args);
+    }
 }
 
 /// Write panic diagnostics to COM1 without risking a spin-lock deadlock.
