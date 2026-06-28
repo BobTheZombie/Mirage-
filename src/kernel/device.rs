@@ -1,5 +1,6 @@
 use core::cmp::min;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::fmt;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::x86_64::boot::{BootInfo, FramebufferInfo};
 use crate::kernel::sync::SpinLock;
@@ -354,6 +355,52 @@ pub enum DeviceError {
     Busy,
 }
 
+impl DeviceError {
+    /// Classify whether a core-device installation error must stop the
+    /// BootInfoApplied path. Capacity/ABI failures are fatal because they mean
+    /// the kernel cannot truthfully publish its required logical device table;
+    /// transient discovery/configuration failures may be degraded so PID1 can
+    /// proceed when the affected device is optional or already unavailable.
+    pub const fn is_fatal_during_boot_info_applied(self) -> bool {
+        matches!(self, Self::RegistryFull | Self::BufferTooSmall)
+    }
+}
+
+fn device_bootdiag(args: fmt::Arguments<'_>) {
+    crate::arch::x86_64::uart16550::early_print(format_args!("[bootdiag] "));
+    crate::arch::x86_64::uart16550::early_print(args);
+    crate::arch::x86_64::uart16550::early_print(format_args!("\n"));
+}
+
+fn device_bootdiag_start(operation: &str) {
+    device_bootdiag(format_args!("device-manager {} starting", operation));
+}
+
+fn device_bootdiag_ok(operation: &str) {
+    device_bootdiag(format_args!("device-manager {} completed", operation));
+}
+
+fn device_bootdiag_error(operation: &str, error: DeviceError) {
+    device_bootdiag(format_args!(
+        "device-manager {} failed with DeviceError::{:?}",
+        operation, error
+    ));
+}
+
+fn device_bootdiag_degraded(operation: &str, error: DeviceError) {
+    device_bootdiag(format_args!(
+        "device-manager {} degraded with DeviceError::{:?}; continuing without ONLINE status",
+        operation, error
+    ));
+}
+
+fn device_bootdiag_fatal(operation: &str, error: DeviceError) {
+    device_bootdiag(format_args!(
+        "device-manager {} fatal during BootInfoApplied with DeviceError::{:?}",
+        operation, error
+    ));
+}
+
 pub trait DeviceDriver {
     fn kind(&self) -> DeviceKind;
     fn name(&self) -> &'static str;
@@ -433,7 +480,22 @@ impl<const MAX: usize> DeviceManager<MAX> {
         &mut self,
         framebuffer: Option<FramebufferInfo>,
     ) -> Result<(), DeviceError> {
-        configure_graphics_devices(framebuffer)?;
+        match configure_graphics_devices(framebuffer) {
+            Ok(()) => {}
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal(
+                    "install_core_devices_with_framebuffer.configure_graphics_devices",
+                    error,
+                );
+                return Err(error);
+            }
+            Err(error) => {
+                device_bootdiag_degraded(
+                    "install_core_devices_with_framebuffer.configure_graphics_devices",
+                    error,
+                );
+            }
+        }
         self.install_core_devices_after_graphics(None)
     }
 
@@ -441,8 +503,39 @@ impl<const MAX: usize> DeviceManager<MAX> {
         &mut self,
         boot_info: Option<&BootInfo>,
     ) -> Result<(), DeviceError> {
-        configure_graphics_devices(boot_info.and_then(|info| info.framebuffer))?;
-        self.install_core_devices_after_graphics(boot_info)
+        device_bootdiag_start("install_core_devices_with_boot_info");
+        match configure_graphics_devices(boot_info.and_then(|info| info.framebuffer)) {
+            Ok(()) => {
+                device_bootdiag_ok("install_core_devices_with_boot_info.configure_graphics_devices")
+            }
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal(
+                    "install_core_devices_with_boot_info.configure_graphics_devices",
+                    error,
+                );
+                return Err(error);
+            }
+            Err(error) => {
+                device_bootdiag_degraded(
+                    "install_core_devices_with_boot_info.configure_graphics_devices",
+                    error,
+                );
+            }
+        }
+        match self.install_core_devices_after_graphics(boot_info) {
+            Ok(()) => {
+                device_bootdiag_ok("install_core_devices_with_boot_info");
+                Ok(())
+            }
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal("install_core_devices_with_boot_info", error);
+                Err(error)
+            }
+            Err(error) => {
+                device_bootdiag_degraded("install_core_devices_with_boot_info", error);
+                Ok(())
+            }
+        }
     }
 
     fn install_core_devices_after_graphics(
@@ -453,26 +546,71 @@ impl<const MAX: usize> DeviceManager<MAX> {
         // hardware state was already discovered by architecture bring-up. In
         // particular, AHCI/ATAPI registration below is lookup-only and must not
         // probe ports or wait on media/input state from the boot-info apply path.
-        crate::arch::x86_64::device::register_real_drivers(self, boot_info)?;
-        self.register_driver(&SYSTEM_TIMER_DRIVER)?;
-        self.register_driver(&FRAMEBUFFER_DRIVER)?;
-        self.register_driver(&GPU_CAPABILITY_DRIVER)?;
-        self.register_driver(&LOOPBACK_NETWORK_DRIVER)?;
-        self.register_driver(&BLOCK_STORAGE_DRIVER)?;
-        self.register_driver(&SERIAL_CONSOLE_DRIVER)?;
-        self.register_driver(&INPUT_CONTROLLER_DRIVER)?;
+        device_bootdiag_start("register_real_drivers");
+        match crate::arch::x86_64::device::register_real_drivers(self, boot_info) {
+            Ok(()) => device_bootdiag_ok("register_real_drivers"),
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal("register_real_drivers", error);
+                return Err(error);
+            }
+            Err(error) => device_bootdiag_degraded("register_real_drivers", error),
+        }
+        self.register_core_driver(&SYSTEM_TIMER_DRIVER)?;
+        self.register_core_driver(&FRAMEBUFFER_DRIVER)?;
+        self.register_core_driver(&GPU_CAPABILITY_DRIVER)?;
+        self.register_core_driver(&LOOPBACK_NETWORK_DRIVER)?;
+        self.register_core_driver(&BLOCK_STORAGE_DRIVER)?;
+        self.register_core_driver(&SERIAL_CONSOLE_DRIVER)?;
+        self.register_core_driver(&INPUT_CONTROLLER_DRIVER)?;
         Ok(())
+    }
+
+    fn register_core_driver(
+        &mut self,
+        driver: &'static dyn DeviceDriver,
+    ) -> Result<Option<DeviceDescriptor>, DeviceError> {
+        match self.register_driver(driver) {
+            Ok(descriptor) => Ok(Some(descriptor)),
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal("register_core_driver", error);
+                Err(error)
+            }
+            Err(error) => {
+                device_bootdiag_degraded("register_core_driver", error);
+                Ok(None)
+            }
+        }
     }
 
     pub fn register_driver(
         &mut self,
         driver: &'static dyn DeviceDriver,
     ) -> Result<DeviceDescriptor, DeviceError> {
-        let slot = self.find_free_slot().ok_or(DeviceError::RegistryFull)?;
+        device_bootdiag(format_args!(
+            "device-manager register_driver({}) starting",
+            driver.name()
+        ));
+        let slot = match self.find_free_slot() {
+            Some(slot) => slot,
+            None => {
+                device_bootdiag(format_args!(
+                    "device-manager register_driver({}) failed with DeviceError::{:?}",
+                    driver.name(),
+                    DeviceError::RegistryFull
+                ));
+                return Err(DeviceError::RegistryFull);
+            }
+        };
         let id = DeviceId::new(self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         self.devices[slot] = Some(DeviceEntry { id, driver });
-        Ok(self.devices[slot].unwrap().descriptor())
+        let descriptor = self.devices[slot].unwrap().descriptor();
+        device_bootdiag(format_args!(
+            "device-manager register_driver({}) completed with id {}",
+            descriptor.name,
+            descriptor.id.raw()
+        ));
+        Ok(descriptor)
     }
 
     pub fn descriptor(&self, id: DeviceId) -> Option<DeviceDescriptor> {
@@ -849,21 +987,41 @@ impl BlockStorageDevice for BlockStorageDriver {
 
 pub struct FramebufferDriver {
     descriptor: SpinLock<MirageFramebufferDescriptor>,
+    configured: AtomicBool,
+    online: AtomicBool,
 }
 
 impl FramebufferDriver {
     pub const fn new() -> Self {
         Self {
             descriptor: SpinLock::new(MirageFramebufferDescriptor::empty()),
+            configured: AtomicBool::new(false),
+            online: AtomicBool::new(false),
         }
     }
 
     fn configure(&self, framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
         let mut descriptor = self.descriptor.lock();
         *descriptor = framebuffer
+        let next = framebuffer
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
+        let mut descriptor = match self.descriptor.try_lock() {
+            Some(descriptor) => descriptor,
+            None if self.configured.load(Ordering::Acquire) => return Ok(()),
+            None => return Err(DeviceError::Busy),
+        };
+        *descriptor = next;
+        self.online.store(
+            next.flags & MirageFramebufferDescriptor::FLAG_PRESENT != 0,
+            Ordering::Release,
+        );
+        self.configured.store(true, Ordering::Release);
         Ok(())
+    }
+
+    fn is_online(&self) -> bool {
+        self.online.load(Ordering::Acquire)
     }
 }
 
@@ -888,12 +1046,14 @@ impl DeviceDriver for FramebufferDriver {
 
 pub struct GpuCapabilityDriver {
     descriptor: SpinLock<MirageGpuCapabilityDescriptor>,
+    configured: AtomicBool,
 }
 
 impl GpuCapabilityDriver {
     pub const fn new() -> Self {
         Self {
             descriptor: SpinLock::new(MirageGpuCapabilityDescriptor::empty()),
+            configured: AtomicBool::new(false),
         }
     }
 
@@ -902,7 +1062,13 @@ impl GpuCapabilityDriver {
             .map(MirageFramebufferDescriptor::from_boot_framebuffer)
             .unwrap_or(MirageFramebufferDescriptor::empty());
         let mut descriptor = self.descriptor.lock();
+        let mut descriptor = match self.descriptor.try_lock() {
+            Some(descriptor) => descriptor,
+            None if self.configured.load(Ordering::Acquire) => return Ok(()),
+            None => return Err(DeviceError::Busy),
+        };
         *descriptor = MirageGpuCapabilityDescriptor::from_framebuffer(framebuffer);
+        self.configured.store(true, Ordering::Release);
         Ok(())
     }
 }
@@ -982,9 +1148,64 @@ impl DeviceDriver for InputControllerDriver {
     }
 }
 
+const GRAPHICS_CONFIGURE_BUSY_RETRIES: usize = 8;
+
+fn configure_framebuffer_with_retry(
+    framebuffer: Option<FramebufferInfo>,
+) -> Result<(), DeviceError> {
+    let mut attempt = 0;
+    loop {
+        match FRAMEBUFFER_DRIVER.configure(framebuffer) {
+            Err(DeviceError::Busy) if attempt < GRAPHICS_CONFIGURE_BUSY_RETRIES => {
+                attempt += 1;
+                crate::arch::x86_64::cpu_relax();
+            }
+            result => return result,
+        }
+    }
+}
+
+fn configure_gpu_capability_with_retry(
+    framebuffer: Option<FramebufferInfo>,
+) -> Result<(), DeviceError> {
+    let mut attempt = 0;
+    loop {
+        match GPU_CAPABILITY_DRIVER.configure(framebuffer) {
+            Err(DeviceError::Busy) if attempt < GRAPHICS_CONFIGURE_BUSY_RETRIES => {
+                attempt += 1;
+                crate::arch::x86_64::cpu_relax();
+            }
+            result => return result,
+        }
+    }
+}
+
 pub fn configure_graphics_devices(framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
-    FRAMEBUFFER_DRIVER.configure(framebuffer)?;
-    GPU_CAPABILITY_DRIVER.configure(framebuffer)?;
+    device_bootdiag_start("configure_graphics_devices");
+    device_bootdiag_start("FRAMEBUFFER_DRIVER.configure");
+    match configure_framebuffer_with_retry(framebuffer) {
+        Ok(()) => device_bootdiag_ok("FRAMEBUFFER_DRIVER.configure"),
+        Err(DeviceError::Busy) if FRAMEBUFFER_DRIVER.is_online() => {
+            device_bootdiag_degraded("FRAMEBUFFER_DRIVER.configure", DeviceError::Busy);
+        }
+        Err(error) => {
+            device_bootdiag_error("FRAMEBUFFER_DRIVER.configure", error);
+            return Err(error);
+        }
+    }
+
+    device_bootdiag_start("GPU_CAPABILITY_DRIVER.configure");
+    match configure_gpu_capability_with_retry(framebuffer) {
+        Ok(()) => device_bootdiag_ok("GPU_CAPABILITY_DRIVER.configure"),
+        Err(DeviceError::Busy) if FRAMEBUFFER_DRIVER.is_online() => {
+            device_bootdiag_degraded("GPU_CAPABILITY_DRIVER.configure", DeviceError::Busy);
+        }
+        Err(error) => {
+            device_bootdiag_error("GPU_CAPABILITY_DRIVER.configure", error);
+            return Err(error);
+        }
+    }
+    device_bootdiag_ok("configure_graphics_devices");
     Ok(())
 }
 
@@ -1012,6 +1233,9 @@ mod tests {
     fn boot_framebuffer() -> FramebufferInfo {
         FramebufferInfo {
             address: VirtualAddress(0xffff_8000_000b_8000),
+    fn test_framebuffer() -> FramebufferInfo {
+        FramebufferInfo {
+            address: VirtualAddress(0xffff_8000_fd00_0000),
             width: 1024,
             height: 768,
             pitch: 4096,
@@ -1072,5 +1296,35 @@ mod tests {
         let gpu = read_gpu_capability_descriptor();
         assert_eq!(gpu.flags, 0);
         assert_eq!(gpu.framebuffer_count, 0);
+    #[test]
+    fn framebuffer_reconfigure_is_nonblocking_after_initial_success() {
+        let driver = FramebufferDriver::new();
+        assert_eq!(driver.configure(Some(test_framebuffer())), Ok(()));
+        assert!(driver.is_online());
+
+        let _held_descriptor = driver.descriptor.lock();
+        assert_eq!(driver.configure(Some(test_framebuffer())), Ok(()));
+        assert!(driver.is_online());
+    }
+
+    #[test]
+    fn framebuffer_first_configure_reports_busy_if_descriptor_is_held() {
+        let driver = FramebufferDriver::new();
+        let _held_descriptor = driver.descriptor.lock();
+
+        assert_eq!(
+            driver.configure(Some(test_framebuffer())),
+            Err(DeviceError::Busy)
+        );
+        assert!(!driver.is_online());
+    }
+
+    #[test]
+    fn gpu_capability_reconfigure_is_nonblocking_after_initial_success() {
+        let driver = GpuCapabilityDriver::new();
+        assert_eq!(driver.configure(Some(test_framebuffer())), Ok(()));
+
+        let _held_descriptor = driver.descriptor.lock();
+        assert_eq!(driver.configure(Some(test_framebuffer())), Ok(()));
     }
 }
