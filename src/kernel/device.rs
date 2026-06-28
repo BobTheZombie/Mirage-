@@ -1,4 +1,5 @@
 use core::cmp::min;
+use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::x86_64::boot::{BootInfo, FramebufferInfo};
@@ -354,6 +355,27 @@ pub enum DeviceError {
     Busy,
 }
 
+fn device_bootdiag(args: fmt::Arguments<'_>) {
+    crate::arch::x86_64::uart16550::early_print(format_args!("[bootdiag] "));
+    crate::arch::x86_64::uart16550::early_print(args);
+    crate::arch::x86_64::uart16550::early_print(format_args!("\n"));
+}
+
+fn device_bootdiag_start(operation: &str) {
+    device_bootdiag(format_args!("device-manager {} starting", operation));
+}
+
+fn device_bootdiag_ok(operation: &str) {
+    device_bootdiag(format_args!("device-manager {} completed", operation));
+}
+
+fn device_bootdiag_error(operation: &str, error: DeviceError) {
+    device_bootdiag(format_args!(
+        "device-manager {} failed with DeviceError::{:?}",
+        operation, error
+    ));
+}
+
 pub trait DeviceDriver {
     fn kind(&self) -> DeviceKind;
     fn name(&self) -> &'static str;
@@ -441,8 +463,29 @@ impl<const MAX: usize> DeviceManager<MAX> {
         &mut self,
         boot_info: Option<&BootInfo>,
     ) -> Result<(), DeviceError> {
-        configure_graphics_devices(boot_info.and_then(|info| info.framebuffer))?;
-        self.install_core_devices_after_graphics(boot_info)
+        device_bootdiag_start("install_core_devices_with_boot_info");
+        match configure_graphics_devices(boot_info.and_then(|info| info.framebuffer)) {
+            Ok(()) => {
+                device_bootdiag_ok("install_core_devices_with_boot_info.configure_graphics_devices")
+            }
+            Err(error) => {
+                device_bootdiag_error(
+                    "install_core_devices_with_boot_info.configure_graphics_devices",
+                    error,
+                );
+                return Err(error);
+            }
+        }
+        match self.install_core_devices_after_graphics(boot_info) {
+            Ok(()) => {
+                device_bootdiag_ok("install_core_devices_with_boot_info");
+                Ok(())
+            }
+            Err(error) => {
+                device_bootdiag_error("install_core_devices_with_boot_info", error);
+                Err(error)
+            }
+        }
     }
 
     fn install_core_devices_after_graphics(
@@ -453,7 +496,14 @@ impl<const MAX: usize> DeviceManager<MAX> {
         // hardware state was already discovered by architecture bring-up. In
         // particular, AHCI/ATAPI registration below is lookup-only and must not
         // probe ports or wait on media/input state from the boot-info apply path.
-        crate::arch::x86_64::device::register_real_drivers(self, boot_info)?;
+        device_bootdiag_start("register_real_drivers");
+        match crate::arch::x86_64::device::register_real_drivers(self, boot_info) {
+            Ok(()) => device_bootdiag_ok("register_real_drivers"),
+            Err(error) => {
+                device_bootdiag_error("register_real_drivers", error);
+                return Err(error);
+            }
+        }
         self.register_driver(&SYSTEM_TIMER_DRIVER)?;
         self.register_driver(&FRAMEBUFFER_DRIVER)?;
         self.register_driver(&GPU_CAPABILITY_DRIVER)?;
@@ -468,11 +518,31 @@ impl<const MAX: usize> DeviceManager<MAX> {
         &mut self,
         driver: &'static dyn DeviceDriver,
     ) -> Result<DeviceDescriptor, DeviceError> {
-        let slot = self.find_free_slot().ok_or(DeviceError::RegistryFull)?;
+        device_bootdiag(format_args!(
+            "device-manager register_driver({}) starting",
+            driver.name()
+        ));
+        let slot = match self.find_free_slot() {
+            Some(slot) => slot,
+            None => {
+                device_bootdiag(format_args!(
+                    "device-manager register_driver({}) failed with DeviceError::{:?}",
+                    driver.name(),
+                    DeviceError::RegistryFull
+                ));
+                return Err(DeviceError::RegistryFull);
+            }
+        };
         let id = DeviceId::new(self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         self.devices[slot] = Some(DeviceEntry { id, driver });
-        Ok(self.devices[slot].unwrap().descriptor())
+        let descriptor = self.devices[slot].unwrap().descriptor();
+        device_bootdiag(format_args!(
+            "device-manager register_driver({}) completed with id {}",
+            descriptor.name,
+            descriptor.id.raw()
+        ));
+        Ok(descriptor)
     }
 
     pub fn descriptor(&self, id: DeviceId) -> Option<DeviceDescriptor> {
@@ -983,8 +1053,25 @@ impl DeviceDriver for InputControllerDriver {
 }
 
 pub fn configure_graphics_devices(framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
-    FRAMEBUFFER_DRIVER.configure(framebuffer)?;
-    GPU_CAPABILITY_DRIVER.configure(framebuffer)?;
+    device_bootdiag_start("configure_graphics_devices");
+    device_bootdiag_start("FRAMEBUFFER_DRIVER.configure");
+    match FRAMEBUFFER_DRIVER.configure(framebuffer) {
+        Ok(()) => device_bootdiag_ok("FRAMEBUFFER_DRIVER.configure"),
+        Err(error) => {
+            device_bootdiag_error("FRAMEBUFFER_DRIVER.configure", error);
+            return Err(error);
+        }
+    }
+
+    device_bootdiag_start("GPU_CAPABILITY_DRIVER.configure");
+    match GPU_CAPABILITY_DRIVER.configure(framebuffer) {
+        Ok(()) => device_bootdiag_ok("GPU_CAPABILITY_DRIVER.configure"),
+        Err(error) => {
+            device_bootdiag_error("GPU_CAPABILITY_DRIVER.configure", error);
+            return Err(error);
+        }
+    }
+    device_bootdiag_ok("configure_graphics_devices");
     Ok(())
 }
 
