@@ -1093,14 +1093,30 @@ impl<const MAX_PROC: usize, const MSG_DEPTH: usize> Kernel<MAX_PROC, MSG_DEPTH> 
             self.core_states[0].online();
         }
 
-        if let Some(boot_info) = boot_info {
+        let device_install_result = if let Some(boot_info) = boot_info {
             self.devices
                 .install_core_devices_with_boot_info(Some(boot_info))
-                .map_err(KernelError::DeviceFault)?;
         } else {
             self.devices
                 .install_core_devices_with_framebuffer(framebuffer)
-                .map_err(KernelError::DeviceFault)?;
+        };
+        match device_install_result {
+            Ok(()) => crate::arch::x86_64::uart16550::early_print(format_args!(
+                "[bootdiag] kernel bootstrap core device install completed\n"
+            )),
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                crate::arch::x86_64::uart16550::early_print(format_args!(
+                    "[bootdiag] kernel bootstrap core device install FATAL DeviceError::{:?}; stopping BootInfoApplied\n",
+                    error
+                ));
+                return Err(KernelError::DeviceFault(error));
+            }
+            Err(error) => {
+                crate::arch::x86_64::uart16550::early_print(format_args!(
+                    "[bootdiag] kernel bootstrap core device install DEGRADED DeviceError::{:?}; PID1 handoff remains eligible if required dependencies are ready\n",
+                    error
+                ));
+            }
         }
         Ok(())
     }
@@ -5717,6 +5733,15 @@ mod tests {
         const WORST_CASE_EARLY_REAL_DRIVERS: usize = 7;
         const CORE_LOGICAL_DRIVERS: usize = 8;
         assert!(MAX_DEVICES >= WORST_CASE_EARLY_REAL_DRIVERS + CORE_LOGICAL_DRIVERS);
+    }
+
+    #[test]
+    fn boot_info_applied_device_error_fatality_is_explicit() {
+        assert!(DriverError::RegistryFull.is_fatal_during_boot_info_applied());
+        assert!(DriverError::BufferTooSmall.is_fatal_during_boot_info_applied());
+        assert!(!DriverError::Busy.is_fatal_during_boot_info_applied());
+        assert!(!DriverError::Unsupported.is_fatal_during_boot_info_applied());
+        assert!(!DriverError::NotFound.is_fatal_during_boot_info_applied());
     }
 
     fn boot_kernel() -> Kernel<16, 4> {

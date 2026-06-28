@@ -355,6 +355,17 @@ pub enum DeviceError {
     Busy,
 }
 
+impl DeviceError {
+    /// Classify whether a core-device installation error must stop the
+    /// BootInfoApplied path. Capacity/ABI failures are fatal because they mean
+    /// the kernel cannot truthfully publish its required logical device table;
+    /// transient discovery/configuration failures may be degraded so PID1 can
+    /// proceed when the affected device is optional or already unavailable.
+    pub const fn is_fatal_during_boot_info_applied(self) -> bool {
+        matches!(self, Self::RegistryFull | Self::BufferTooSmall)
+    }
+}
+
 fn device_bootdiag(args: fmt::Arguments<'_>) {
     crate::arch::x86_64::uart16550::early_print(format_args!("[bootdiag] "));
     crate::arch::x86_64::uart16550::early_print(args);
@@ -372,6 +383,20 @@ fn device_bootdiag_ok(operation: &str) {
 fn device_bootdiag_error(operation: &str, error: DeviceError) {
     device_bootdiag(format_args!(
         "device-manager {} failed with DeviceError::{:?}",
+        operation, error
+    ));
+}
+
+fn device_bootdiag_degraded(operation: &str, error: DeviceError) {
+    device_bootdiag(format_args!(
+        "device-manager {} degraded with DeviceError::{:?}; continuing without ONLINE status",
+        operation, error
+    ));
+}
+
+fn device_bootdiag_fatal(operation: &str, error: DeviceError) {
+    device_bootdiag(format_args!(
+        "device-manager {} fatal during BootInfoApplied with DeviceError::{:?}",
         operation, error
     ));
 }
@@ -455,7 +480,22 @@ impl<const MAX: usize> DeviceManager<MAX> {
         &mut self,
         framebuffer: Option<FramebufferInfo>,
     ) -> Result<(), DeviceError> {
-        configure_graphics_devices(framebuffer)?;
+        match configure_graphics_devices(framebuffer) {
+            Ok(()) => {}
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal(
+                    "install_core_devices_with_framebuffer.configure_graphics_devices",
+                    error,
+                );
+                return Err(error);
+            }
+            Err(error) => {
+                device_bootdiag_degraded(
+                    "install_core_devices_with_framebuffer.configure_graphics_devices",
+                    error,
+                );
+            }
+        }
         self.install_core_devices_after_graphics(None)
     }
 
@@ -468,12 +508,18 @@ impl<const MAX: usize> DeviceManager<MAX> {
             Ok(()) => {
                 device_bootdiag_ok("install_core_devices_with_boot_info.configure_graphics_devices")
             }
-            Err(error) => {
-                device_bootdiag_error(
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal(
                     "install_core_devices_with_boot_info.configure_graphics_devices",
                     error,
                 );
                 return Err(error);
+            }
+            Err(error) => {
+                device_bootdiag_degraded(
+                    "install_core_devices_with_boot_info.configure_graphics_devices",
+                    error,
+                );
             }
         }
         match self.install_core_devices_after_graphics(boot_info) {
@@ -481,9 +527,13 @@ impl<const MAX: usize> DeviceManager<MAX> {
                 device_bootdiag_ok("install_core_devices_with_boot_info");
                 Ok(())
             }
-            Err(error) => {
-                device_bootdiag_error("install_core_devices_with_boot_info", error);
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal("install_core_devices_with_boot_info", error);
                 Err(error)
+            }
+            Err(error) => {
+                device_bootdiag_degraded("install_core_devices_with_boot_info", error);
+                Ok(())
             }
         }
     }
@@ -499,19 +549,37 @@ impl<const MAX: usize> DeviceManager<MAX> {
         device_bootdiag_start("register_real_drivers");
         match crate::arch::x86_64::device::register_real_drivers(self, boot_info) {
             Ok(()) => device_bootdiag_ok("register_real_drivers"),
-            Err(error) => {
-                device_bootdiag_error("register_real_drivers", error);
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal("register_real_drivers", error);
                 return Err(error);
             }
+            Err(error) => device_bootdiag_degraded("register_real_drivers", error),
         }
-        self.register_driver(&SYSTEM_TIMER_DRIVER)?;
-        self.register_driver(&FRAMEBUFFER_DRIVER)?;
-        self.register_driver(&GPU_CAPABILITY_DRIVER)?;
-        self.register_driver(&LOOPBACK_NETWORK_DRIVER)?;
-        self.register_driver(&BLOCK_STORAGE_DRIVER)?;
-        self.register_driver(&SERIAL_CONSOLE_DRIVER)?;
-        self.register_driver(&INPUT_CONTROLLER_DRIVER)?;
+        self.register_core_driver(&SYSTEM_TIMER_DRIVER)?;
+        self.register_core_driver(&FRAMEBUFFER_DRIVER)?;
+        self.register_core_driver(&GPU_CAPABILITY_DRIVER)?;
+        self.register_core_driver(&LOOPBACK_NETWORK_DRIVER)?;
+        self.register_core_driver(&BLOCK_STORAGE_DRIVER)?;
+        self.register_core_driver(&SERIAL_CONSOLE_DRIVER)?;
+        self.register_core_driver(&INPUT_CONTROLLER_DRIVER)?;
         Ok(())
+    }
+
+    fn register_core_driver(
+        &mut self,
+        driver: &'static dyn DeviceDriver,
+    ) -> Result<Option<DeviceDescriptor>, DeviceError> {
+        match self.register_driver(driver) {
+            Ok(descriptor) => Ok(Some(descriptor)),
+            Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootdiag_fatal("register_core_driver", error);
+                Err(error)
+            }
+            Err(error) => {
+                device_bootdiag_degraded("register_core_driver", error);
+                Ok(None)
+            }
+        }
     }
 
     pub fn register_driver(
@@ -935,6 +1003,11 @@ impl FramebufferDriver {
             .unwrap_or(MirageFramebufferDescriptor::empty());
         Ok(())
     }
+
+    fn is_online(&self) -> bool {
+        let descriptor = self.descriptor.lock();
+        descriptor.flags & MirageFramebufferDescriptor::FLAG_PRESENT != 0
+    }
 }
 
 impl DeviceDriver for FramebufferDriver {
@@ -1052,11 +1125,46 @@ impl DeviceDriver for InputControllerDriver {
     }
 }
 
+const GRAPHICS_CONFIGURE_BUSY_RETRIES: usize = 8;
+
+fn configure_framebuffer_with_retry(
+    framebuffer: Option<FramebufferInfo>,
+) -> Result<(), DeviceError> {
+    let mut attempt = 0;
+    loop {
+        match FRAMEBUFFER_DRIVER.configure(framebuffer) {
+            Err(DeviceError::Busy) if attempt < GRAPHICS_CONFIGURE_BUSY_RETRIES => {
+                attempt += 1;
+                crate::arch::x86_64::cpu_relax();
+            }
+            result => return result,
+        }
+    }
+}
+
+fn configure_gpu_capability_with_retry(
+    framebuffer: Option<FramebufferInfo>,
+) -> Result<(), DeviceError> {
+    let mut attempt = 0;
+    loop {
+        match GPU_CAPABILITY_DRIVER.configure(framebuffer) {
+            Err(DeviceError::Busy) if attempt < GRAPHICS_CONFIGURE_BUSY_RETRIES => {
+                attempt += 1;
+                crate::arch::x86_64::cpu_relax();
+            }
+            result => return result,
+        }
+    }
+}
+
 pub fn configure_graphics_devices(framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
     device_bootdiag_start("configure_graphics_devices");
     device_bootdiag_start("FRAMEBUFFER_DRIVER.configure");
-    match FRAMEBUFFER_DRIVER.configure(framebuffer) {
+    match configure_framebuffer_with_retry(framebuffer) {
         Ok(()) => device_bootdiag_ok("FRAMEBUFFER_DRIVER.configure"),
+        Err(DeviceError::Busy) if FRAMEBUFFER_DRIVER.is_online() => {
+            device_bootdiag_degraded("FRAMEBUFFER_DRIVER.configure", DeviceError::Busy);
+        }
         Err(error) => {
             device_bootdiag_error("FRAMEBUFFER_DRIVER.configure", error);
             return Err(error);
@@ -1064,8 +1172,11 @@ pub fn configure_graphics_devices(framebuffer: Option<FramebufferInfo>) -> Resul
     }
 
     device_bootdiag_start("GPU_CAPABILITY_DRIVER.configure");
-    match GPU_CAPABILITY_DRIVER.configure(framebuffer) {
+    match configure_gpu_capability_with_retry(framebuffer) {
         Ok(()) => device_bootdiag_ok("GPU_CAPABILITY_DRIVER.configure"),
+        Err(DeviceError::Busy) if FRAMEBUFFER_DRIVER.is_online() => {
+            device_bootdiag_degraded("GPU_CAPABILITY_DRIVER.configure", DeviceError::Busy);
+        }
         Err(error) => {
             device_bootdiag_error("GPU_CAPABILITY_DRIVER.configure", error);
             return Err(error);
