@@ -159,6 +159,7 @@ pub enum PhaseState {
     Detected,
     Found,
     Ok,
+    Ready,
     Online,
     Enabled,
     Degraded,
@@ -179,6 +180,7 @@ impl PhaseState {
             Self::Detected => "Detected",
             Self::Found => "Found",
             Self::Ok => "Ok",
+            Self::Ready => "Ready",
             Self::Online => "Online",
             Self::Enabled => "Enabled",
             Self::Degraded => "Degraded",
@@ -193,7 +195,7 @@ impl PhaseState {
     const fn weighted_progress(self, required: bool, weight: u8) -> u16 {
         let weight = weight as u16;
         match self {
-            Self::Ok | Self::Online | Self::Enabled | Self::Running => weight,
+            Self::Ok | Self::Ready | Self::Online | Self::Enabled | Self::Running => weight,
             Self::Skipped | Self::Detected | Self::Found | Self::Stub | Self::Disabled => {
                 if required {
                     weight / 2
@@ -275,7 +277,9 @@ impl BootPhaseManager {
         if self.records[index].state == PhaseState::Unregistered {
             return false;
         }
-        self.current_phase = phase;
+        if is_current_phase_visible(phase, state) {
+            self.current_phase = phase;
+        }
         self.records[index].state = state;
         self.records[index].message = message;
         true
@@ -946,6 +950,11 @@ pub fn boot_phase_ok(phase: BootPhase) {
     transition(phase, PhaseState::Ok, "ok");
 }
 
+pub fn boot_phase_ready(phase: BootPhase) {
+    crate::kernel::boot_diagnostics::boot_trace_phase_ok(phase.name());
+    transition(phase, PhaseState::Ready, "ready");
+}
+
 pub fn boot_phase_online(phase: BootPhase) {
     if phase == BootPhase::Framebuffer {
         crate::kernel::boot_diagnostics::mark_framebuffer_online();
@@ -1066,7 +1075,10 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
         // serial-visible, but never synchronously repaint the framebuffer from
         // this transition; later durable phases repaint once progress has
         // advanced beyond kernel construction.
-        (BootPhase::Framebuffer, PhaseState::Ok | PhaseState::Online | PhaseState::Enabled) => true,
+        (
+            BootPhase::Framebuffer,
+            PhaseState::Ok | PhaseState::Ready | PhaseState::Online | PhaseState::Enabled,
+        ) => true,
         (
             BootPhase::BootInfoApplied
             | BootPhase::SupervisorCreated
@@ -1082,6 +1094,7 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | BootPhase::Userspace
             | BootPhase::IdleLoop,
             PhaseState::Ok
+            | PhaseState::Ready
             | PhaseState::Online
             | PhaseState::Enabled
             | PhaseState::Degraded
@@ -1105,6 +1118,7 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | PhaseState::Started
             | PhaseState::Detected
             | PhaseState::Ok
+            | PhaseState::Ready
             | PhaseState::Online
             | PhaseState::Enabled
             | PhaseState::Degraded
@@ -1115,6 +1129,10 @@ const fn is_framebuffer_repaint_milestone(phase: BootPhase, state: PhaseState) -
             | PhaseState::Disabled,
         ) => false,
     }
+}
+
+const fn is_current_phase_visible(phase: BootPhase, _state: PhaseState) -> bool {
+    !matches!(phase, BootPhase::KernelConstructed)
 }
 
 #[cfg(feature = "hw-framebuffer")]
@@ -1130,7 +1148,7 @@ fn framebuffer_milestone_render_enabled() -> bool {
 fn framebuffer_ready() -> bool {
     matches!(
         boot_phase_state(BootPhase::Framebuffer),
-        PhaseState::Ok | PhaseState::Online | PhaseState::Enabled
+        PhaseState::Ok | PhaseState::Ready | PhaseState::Online | PhaseState::Enabled
     )
 }
 
@@ -1243,6 +1261,7 @@ mod tests {
         assert_eq!(PhaseState::Started.as_str(), "Started");
         assert_eq!(PhaseState::Detected.as_str(), "Detected");
         assert_eq!(PhaseState::Ok.as_str(), "Ok");
+        assert_eq!(PhaseState::Ready.as_str(), "Ready");
         assert_eq!(PhaseState::Online.as_str(), "Online");
         assert_eq!(PhaseState::Enabled.as_str(), "Enabled");
         assert_eq!(PhaseState::Stub.as_str(), "Stub");
@@ -1328,19 +1347,19 @@ mod tests {
         ));
         assert!(!is_framebuffer_repaint_milestone(
             BootPhase::KernelConstructed,
-            PhaseState::Ok
+            PhaseState::Ready
         ));
     }
 
     #[test]
-    fn current_phase_updates_from_framebuffer_to_kernel_constructed() {
+    fn current_phase_ignores_kernel_constructed_continuation_edge() {
         let mut manager = BootPhaseManager::new();
         manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[BootPhase::Framebuffer as usize]);
         manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[BootPhase::KernelConstructed as usize]);
         manager.transition(BootPhase::Framebuffer, PhaseState::Ok, "ok");
         assert_eq!(manager.current_phase, BootPhase::Framebuffer);
         manager.transition(BootPhase::KernelConstructed, PhaseState::Started, "start");
-        assert_eq!(manager.current_phase, BootPhase::KernelConstructed);
+        assert_eq!(manager.current_phase, BootPhase::Framebuffer);
     }
 
     #[test]
@@ -1349,7 +1368,7 @@ mod tests {
         manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[48]);
         manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[51]);
         manager.mark_registered_pending();
-        manager.transition(BootPhase::KernelConstructed, PhaseState::Ok, "ok");
+        manager.transition(BootPhase::KernelConstructed, PhaseState::Ready, "ready");
         assert!(manager.progress_percent() < 100);
     }
 

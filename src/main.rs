@@ -11,8 +11,8 @@ use mirage::arch::x86_64;
 use mirage::arch::x86_64::boot::BootInfo;
 #[cfg(not(feature = "emergency-boot"))]
 use mirage::kernel::boot_phase::{
-    boot_phase_failed, boot_phase_ok, boot_phase_start, boot_phase_validate_no_unresolved,
-    BootPhase,
+    boot_phase_failed, boot_phase_ok, boot_phase_ready, boot_phase_start,
+    boot_phase_validate_no_unresolved, BootPhase,
 };
 #[cfg(all(not(feature = "emergency-boot"), not(feature = "full-boot")))]
 use mirage::kernel::ipc::MessagePayload;
@@ -44,20 +44,18 @@ static mut BOOT_KERNEL_STORAGE: MaybeUninit<Kernel<MAX_PROCESSES, MESSAGE_DEPTH>
 #[cfg(not(feature = "emergency-boot"))]
 fn boot_kernel_constructed_phase() -> &'static mut Kernel<MAX_PROCESSES, MESSAGE_DEPTH> {
     bootflow(2, "kernel_constructed", "enter");
-    mirage::kprintln!("[bootflow 2.1] kernel_constructed: set milestone phase enter");
+    mirage::kprintln!("[bootflow 2.1] kernel_constructed: kernel object allocation enter");
     boot_phase_start(BootPhase::KernelConstructed);
     let kernel = unsafe {
         let storage = core::ptr::addr_of_mut!(BOOT_KERNEL_STORAGE);
         (*storage).write(Kernel::<MAX_PROCESSES, MESSAGE_DEPTH>::new())
     };
-    boot_phase_ok(BootPhase::KernelConstructed);
-    mirage::kprintln!("[bootflow 2.1] kernel_constructed: set milestone phase ok");
+    boot_phase_ready(BootPhase::KernelConstructed);
+    mirage::kprintln!("[bootflow 2.1] kernel_constructed: kernel object reference ready");
     mirage::kprintln!("[bootflow 2.2] kernel_constructed: render UI skipped (continuation edge)");
-    mirage::kprintln!("[bootflow 2.3] kernel_constructed: debug poll enter");
-    if x86_64::poll_debug_shell_hotkey() {
-        debug_shell::enter_early_debug_shell(kernel);
-    }
-    mirage::kprintln!("[bootflow 2.3] kernel_constructed: debug poll ok");
+    mirage::kprintln!(
+        "[bootflow 2.3] kernel_constructed: debug shell not entered from continuation edge"
+    );
     mirage::kprintln!("[bootflow 2.4] kernel_constructed: return/advance ok");
     bootflow(2, "kernel_constructed", "ok");
     kernel

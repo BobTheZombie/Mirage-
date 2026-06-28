@@ -252,6 +252,7 @@ fn failed_dependency(dependencies: &'static [BootPhase]) -> Option<&'static str>
     while index < dependencies.len() {
         match crate::kernel::boot_phase::boot_phase_state(dependencies[index]) {
             PhaseState::Ok
+            | PhaseState::Ready
             | PhaseState::Online
             | PhaseState::Enabled
             | PhaseState::Detected
