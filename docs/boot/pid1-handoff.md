@@ -1,4 +1,4 @@
-# PID1 Handoff Through MTSS
+# PID1 Handoff Through KSO and MTSS
 
 Mirage launches PID1 as a real userspace task handoff, not as a kernel function call. The canonical PID1 image is `/spider-rt/sbin/spider-rs`, and the dispatcher daemon `/spider-rt/sbin/spider-rsd` is a required runtime follow-on service.
 
@@ -7,9 +7,10 @@ Mirage launches PID1 as a real userspace task handoff, not as a kernel function 
 ```text
 bootloader
     -> Mirage kernel mechanisms
+    -> KSO startup policy graph
     -> RuntimeVfs / rootfs availability
-    -> Mirage Supervisor online
-    -> MTSS readiness gate
+    -> Mirage Supervisor launch authorization available
+    -> MTSS PID0 readiness gate
     -> userspace loader starts
     -> read /spider-rt/sbin/spider-rs
     -> validate ELF64 x86_64 executable and PT_LOAD mappings
@@ -20,13 +21,15 @@ bootloader
     -> spider-rs starts spider-rsd
 ```
 
-`maybe_launch_pid1` is the boot coordinator gate. It must refuse launch until root filesystem access, Supervisor approval, Spider Runtime availability, loader start, PID1 image validation, and an eligible MTSS readiness state are all true. A launch deferred before MTSS eligibility must be retried immediately after any MTSS state change: core initialization, scheduler readiness, degraded/cooperative readiness, timer readiness, preemption readiness, or full online readiness.
+KSO owns the dependency policy that decides when the PID1 handoff gate can be evaluated. `maybe_launch_pid1` remains the concrete boot coordinator gate, but it must be driven by KSO/BootPhase facts rather than a hardcoded single readiness flag. It must refuse launch until root filesystem access, Supervisor approval, Spider Runtime availability, loader start, PID1 image validation, and an eligible MTSS readiness state are all true.
 
-## MTSS eligibility policy
+A launch deferred before MTSS eligibility must be retried immediately after any MTSS state change: core initialization, scheduler readiness, degraded/cooperative readiness, timer readiness, preemption readiness, or full online readiness. KSO retry also runs when RuntimeVfs, Supervisor authorization, or loader readiness changes.
 
-PID1 handoff does not always have to wait for full `MTSS ONLINE`. `MTSS ONLINE` means full preemptive scheduling only: MTSS core, scheduler, timer, preemption, and architecture context restore are all proven. Stale wording that says PID1 must wait for `MTSS online` should be read as "PID1 must wait for an eligible MTSS readiness state."
+## MTSS PID0 eligibility policy
 
-A degraded/cooperative MTSS may create PID1 task/thread records and mark PID1 runnable when core readiness, scheduler readiness, idle fallback, and admission APIs are valid. This is allowed only when the boot policy switch `require_preemption_for_userspace` is `false`, which is the default for the current architecture skeleton. If `require_preemption_for_userspace` is `true`, cooperative readiness is insufficient and PID1 handoff waits for preemption readiness.
+MTSS is PID0, the kernel execution root for scheduling mechanics. PID1 handoff does not always have to wait for full `MTSS ONLINE`. `MTSS ONLINE` means full preemptive scheduling only: MTSS core, scheduler, timer, preemption, and architecture context restore are all proven. Stale wording that says PID1 must wait for `MTSS online` should be read as "PID1 must wait for an eligible MTSS readiness state."
+
+A degraded/cooperative MTSS may create PID1 task/thread records and mark PID1 runnable when core readiness, scheduler readiness, idle fallback, and admission APIs are valid. This is allowed only when the KSO policy switch `require_preemption_for_userspace` is `false`, which is the default for the current architecture skeleton. If `require_preemption_for_userspace` is `true`, cooperative readiness is insufficient and PID1 handoff waits for preemption readiness.
 
 Exact handoff statuses are:
 
@@ -45,7 +48,7 @@ Exact handoff statuses are:
 
 ## Supervisor boundary
 
-The Supervisor authorizes Spider-rs as PID1 and records policy approval. It does not directly mutate MTSS run queues. Kernel/MTSS admission performs process/thread creation and runnable insertion. The architecture backend performs the final ring-3 transition.
+The Supervisor authorizes Spider-rs as PID1 and records policy approval. It does not directly mutate MTSS run queues. KSO waits for the authorization capability, kernel/MTSS admission performs process/thread creation and runnable insertion, and the architecture backend performs the final ring-3 transition.
 
 ## Current status
 
@@ -53,12 +56,8 @@ The current documented milestone supports honest PID1 discovery, ELF validation,
 
 ## Failure handling
 
-Failures must be exact and typed: RuntimeVfs unavailable, missing Spider-rs, unsupported ELF, invalid PT_LOAD mapping, stack preflight failure, Supervisor denial, MTSS spawn/admission failure, dispatcher unavailable, or missing user-mode transition. A missing `/spider-rt/sbin/spider-rs` or `/spider-rt/sbin/spider-rsd` is a build failure.
-
-## Zinnia audit follow-up
-
-The Zinnia reference audit highlighted that PID1 launch should be treated as a strict sequence of validated artifacts rather than a best-effort jump. Mirage now documents and checks an additional ELF preflight invariant: `PT_LOAD` page mappings for Spider-rs must not overlap. The initial userspace stack metadata also names the real mounted PID1 path, `/spider-rt/sbin/spider-rs`, so diagnostics and future argv construction match the boot contract.
+Failures must be exact and typed: RuntimeVfs unavailable, missing Spider-rs, missing Spider-rsd, unsupported ELF, invalid PT_LOAD mapping, stack preflight failure, Supervisor denial, KSO dependency blocked, MTSS spawn/admission failure, dispatcher unavailable, or missing user-mode transition. A missing `/spider-rt/sbin/spider-rs` or `/spider-rt/sbin/spider-rsd` is a build failure.
 
 ## Full boot audit update
 
-PID1 handoff also requires the post-`KernelConstructed` continuation edge to reach boot-info application, supervisor creation, boot-runtime validation, rootfs mount, MTSS readiness evaluation, userspace loader start, spider-rs ELF preflight, supervisor launch authorization, and MTSS runnable admission. PID1 may be marked runnable only after MTSS accepts the real task/thread into a runnable queue. PID1 may be marked running only after actual user execution begins.
+PID1 handoff also requires the post-`KernelConstructed` continuation edge to reach KSO graph evaluation, boot-info application, supervisor creation, boot-runtime validation, rootfs mount, MTSS readiness evaluation, userspace loader start, spider-rs ELF preflight, supervisor launch authorization, and MTSS runnable admission. PID1 may be marked runnable only after MTSS accepts the real task/thread into a runnable queue. PID1 may be marked running only after actual user execution begins.
