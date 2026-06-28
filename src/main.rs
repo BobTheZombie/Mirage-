@@ -190,184 +190,39 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
             mirage::kprintln!("[spider-rt] RuntimeVfs Failed: Spider-rs-required image missing");
         }
 
-        #[cfg(feature = "full-boot")]
-        {
-            #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
-            mirage::kprintln!("[bootdiag] rootfs mount starting");
-            bootflow(7, "rootfs_mount", "enter");
-            if boot_runtime.is_some() {
-                kso_transition(KsoBootNode::RootFs, KsoState::Starting, "started");
-                match kernel.mount_root_from_boot_sources(boot_info.modules) {
-                    Ok(source) => {
-                        kso_transition(KsoBootNode::RootFs, KsoState::Online, "ok");
-                        bootflow(7, "rootfs_mount", "ok");
-                        boot_deps.root_fs_resolved = true;
-                        boot_deps.root_fs_online = true;
-                        mirage::kprintln!("ROOT FS [OK]");
-                        mirage::kprintln!("root mount attempt succeeded: {:?}", source);
-                    }
-                    Err(error) => {
-                        boot_deps.root_fs_resolved = true;
-                        kso_transition(
-                            KsoBootNode::RootFs,
-                            KsoState::Failed,
-                            "no root source configured",
-                        );
-                        bootflow(7, "rootfs_mount", "failed: no root source configured");
-                        mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
-                        mirage::kprintln!("root mount attempt failed: {:?}", error);
-                    }
-                }
-            } else {
-                boot_deps.root_fs_resolved = true;
-                kso_transition(
-                    KsoBootNode::RootFs,
-                    KsoState::Skipped,
-                    "boot runtime invalid",
-                );
-                bootflow(7, "rootfs_mount", "failed: boot runtime invalid");
-                mirage::kprintln!("ROOT FS [SKIPPED: boot runtime invalid]");
-            }
-            // Start L2 first, then L1-supervised device-facing daemons.
-            #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
-            mirage::kprintln!("[bootdiag] supervisor bootstrap starting");
-            bootflow(8, "supervisor_init", "enter");
-            kso_transition(KsoBootNode::Supervisor, KsoState::Starting, "started");
-            let service_report = supervisor.bootstrap_services(kernel);
-            if service_report.all_running() {
-                kso_transition(KsoBootNode::Supervisor, KsoState::Online, "ok");
-                bootflow(8, "supervisor_init", "ok");
-                boot_deps.supervisor_online = true;
-                mirage::kprintln!("Supervisor [Ok]");
-                mirage::kprintln!(
-                    "supervisor initialization succeeded: full service manifest running"
-                );
-            } else {
-                kso_transition(
-                    KsoBootNode::Supervisor,
-                    KsoState::Failed,
-                    "full service manifest incomplete",
-                );
-                bootflow(
-                    8,
-                    "supervisor_init",
-                    "failed: full service manifest incomplete",
-                );
-                mirage::kprintln!(
-                    "supervisor initialization failed: full service manifest incomplete"
-                );
-                let mut index = 0usize;
-                while index < service_report.len() {
-                    if let Some(record) = service_report.record(index) {
-                        if record.state != mirage::supervisor::StartupState::Running {
-                            mirage::kprintln!(
-                            "supervisor service '{}' did not reach Running: state={:?} failure={:?}",
-                            record.descriptor.name,
-                            record.state,
-                            record.failure
-                        );
-                        }
-                    }
-                    index += 1;
-                }
-            }
+        static SPIDER_BOOTRT_IMAGE: mirage::kernel::sync::SpinLock<[u8; 1024 * 1024]> =
+            mirage::kernel::sync::SpinLock::new([0; 1024 * 1024]);
+        let mut spider_image = SPIDER_BOOTRT_IMAGE.lock();
 
-            kso_transition(
-                KsoBootNode::Userspace,
-                KsoState::WaitingDeps,
-                "MTSS scheduler not ready",
+        {
+            let mut kso_context = KsoContext::new(
+                &boot_info,
+                kernel,
+                &supervisor,
+                boot_runtime.as_ref(),
+                &mut spider_image[..],
             );
-            kso_transition(
-                KsoBootNode::SpiderRs,
-                KsoState::WaitingDeps,
-                "MTSS scheduler not ready",
-            );
-            mirage::kprintln!("PID1 HANDOFF [PENDING: MTSS scheduler not ready]");
+            kso_context.boot_runtime.deps = boot_deps;
+            kso_context.sync_from_deps();
+            let _ = mirage::kernel::kso::rootfs_mount(&mut kso_context);
+            let _ = mirage::kernel::kso::supervisor_start(&mut kso_context);
+            boot_deps = kso_context.boot_runtime.deps;
         }
+
+        kso_transition(
+            KsoBootNode::Userspace,
+            KsoState::WaitingDeps,
+            "MTSS scheduler not ready",
+        );
+        kso_transition(
+            KsoBootNode::SpiderRs,
+            KsoState::WaitingDeps,
+            "MTSS scheduler not ready",
+        );
+        mirage::kprintln!("PID1 HANDOFF [PENDING: MTSS scheduler not ready]");
 
         #[cfg(not(feature = "full-boot"))]
         {
-            #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
-            mirage::kprintln!("[bootdiag] rootfs mount starting");
-            bootflow(7, "rootfs_mount", "enter");
-            if boot_runtime.is_some() {
-                kso_transition(KsoBootNode::RootFs, KsoState::Starting, "started");
-                match kernel.mount_root_from_boot_sources(boot_info.modules) {
-                    Ok(source) => {
-                        kso_transition(KsoBootNode::RootFs, KsoState::Online, "ok");
-                        bootflow(7, "rootfs_mount", "ok");
-                        boot_deps.root_fs_resolved = true;
-                        boot_deps.root_fs_online = true;
-                        mirage::kprintln!("ROOT FS [OK]");
-                        mirage::kprintln!("root mount attempt succeeded: {:?}", source);
-                    }
-                    Err(error) => {
-                        boot_deps.root_fs_resolved = true;
-                        kso_transition(
-                            KsoBootNode::RootFs,
-                            KsoState::Failed,
-                            "no root source configured",
-                        );
-                        bootflow(7, "rootfs_mount", "failed: no root source configured");
-                        mirage::kprintln!("ROOT FS [FAILED: no root source configured]");
-                        mirage::kprintln!("root mount attempt failed: {:?}", error);
-                    }
-                }
-            } else {
-                boot_deps.root_fs_resolved = true;
-                kso_transition(
-                    KsoBootNode::RootFs,
-                    KsoState::Skipped,
-                    "boot runtime invalid",
-                );
-                bootflow(7, "rootfs_mount", "failed: boot runtime invalid");
-                mirage::kprintln!("ROOT FS [SKIPPED: boot runtime invalid]");
-            }
-            #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
-            mirage::kprintln!("[bootdiag] supervisor bootstrap starting");
-            bootflow(8, "supervisor_init", "enter");
-            kso_transition(KsoBootNode::Supervisor, KsoState::Starting, "started");
-            mirage::kprintln!("minimal supervisor bootstrap starting");
-            let minimal_report = supervisor.bootstrap_minimal(kernel);
-            mirage::kprintln!("minimal supervisor bootstrap complete");
-            match minimal_report.failure {
-                Some(error) => {
-                    kso_transition(
-                        KsoBootNode::Supervisor,
-                        KsoState::Failed,
-                        "minimal supervisor bootstrap failed",
-                    );
-                    bootflow(
-                        8,
-                        "supervisor_init",
-                        "failed: minimal supervisor bootstrap failed",
-                    );
-                    mirage::kprintln!("supervisor initialization failed: {:?}", error);
-                }
-                None => {
-                    kso_transition(KsoBootNode::Supervisor, KsoState::Online, "ok");
-                    bootflow(8, "supervisor_init", "ok");
-                    boot_deps.supervisor_online = true;
-                    mirage::kprintln!("Supervisor [Ok]");
-                    mirage::kprintln!(
-                        "supervisor initialization succeeded: minimal registry entries={}",
-                        minimal_report.len()
-                    );
-                }
-            }
-
-            kso_transition(
-                KsoBootNode::Userspace,
-                KsoState::WaitingDeps,
-                "MTSS scheduler not ready",
-            );
-            kso_transition(
-                KsoBootNode::SpiderRs,
-                KsoState::WaitingDeps,
-                "MTSS scheduler not ready",
-            );
-            mirage::kprintln!("PID1 HANDOFF [PENDING: MTSS scheduler not ready]");
-
             mirage::kprintln!("loading boot manifest");
             // Temporary compiled-in manifest fixture: replace this with Limine module
             // discovery or QFS-backed manifest lookup once those boot sources are
@@ -512,9 +367,6 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
                 mirage::kprintln!("MTSS [FAILED: {:?}]", error);
             }
         }
-        static SPIDER_BOOTRT_IMAGE: mirage::kernel::sync::SpinLock<[u8; 1024 * 1024]> =
-            mirage::kernel::sync::SpinLock::new([0; 1024 * 1024]);
-        let mut spider_image = SPIDER_BOOTRT_IMAGE.lock();
         let continuation = {
             let mut kso_context = KsoContext::new(
                 &boot_info,
