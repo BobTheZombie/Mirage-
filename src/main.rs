@@ -80,6 +80,10 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
     #[cfg(not(feature = "emergency-boot"))]
     {
         mirage::kprintln!("Mirage kernel booting...");
+        #[cfg(feature = "full-boot")]
+        mirage::kprintln!("BOOT MODE [FULL-BOOT]");
+        #[cfg(not(feature = "full-boot"))]
+        mirage::kprintln!("BOOT MODE [NON-FULL-BOOT: PID1 disabled]");
         if !boot_info.limine_base_revision_supported() {
             boot_phase_failed(BootPhase::BootInfo, "unsupported Limine base revision");
             mirage::kprintln!("unsupported Limine base revision");
@@ -97,6 +101,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
         mirage::kprintln!("[bootdiag] boot info apply starting");
         boot_phase_start(BootPhase::BootInfoApplied);
+        mirage::kprintln!("[bootflow 3.0] boot_info_applied: bootstrap_with_boot_info enter");
         if let Err(error) = kernel.bootstrap_with_boot_info(&boot_info) {
             boot_phase_failed(BootPhase::BootInfoApplied, "kernel boot-info apply failed");
             bootflow(
@@ -109,6 +114,7 @@ pub extern "Rust" fn kernel_main(boot_info: BootInfo) -> ! {
         }
         #[cfg(any(feature = "bootdiag-serial", feature = "bootdiag-verbose"))]
         mirage::kprintln!("[bootdiag] boot info apply returned");
+        mirage::kprintln!("[bootflow 3.9] boot_info_applied: bootstrap_with_boot_info returned ok");
         boot_phase_ok(BootPhase::BootInfoApplied);
         bootflow(3, "boot_info_applied", "ok");
         mirage::kprintln!("boot info applied");

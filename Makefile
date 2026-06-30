@@ -30,7 +30,7 @@ ISO_IMAGE := $(BUILD_DIR)/mirage.iso
 LIMINE_DIR := $(BUILD_DIR)/limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-.PHONY: all build kernel spider-rs spider-rs-clean spider-rs-check spider-rt-tree spider-rt-image validate-boot-runtime runtime-images userspace-spider-rs install-spider-rs qemu-spider qemu-kernel seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print qemu-ahci-sata qemu-ahci-atapi qemu-ahci-gpt qemu-ahci-mbr qemu-bootrt qemu-spider-bootrt qemu-spider-rt menuconfig nconfig olddefconfig
+.PHONY: all build kernel spider-rs spider-rs-clean spider-rs-check spider-rt-tree spider-rt-image validate-boot-runtime runtime-images userspace-spider-rs install-spider-rs qemu-spider qemu-kernel qemu-kernel-full seed-rs-kernel qemu-seed-image qemu-seed qemu-seed-debug image iso qemu qemu-headless qemu-debug qemu-emergency milestone-boot-screen qemu-check run-qemu run-qemu-headless run-qemu-debug smoke-x86_64-boot clean distclean limine rust-src check-rust-src target-json FORCE mirageconfig defconfig oldconfig savedefconfig listconfig checkconfig config-generate config-check config-print qemu-ahci-sata qemu-ahci-atapi qemu-ahci-gpt qemu-ahci-mbr qemu-bootrt qemu-spider-bootrt qemu-spider-rt menuconfig nconfig olddefconfig
 
 all: iso
 
@@ -205,7 +205,10 @@ kernel: config-generate rust-src check-rust-src $(TARGET_JSON)
 
 qemu-kernel: config-generate rust-src check-rust-src $(TARGET_JSON)
 	@set -eu; \
-	if [ -n "$${MIRAGE_FEATURES:-}" ]; then \
+	if [ "$${MIRAGE_FULL_BOOT:-0}" = "1" ]; then \
+		features="$${MIRAGE_FEATURES:-full-boot hw-framebuffer hw-ahci hw-i8042 hw-ps2-keyboard bootdiag-serial}"; \
+		echo "Using explicit full-boot QEMU feature mode: $$features"; \
+	elif [ -n "$${MIRAGE_FEATURES:-}" ]; then \
 		echo "Using manual MIRAGE_FEATURES override instead of mirage.conf"; \
 		features="$$MIRAGE_FEATURES"; \
 	elif [ -n "$(QEMU_FEATURES)" ]; then \
@@ -223,6 +226,9 @@ qemu-kernel: config-generate rust-src check-rust-src $(TARGET_JSON)
 		$(UNSTABLE_OPTIONS_FLAG) \
 		-Z build-std=core,alloc,compiler_builtins \
 		-Z build-std-features=compiler-builtins-mem
+
+qemu-kernel-full:
+	MIRAGE_FULL_BOOT=1 $(MAKE) qemu-kernel
 
 seed-rs-kernel: qemu-kernel
 

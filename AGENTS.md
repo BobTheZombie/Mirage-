@@ -804,3 +804,18 @@ Required rootfs userland:
 11. MTSS is PID0 and provides scheduler capabilities.
 12. Supervisor provides launch authorization capabilities.
 13. No fake OK/ONLINE/RUNNING/RUNNABLE/BOOTED states.
+
+---
+
+## Mirage QEMU PID1 Boot Contract
+
+1. Stale framebuffer UI must not be treated as source of truth over serial bootflow.
+2. Every bootflow enter marker must have an ok, skipped, pending, or failed marker.
+3. `full-boot` mode must be explicit when testing PID1.
+4. Optional devices must not block PID1.
+5. PID1 handoff requires rootfs, boot runtime, supervisor, userspace loader, and MTSS scheduler readiness.
+6. MTSS cooperative scheduler may allow PID1 if policy says so.
+7. PID1 CREATED means process object exists.
+8. PID1 RUNNABLE means MTSS accepted it into a run queue.
+9. PID1 RUNNING means userspace code actually executed.
+10. Do not print fake userspace or terminal output from the kernel.
