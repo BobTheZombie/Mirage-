@@ -366,6 +366,10 @@ impl DeviceError {
     }
 }
 
+fn device_bootflow(marker: &str) {
+    crate::arch::x86_64::uart16550::early_print(format_args!("{}\n", marker));
+}
+
 fn device_bootdiag(args: fmt::Arguments<'_>) {
     crate::arch::x86_64::uart16550::early_print(format_args!("[bootdiag] "));
     crate::arch::x86_64::uart16550::early_print(args);
@@ -503,12 +507,16 @@ impl<const MAX: usize> DeviceManager<MAX> {
         &mut self,
         boot_info: Option<&BootInfo>,
     ) -> Result<(), DeviceError> {
+        device_bootflow("[bootflow 3.1] device-manager: install_core_devices_with_boot_info enter");
         device_bootdiag_start("install_core_devices_with_boot_info");
+        device_bootflow("[bootflow 3.2] device-manager: configure_graphics_devices enter");
         match configure_graphics_devices(boot_info.and_then(|info| info.framebuffer)) {
             Ok(()) => {
+                device_bootflow("[bootflow 3.5] device-manager: configure_graphics_devices ok");
                 device_bootdiag_ok("install_core_devices_with_boot_info.configure_graphics_devices")
             }
             Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootflow("[bootflow 3.5] device-manager: configure_graphics_devices failed: fatal device error");
                 device_bootdiag_fatal(
                     "install_core_devices_with_boot_info.configure_graphics_devices",
                     error,
@@ -516,22 +524,36 @@ impl<const MAX: usize> DeviceManager<MAX> {
                 return Err(error);
             }
             Err(error) => {
+                device_bootflow("[bootflow 3.5] device-manager: configure_graphics_devices skipped: degraded optional device error");
                 device_bootdiag_degraded(
                     "install_core_devices_with_boot_info.configure_graphics_devices",
                     error,
                 );
             }
         }
+        device_bootflow("[bootflow 3.6] device-manager: configure_storage_devices enter");
+        device_bootflow("[bootflow 3.7] device-manager: configure_input_devices enter");
         match self.install_core_devices_after_graphics(boot_info) {
             Ok(()) => {
+                device_bootflow("[bootflow 3.6] device-manager: configure_storage_devices ok");
+                device_bootflow("[bootflow 3.7] device-manager: configure_input_devices ok");
+                device_bootflow(
+                    "[bootflow 3.8] device-manager: install_core_devices_with_boot_info ok",
+                );
                 device_bootdiag_ok("install_core_devices_with_boot_info");
                 Ok(())
             }
             Err(error) if error.is_fatal_during_boot_info_applied() => {
+                device_bootflow("[bootflow 3.6] device-manager: configure_storage_devices failed: fatal device error");
+                device_bootflow("[bootflow 3.7] device-manager: configure_input_devices skipped: storage/device registration failed");
+                device_bootflow("[bootflow 3.8] device-manager: install_core_devices_with_boot_info failed: fatal device error");
                 device_bootdiag_fatal("install_core_devices_with_boot_info", error);
                 Err(error)
             }
             Err(error) => {
+                device_bootflow("[bootflow 3.6] device-manager: configure_storage_devices skipped: degraded optional device error");
+                device_bootflow("[bootflow 3.7] device-manager: configure_input_devices skipped: degraded optional device error");
+                device_bootflow("[bootflow 3.8] device-manager: install_core_devices_with_boot_info skipped: degraded optional device error");
                 device_bootdiag_degraded("install_core_devices_with_boot_info", error);
                 Ok(())
             }
@@ -1179,25 +1201,43 @@ fn configure_gpu_capability_with_retry(
 
 pub fn configure_graphics_devices(framebuffer: Option<FramebufferInfo>) -> Result<(), DeviceError> {
     device_bootdiag_start("configure_graphics_devices");
+    device_bootflow("[bootflow 3.3] device-manager: framebuffer configure enter");
     device_bootdiag_start("FRAMEBUFFER_DRIVER.configure");
     match configure_framebuffer_with_retry(framebuffer) {
-        Ok(()) => device_bootdiag_ok("FRAMEBUFFER_DRIVER.configure"),
+        Ok(()) => {
+            device_bootflow("[bootflow 3.3] device-manager: framebuffer configure ok");
+            device_bootdiag_ok("FRAMEBUFFER_DRIVER.configure")
+        }
         Err(DeviceError::Busy) if FRAMEBUFFER_DRIVER.is_online() => {
+            device_bootflow(
+                "[bootflow 3.3] device-manager: framebuffer configure skipped: already online",
+            );
             device_bootdiag_degraded("FRAMEBUFFER_DRIVER.configure", DeviceError::Busy);
         }
         Err(error) => {
+            device_bootflow(
+                "[bootflow 3.3] device-manager: framebuffer configure failed: device error",
+            );
             device_bootdiag_error("FRAMEBUFFER_DRIVER.configure", error);
             return Err(error);
         }
     }
 
+    device_bootflow("[bootflow 3.4] device-manager: gpu capability configure enter");
     device_bootdiag_start("GPU_CAPABILITY_DRIVER.configure");
     match configure_gpu_capability_with_retry(framebuffer) {
-        Ok(()) => device_bootdiag_ok("GPU_CAPABILITY_DRIVER.configure"),
+        Ok(()) => {
+            device_bootflow("[bootflow 3.4] device-manager: gpu capability configure ok");
+            device_bootdiag_ok("GPU_CAPABILITY_DRIVER.configure")
+        }
         Err(DeviceError::Busy) if FRAMEBUFFER_DRIVER.is_online() => {
+            device_bootflow("[bootflow 3.4] device-manager: gpu capability configure skipped: framebuffer already online");
             device_bootdiag_degraded("GPU_CAPABILITY_DRIVER.configure", DeviceError::Busy);
         }
         Err(error) => {
+            device_bootflow(
+                "[bootflow 3.4] device-manager: gpu capability configure failed: device error",
+            );
             device_bootdiag_error("GPU_CAPABILITY_DRIVER.configure", error);
             return Err(error);
         }

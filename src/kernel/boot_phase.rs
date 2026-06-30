@@ -1363,6 +1363,17 @@ mod tests {
     }
 
     #[test]
+    fn current_phase_advances_past_framebuffer_for_boot_info_applied() {
+        let mut manager = BootPhaseManager::new();
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[BootPhase::Framebuffer as usize]);
+        manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[BootPhase::BootInfoApplied as usize]);
+        manager.transition(BootPhase::Framebuffer, PhaseState::Online, "online");
+        assert_eq!(manager.current_phase, BootPhase::Framebuffer);
+        manager.transition(BootPhase::BootInfoApplied, PhaseState::Started, "started");
+        assert_eq!(manager.current_phase, BootPhase::BootInfoApplied);
+    }
+
+    #[test]
     fn progress_does_not_reach_100_with_required_pending_state() {
         let mut manager = BootPhaseManager::new();
         manager.register(DEFAULT_SUBSYSTEM_DESCRIPTORS[48]);

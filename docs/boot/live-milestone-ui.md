@@ -28,3 +28,7 @@ The UI must not:
 Internal continuation edges such as `KernelConstructed` must remain serial-visible without synchronously gating the next boot phase. Debug shell polling is non-blocking and must not gate rootfs, supervisor, MTSS, KSO retry, or PID1 handoff.
 
 BOOTDIAG raw text is fallback/debug output. When framebuffer is online, the milestone UI remains the default display and concise high-level renderer, while detailed KSO reasons can go to serial diagnostics.
+
+## QEMU PID1 stale framebuffer rule
+
+The framebuffer milestone UI is display-only. Serial bootflow and KSO state remain the source of truth. The UI must not drive boot state, block continuation edges, or keep `CURRENT PHASE: FRAMEBUFFER` after durable later phases such as BootInfoApplied, Root FS, Supervisor, MTSS, or PID1 are recorded. Rendering is gated to safe milestone transitions and may lag during continuation edges, but it must refresh after those edges return.
